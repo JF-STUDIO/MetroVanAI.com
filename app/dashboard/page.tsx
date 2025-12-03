@@ -352,6 +352,43 @@ export default function DashboardPage() {
       return
     }
 
+    // 只允许 JPG/JPEG 和常见相机 RAW，禁止 PNG
+    const allowedExts = ['.jpg', '.jpeg', '.cr2', '.cr3', '.arw', '.nef', '.nrw', '.dng', '.raf', '.orf', '.rw2', '.srw']
+    const invalidFiles = files.filter(f => {
+      const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase()
+      return !allowedExts.includes(ext)
+    })
+
+    if (invalidFiles.length > 0) {
+      alert(
+        '目前仅支持上传 JPG/JPEG 和常见相机 RAW 格式（ARW/CR2/NEF/DNG 等），不支持 PNG 或其它格式。' +
+          '\n以下文件将不会被上传：\n' +
+          invalidFiles.map(f => '- ' + f.name).join('\n'),
+      )
+      e.target.value = ''
+      return
+    }
+ ''
+      return
+    }
+
+    // 只允许 JPG/JPEG 和常见相机 RAW，禁止 PNG
+    const allowedExts = ['.jpg', '.jpeg', '.cr2', '.cr3', '.arw', '.nef', '.nrw', '.dng', '.raf', '.orf', '.rw2', '.srw']
+    const invalidFiles = files.filter(f => {
+      const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase()
+      return !allowedExts.includes(ext)
+    })
+
+    if (invalidFiles.length > 0) {
+      alert(
+        '目前仅支持上传 JPG/JPEG 和常见相机 RAW 格式（ARW/CR2/NEF/DNG 等），不支持 PNG 或其它格式。' +
+          '\n以下文件将不会被上传：\n' +
+          invalidFiles.map(f => '- ' + f.name).join('\n'),
+      )
+      e.target.value = ''
+      return
+    }
+
     // 查询最新余额，确保有足够额度
     try {
       const { data: profile, error } = await supabase
