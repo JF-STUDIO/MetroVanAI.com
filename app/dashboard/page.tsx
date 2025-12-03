@@ -166,7 +166,8 @@ export default function DashboardPage() {
 
   async function startStripeCheckout(plan: 'payg' | 'pro_500' | 'team_1000', quantity: number = 1) {
     if (!userId) {
-      alert('用户未登录')
+      // 未登录/未注册的情况，直接跳转到注册页
+      router.push('/auth?mode=signup')
       return
     }
 
