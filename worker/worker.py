@@ -3,6 +3,7 @@ import time
 import json
 import shutil
 from pathlib import Path
+import sys
 
 from dotenv import load_dotenv
 from PIL import Image
@@ -10,18 +11,39 @@ import imageio.v2 as imageio
 import requests
 from supabase import create_client, Client
 
+# Add the directory containing raw_decoder.py to sys.path
+# This ensures that 'raw_decoder' can be found when worker.py is run directly as a script.
+worker_dir = Path(__file__).resolve().parent
+if str(worker_dir) not in sys.path:
+    sys.path.insert(0, str(worker_dir))
+
+
 # Support both package and script execution
 try:
     from .raw_decoder import is_camera_raw_suffix, decode_camera_raw_to_jpg
 except ImportError:
     from raw_decoder import is_camera_raw_suffix, decode_camera_raw_to_jpg
 
-# 从项目根目录加载 .env（如果存在）
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+# 从项目根目录和 worker 同目录加载 .env（如果存在）
+project_root_env = Path(__file__).resolve().parents[1] / ".env"
+worker_env = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=project_root_env)
+load_dotenv(dotenv_path=worker_env)
 
 # ===== 配置区 =====
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError(
+        "必须设置 SUPABASE_URL 和 SUPABASE_SERVICE_ROLE_KEY 环境变量，或者在项目根目录/worker 目录放置 .env 文件。"\
+        "\n示例 .env 内容：\n"
+        "SUPABASE_URL=https://你的-project-id.supabase.co\n"
+        "SUPABASE_SERVICE_ROLE_KEY=你的-service-role-key\n"
+        "\n在 runpod 容器里，你可以：\n"
+        "1）在 /workspace/runpod-slim/realestate-ai/.env 写入以上内容，或者\n"
+        "2）在启动/进入容器后执行：export SUPABASE_URL=... && export SUPABASE_SERVICE_ROLE_KEY=...\n"
+    )
 
 IMAGES_BUCKET = "images"
 DOWNLOAD_DIR = Path("/tmp/jobs")
@@ -32,7 +54,8 @@ COMFY_INPUT_DIR = Path(os.environ.get("COMFY_INPUT_DIR", "/workspace/runpod-slim
 COMFY_OUTPUT_DIR = Path(os.environ.get("COMFY_OUTPUT_DIR", "/workspace/runpod-slim/ComfyUI/output"))
 
 # ComfyUI workflow 配置：可以通过环境变量 COMFY_WORKFLOW_PATH 覆盖默认路径
-DEFAULT_WORKFLOW_PATH = Path(__file__).parent / "comfy_workflow.json"
+# 默认使用你导出的 FANGDICHANTIAOSE.json 工作流文件
+DEFAULT_WORKFLOW_PATH = Path(__file__).parent / "FANGDICHANTIAOSE.json"
 WORKFLOW_PATH = Path(os.environ.get("COMFY_WORKFLOW_PATH", DEFAULT_WORKFLOW_PATH))
 
 if not WORKFLOW_PATH.is_file():
@@ -50,7 +73,15 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 def log(msg: str) -> None:
-    print(msg, flush=True)
+    """打印日志，强制使用 UTF-8，避免 ascii 编码错误。"""
+    import sys
+    try:
+        # 尽量按终端编码打印
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        # 退而求其次，直接写入字节流，避免 worker 挂掉
+        sys.stdout.buffer.write((str(msg) + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.flush()
 
 
 def fetch_next_job():
@@ -264,14 +295,17 @@ def main_loop():
 
             # 扣减用户余额（每完成一张任务减 1，余额最低为 0）
             try:
-                supabase.table("profiles").update({"balance": supabase.rpc("decrement_balance", {"user_id": job["user_id"]})}).eq("id", job["user_id"]).execute()
+                # 让数据库函数 decrement_balance 自己更新余额（推荐做法），这里只调用，不再把 RPC 结果塞进 profiles.update
+                supabase.rpc("decrement_balance", {"user_id": job["user_id"]}).execute()
             except Exception as e:
                 log(f"扣减余额失败（忽略，不阻塞任务完成）: {e}")
 
             mark_done(job["id"], output_key)
             log(f"Job {job['id']} done -> {output_key}")
         except Exception as e:
-            log(f"Error in main loop: {e}")
+            import traceback
+            traceback.print_exc()
+            log(f"Error in main loop: {repr(e)}")
             if job is not None:
                 try:
                     mark_failed(job["id"], str(e))
