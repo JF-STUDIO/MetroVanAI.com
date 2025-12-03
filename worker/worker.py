@@ -193,23 +193,33 @@ def process_image(local_input: Path) -> Path:
 def upload_output(job, local_output: Path) -> str:
     """把结果图上传到 Storage，返回 output_path 字符串。
 
-    output_path 会复用 input_path 的目录结构（real-estate / replace-sky / remove-clutter / custom + 项目子目录），
-    只是在同一目录下命名为 {job_id}-output.ext，方便在 Storage 后台按文件夹查看进度。
+    规则：
+    - 目录结构完全复用 input_path（包括 real-estate / replace-sky / remove-clutter / custom + 项目子目录）。
+    - 文件名在原始文件名（去掉扩展名）的基础上加后缀 `_edited`，扩展名使用实际输出文件的扩展名。
+    例如：
+    input_path = user/{user_id}/real-estate/3756_ace/1764-DSC0153.ARW
+    -> output_path = user/{user_id}/real-estate/3756_ace/1764-DSC0153_edited.png
     """
     ext = local_output.suffix or ".png"
 
-    # 从 input_path 中抽取 user/{user_id} 后面的目录前缀
     input_path = job["input_path"]
     input_parts = input_path.split("/")
+
     # 期望格式：user/{user_id}/.../filename
-    # 我们复用 "..." 这部分作为输出目录
     if len(input_parts) >= 4 and input_parts[0] == "user" and input_parts[1] == job["user_id"]:
-        # userId 之后到倒数第一个元素（文件名）之间的所有部分
-        folder_prefix = "/".join(input_parts[2:-1])
-        output_key = f"user/{job['user_id']}/{folder_prefix}/{job['id']}-output{ext}"
+        # 目录前缀：user/{user_id}/.../（不含原始文件名）
+        folder_prefix = "/".join(input_parts[:-1])
+        # 原始文件名（不含扩展名），例如 1764-DSC0153
+        original_filename = input_parts[-1]
+        original_stem = original_filename.rsplit(".", 1)[0]
+        edited_filename = f"{original_stem}_edited{ext}"
+        output_key = f"{folder_prefix}/{edited_filename}"
     else:
-        # 兜底逻辑：保持老的扁平结构
-        output_key = f"user/{job['user_id']}/{job['id']}-output{ext}"
+        # 兜底逻辑：如果 input_path 不符合预期，就放在 user/{user_id}/ 目录下，仍然保留原始文件名 + _edited
+        original_filename = Path(input_path).name
+        original_stem = original_filename.rsplit(".", 1)[0]
+        edited_filename = f"{original_stem}_edited{ext}"
+        output_key = f"user/{job['user_id']}/{edited_filename}"
 
     log(f"Uploading result to {output_key} ...")
     with local_output.open("rb") as f:
@@ -247,6 +257,13 @@ def main_loop():
             local_in = download_input(job)
             local_out = process_image(local_in)
             output_key = upload_output(job, local_out)
+
+            # 扣减用户余额（每完成一张任务减 1，余额最低为 0）
+            try:
+                supabase.table("profiles").update({"balance": supabase.rpc("decrement_balance", {"user_id": job["user_id"]})}).eq("id", job["user_id"]).execute()
+            except Exception as e:
+                log(f"扣减余额失败（忽略，不阻塞任务完成）: {e}")
+
             mark_done(job["id"], output_key)
             log(f"Job {job['id']} done -> {output_key}")
         except Exception as e:
