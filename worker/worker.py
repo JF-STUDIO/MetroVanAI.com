@@ -10,7 +10,11 @@ import imageio.v2 as imageio
 import requests
 from supabase import create_client, Client
 
-from .raw_decoder import is_camera_raw_suffix, decode_camera_raw_to_jpg
+# Support both package and script execution
+try:
+    from .raw_decoder import is_camera_raw_suffix, decode_camera_raw_to_jpg
+except ImportError:
+    from raw_decoder import is_camera_raw_suffix, decode_camera_raw_to_jpg
 
 # 从项目根目录加载 .env（如果存在）
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")

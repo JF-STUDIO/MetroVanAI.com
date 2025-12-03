@@ -749,7 +749,12 @@ export default function DashboardPage() {
       {/* 顶部蓝条导航 */}
       <header className="border-b border-slate-800 bg-slate-950/80">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
-          <div className="flex items-center gap-2">
+          {/* 左侧：点击 Logo 可返回首页 */}
+          <button
+            type="button"
+            onClick={() => router.push('/')}
+            className="flex items-center gap-2 text-left focus:outline-none"
+          >
             <div className="flex h-8 w-8 items-center justify-center rounded-md bg-blue-500 text-white text-sm font-semibold">
               PV
             </div>
@@ -760,8 +765,16 @@ export default function DashboardPage() {
                 <span className="text-slate-300">余额：{balance}</span>
               )}
             </div>
-          </div>
-          <div className="flex items-center gap-4 text-xs text-slate-400">
+          </button>
+
+          {/* 右侧：新增“返回首页”按钮 */}
+          <div className="flex items-center gap-3 text-xs text-slate-400">
+            <button
+              onClick={() => router.push('/')}
+              className="rounded-full border border-slate-600 px-3 py-1 text-xs font-medium text-slate-100 hover:bg-slate-800"
+            >
+              返回首页
+            </button>
             <span>账号：{email}</span>
             <button
               onClick={() => setShowBilling(true)}
