@@ -39,7 +39,7 @@ export default function Home() {
   }
 
   function handleRegister() {
-    router.push('/auth')
+    router.push('/auth?mode=signup')
   }
 
   return (
@@ -49,9 +49,9 @@ export default function Home() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2">
             <div className="flex h-8 w-8 items-center justify-center rounded-md bg-blue-600 text-white text-sm font-semibold">
-              PV
+              M
             </div>
-            <span className="text-sm font-semibold text-slate-900">PropVision AI</span>
+            <span className="text-sm font-semibold text-slate-900">MetroVan AI</span>
           </div>
           <nav className="hidden items-center gap-6 text-sm text-slate-600 md:flex">
             <button className="text-slate-900 font-medium">首页</button>
@@ -74,9 +74,9 @@ export default function Home() {
             </button>
             <button
               className="rounded-full bg-blue-600 px-4 py-1.5 text-white shadow-sm hover:bg-blue-700"
-              onClick={() => router.push('/auth')}
+              onClick={handleRegister}
             >
-              注册
+              免费注册
             </button>
           </div>
         </div>
@@ -101,7 +101,7 @@ export default function Home() {
 
         {/* 副标题文案 */}
         <p className="mt-6 max-w-2xl text-sm leading-relaxed text-slate-600">
-          PropVision AI 自动处理光影、蓝天和室内杂物。上传照片，一键增强，无需专业摄影技巧。
+          MetroVan AI 自动处理光影、蓝天和室内杂物。上传照片，一键增强，无需专业摄影技巧。
         </p>
 
         {/* 按钮区域：居中排布 */}
@@ -124,9 +124,9 @@ export default function Home() {
       {/* 功能优势区域 */}
       <section className="border-t border-slate-100 bg-slate-50/60">
         <div className="mx-auto max-w-6xl px-6 py-16">
-          <h2 className="text-center text-2xl font-semibold text-slate-900">
-            为什么选择 PropVision AI?
-          </h2>
+            <h2 className="text-center text-2xl font-semibold text-slate-900">
+              为什么选择 MetroVan AI?
+            </h2>
           <p className="mt-3 text-center text-sm text-slate-600">
             专为房地产经纪人和摄影师打造的一站式 AI 修图工作流。
           </p>

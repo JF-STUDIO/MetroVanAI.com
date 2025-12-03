@@ -1,17 +1,26 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
 export default function AuthPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [username, setUsername] = useState('')
   const [mode, setMode] = useState<'login' | 'signup'>('login')
   const [message, setMessage] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+
+  // 根据 URL 参数初始化模式，例如 /auth?mode=signup 默认展示注册表单
+  useEffect(() => {
+    const initialMode = searchParams.get('mode')
+    if (initialMode === 'signup') {
+      setMode('signup')
+    }
+  }, [searchParams])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -61,10 +70,10 @@ export default function AuthPage() {
       <div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-lg">
         <div className="mb-6 text-center">
           <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white text-lg font-semibold">
-            📷
+            M
           </div>
           <h1 className="text-xl font-semibold text-slate-900 mb-1">
-            登录您的账户
+            {mode === 'login' ? '登录 MetroVan AI' : '注册 MetroVan AI'}
           </h1>
           <p className="text-xs text-slate-500">
             或者{' '}
@@ -137,9 +146,7 @@ export default function AuthPage() {
           <p className="mt-3 text-xs text-red-500 text-center">{message}</p>
         )}
 
-        <p className="mt-6 text-center text-[11px] text-slate-400">
-          演示模式：任意邮箱地址和密码即可登录。
-        </p>
+          {/* 正式环境下不再提示演示模式，如需可在此添加隐私或安全提示 */}
       </div>
     </div>
   )

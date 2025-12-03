@@ -6,9 +6,9 @@ export default function PricingPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2">
             <div className="flex h-8 w-8 items-center justify-center rounded-md bg-blue-600 text-white text-sm font-semibold">
-              PV
+              M
             </div>
-            <span className="text-sm font-semibold text-slate-900">PropVision AI</span>
+            <span className="text-sm font-semibold text-slate-900">MetroVan AI</span>
           </div>
           <nav className="hidden items-center gap-6 text-sm text-slate-600 md:flex">
             <a href="/" className="hover:text-slate-900">

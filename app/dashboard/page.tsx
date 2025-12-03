@@ -13,11 +13,36 @@ type Project = {
 type Job = {
   id: string
   input_path: string
-  status: string
+  status: 'uploaded' | 'processing' | 'done' | 'failed' | string
   created_at: string
+  updated_at?: string | null
   output_path?: string | null
   project_id?: string | null
   error_message?: string | null
+}
+
+function getProjectRemainingAndEta(projectId: string, jobs: Job[]) {
+  const projectJobs = jobs.filter(j => j.project_id === projectId)
+  const remaining = projectJobs.filter(j => j.status !== 'done').length
+
+  const finished = projectJobs.filter(j => j.status === 'done')
+  const durations = finished
+    .map(j => {
+      const start = new Date(j.created_at).getTime()
+      const end = new Date(j.updated_at ?? j.created_at).getTime()
+      return Math.max(0, (end - start) / 1000)
+    })
+    .filter(d => d > 0)
+
+  const defaultSecondsPerJob = 60 // 没有历史数据时，先按 1 分钟/张 估算
+  const avgSecondsPerJob =
+    durations.length > 0
+      ? durations.reduce((a, b) => a + b, 0) / durations.length
+      : defaultSecondsPerJob
+
+  const etaMinutes = Math.ceil((remaining * avgSecondsPerJob) / 60)
+
+  return { remaining, etaMinutes }
 }
 
 type PendingFile = {
@@ -669,13 +694,6 @@ export default function DashboardPage() {
     }
   }
 
-  const filteredJobs =
-    activeTool === 'estate'
-      ? selectedProjectId
-        ? jobs.filter(job => job.project_id === selectedProjectId)
-        : jobs
-      : jobs
-
   // 天空替换 / 去杂物 当前工具对应的任务（根据存储路径里的目录判断）
   const toolJobs =
     activeTool === 'sky' || activeTool === 'clutter'
@@ -730,7 +748,7 @@ export default function DashboardPage() {
                   onClick={() => startStripeCheckout('payg', paygQuantity)}
                   className="mt-auto w-full rounded-full bg-slate-800 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-70"
                 >
-                  {billingLoading ? '正在跳转支付...' : '立即充值（Stripe 测试）'}
+                  {billingLoading ? '正在跳转支付...' : '立即充值'}
                 </button>
               </div>
 
@@ -754,7 +772,7 @@ export default function DashboardPage() {
                   onClick={() => startStripeCheckout('pro_500', 1)}
                   className="mt-auto w-full rounded-full bg-blue-600 py-2 text-xs font-medium text-white shadow-sm hover:bg-blue-700 disabled:opacity-70"
                 >
-                  {billingLoading ? '正在跳转支付...' : '购买 500 点数（Stripe 测试）'}
+                  {billingLoading ? '正在跳转支付...' : '购买 500 点数'}
                 </button>
               </div>
 
@@ -775,7 +793,7 @@ export default function DashboardPage() {
                   onClick={() => startStripeCheckout('team_1000', 1)}
                   className="mt-auto w-full rounded-full bg-slate-800 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-70"
                 >
-                  {billingLoading ? '正在跳转支付...' : '购买 1000 点数（Stripe 测试）'}
+                  {billingLoading ? '正在跳转支付...' : '购买 1000 点数'}
                 </button>
               </div>
             </div>
@@ -793,10 +811,10 @@ export default function DashboardPage() {
             className="flex items-center gap-2 text-left focus:outline-none"
           >
             <div className="flex h-8 w-8 items-center justify-center rounded-md bg-blue-500 text-white text-sm font-semibold">
-              PV
+              M
             </div>
             <div className="flex flex-col text-xs leading-tight">
-              <span className="font-semibold text-slate-50">PropVision AI</span>
+              <span className="font-semibold text-slate-50">MetroVan AI</span>
               <span className="text-slate-400">AI 工作室</span>
               {balance !== null && (
                 <span className="text-slate-300">余额：{balance}</span>
