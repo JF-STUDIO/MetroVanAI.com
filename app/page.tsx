@@ -10,6 +10,7 @@ export default function Home() {
   const [checkingUser, setCheckingUser] = useState(true)
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [showWelcome, setShowWelcome] = useState(false)
+  const [lang, setLang] = useState<'en' | 'zh'>('en')
 
   // 对比滑块状态
   const [sliderPercent, setSliderPercent] = useState(50)
@@ -42,6 +43,15 @@ export default function Home() {
     router.push('/auth?mode=signup')
   }
 
+  const heroTitle1 =
+    lang === 'en' ? 'Turn everyday listing photos into eye‑catching hero shots' : '只需一张正常曝光照片'
+  const heroTitle2 =
+    lang === 'en' ? 'MetroVan AI for real estate photos in Metro Vancouver' : '即可获得完美房产大片'
+  const heroSub =
+    lang === 'en'
+      ? 'MetroVan AI automatically balances exposure, fixes skies, and cleans up rooms for Metro Vancouver real estate agents.'
+      : 'MetroVan AI 自动处理光影、蓝天和室内杂物。上传照片，一键增强，无需专业摄影技巧。'
+
   return (
     <div className="min-h-screen bg-white text-slate-900">
       {/* 顶部导航 */}
@@ -54,29 +64,27 @@ export default function Home() {
             <span className="text-sm font-semibold text-slate-900">MetroVan AI</span>
           </div>
           <nav className="hidden items-center gap-6 text-sm text-slate-600 md:flex">
-            <button className="text-slate-900 font-medium">首页</button>
+            <button className="text-slate-900 font-medium">
+              {lang === 'en' ? 'Home' : '首页'}
+            </button>
             <button className="hover:text-slate-900" onClick={handleEditClick}>
-              AI工作室
+              {lang === 'en' ? 'AI Studio' : 'AI工作室'}
             </button>
             <button
               className="hover:text-slate-900"
               onClick={() => router.push('/pricing')}
             >
-              充值中心
-            </button>
-          </nav>
-          <div className="flex items-center gap-2 text-sm">
-            <button
+              {lang === 'en            <button
               className="rounded-full px-3 py-1 text-slate-600 hover:bg-slate-50"
               onClick={() => router.push('/auth')}
             >
-              登录
+              {lang === 'en' ? 'Sign in' : '登录'}
             </button>
             <button
               className="rounded-full bg-blue-600 px-4 py-1.5 text-white shadow-sm hover:bg-blue-700"
               onClick={handleRegister}
             >
-              免费注册
+              {lang === 'en' ? 'Sign up for free' : '免费注册'}
             </button>
           </div>
         </div>
@@ -92,16 +100,16 @@ export default function Home() {
         {/* 主标题两行，第二行渐变色 */}
         <div className="mt-6 space-y-3">
           <h1 className="text-4xl font-bold leading-snug text-slate-900 md:text-5xl">
-            只需一张正常曝光照片
+            {heroTitle1}
           </h1>
           <h2 className="bg-gradient-to-r from-[#2551ff] via-[#574bff] to-[#8b5cf6] bg-clip-text text-4xl font-bold leading-snug text-transparent md:text-5xl">
-            即可获得完美房产大片
+            {heroTitle2}
           </h2>
         </div>
 
         {/* 副标题文案 */}
         <p className="mt-6 max-w-2xl text-sm leading-relaxed text-slate-600">
-          MetroVan AI 自动处理光影、蓝天和室内杂物。上传照片，一键增强，无需专业摄影技巧。
+          {heroSub}
         </p>
 
         {/* 按钮区域：居中排布 */}
@@ -110,13 +118,13 @@ export default function Home() {
             onClick={handleEditClick}
             className="inline-flex items-center justify-center rounded-full bg-[#2551ff] px-7 py-2.5 font-medium text-white shadow-sm shadow-[#2551ff]/40 hover:bg-[#1f45e0] hover:shadow-md transition-all"
           >
-            立即免费试用
+            {lang === 'en' ? 'Start free trial' : '立即免费试用'}
           </button>
           <button
             onClick={() => router.push('/pricing')}
             className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-7 py-2.5 font-medium text-slate-700 hover:bg-slate-50"
           >
-            查看价格方案
+            {lang === 'en' ? 'View pricing' : '查看价格方案'}
           </button>
         </div>
       </main>
@@ -125,11 +133,13 @@ export default function Home() {
       <section className="border-t border-slate-100 bg-slate-50/60">
         <div className="mx-auto max-w-6xl px-6 py-16">
             <h2 className="text-center text-2xl font-semibold text-slate-900">
-              为什么选择 MetroVan AI?
+              {lang === 'en' ? 'Why choose MetroVan AI?' : '为什么选择 MetroVan AI?'}
             </h2>
-          <p className="mt-3 text-center text-sm text-slate-600">
-            专为房地产经纪人和摄影师打造的一站式 AI 修图工作流。
-          </p>
+            <p className="mt-3 text-center text-sm text-slate-600">
+              {lang === 'en'
+                ? 'A dedicated AI workflow for real estate agents and photographers in Metro Vancouver.'
+                : '专为房地产经纪人和摄影师打造的一站式 AI 修图工作流。'}
+            </p>
 
           <div className="mt-10 grid gap-6 md:grid-cols-3">
             {/* 卡片 1 */}
@@ -138,9 +148,13 @@ export default function Home() {
                 <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 text-violet-500 mb-4">
                   ✏️
                 </div>
-                <h3 className="text-sm font-semibold text-slate-900 mb-2">房地产修图</h3>
+                <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                  {lang === 'en' ? 'Real estate photo enhancement' : '房地产修图'}
+                </h3>
                 <p className="text-xs leading-relaxed text-slate-600">
-                  普通手机照片也能一键平衡曝光、提亮阴影，还原窗外景色，营造专业大片质感。
+                  {lang === 'en'
+                    ? 'Even phone photos can be automatically balanced, brightened, and made listing-ready with natural window views.'
+                    : '普通手机照片也能一键平衡曝光、提亮阴影，还原窗外景色，营造专业大片质感。'}
                 </p>
               </div>
             </div>
@@ -151,9 +165,13 @@ export default function Home() {
                 <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-sky-50 text-sky-500 mb-4">
                   📷
                 </div>
-                <h3 className="text-sm font-semibold text-slate-900 mb-2">一键蓝天置换</h3>
+                <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                  {lang === 'en' ? 'One-click sky replacement' : '一键蓝天置换'}
+                </h3>
                 <p className="text-xs leading-relaxed text-slate-600">
-                  阴天秒变晴天，AI 自动识别天空区域并替换为通透蓝天白云，显著提升外立面吸引力。
+                  {lang === 'en'
+                    ? 'Turn grey skies into clear blue instantly. AI detects sky regions and swaps in bright, appealing skies.'
+                    : '阴天秒变晴天，AI 自动识别天空区域并替换为通透蓝天白云，显著提升外立面吸引力。'}
                 </p>
               </div>
             </div>
@@ -164,9 +182,13 @@ export default function Home() {
                 <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-amber-50 text-amber-500 mb-4">
                   ⚡
                 </div>
-                <h3 className="text-sm font-semibold text-slate-900 mb-2">极速交付</h3>
+                <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                  {lang === 'en' ? 'Fast turnaround' : '极速交付'}
+                </h3>
                 <p className="text-xs leading-relaxed text-slate-600">
-                  无需等待人工修图，几秒内即可批量生成成片，帮助你更快上架房源。
+                  {lang === 'en'
+                    ? 'Skip the manual editing queue. Generate polished sets in seconds and get listings online faster.'
+                    : '无需等待人工修图，几秒内即可批量生成成片，帮助你更快上架房源。'}
                 </p>
               </div>
             </div>
@@ -179,7 +201,9 @@ export default function Home() {
         <div className="mx-auto flex max-w-6xl flex-col gap-10 px-6 py-16 md:flex-row md:items-center">
           {/* 左侧文案 */}
           <div className="md:w-2/5 space-y-4">
-            <h2 className="text-2xl font-semibold text-slate-900">效果对比演示</h2>
+            <h2 className="text-2xl font-semibold text-slate-900">
+              {lang === 'en' ? 'Before/after comparison' : '效果对比演示'}
+            </h2>
             <ul className="space-y-2 text-sm text-slate-700">
               <li>· 昏暗光线自动修复</li>
               <li>· 杂乱物品智能移除</li>
