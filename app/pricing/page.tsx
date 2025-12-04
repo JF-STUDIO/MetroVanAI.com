@@ -61,12 +61,12 @@ export default function PricingPage() {
               className="mb-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
             <div className="mb-4 text-sm font-medium text-slate-900">总计金额 $3.00</div>
-            <button
+            <a
+              href="/auth?mode=signup"
               className="mt-auto inline-flex items-center justify-center rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-black"
-              onClick={() => (window.location.href = '/auth?mode=signup')}
             >
               立即充值
-            </button>
+            </a>
             <ul className="mt-4 space-y-1 text-xs text-slate-500">
               <li>· 自定义购买数量</li>
               <li>· 无最低消费限制</li>
@@ -86,12 +86,12 @@ export default function PricingPage() {
               </div>
               <div className="text-xs text-green-600">单价 $0.25 / 张（省 17%）</div>
             </div>
-            <button
+            <a
+              href="/auth?mode=signup"
               className="mt-4 inline-flex items-center justify-center rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-              onClick={() => (window.location.href = '/auth?mode=signup')}
             >
               购买 500 点数
-            </button>
+            </a>
             <ul className="mt-4 space-y-1 text-xs text-slate-600">
               <li>· 含约 500 张修图额度</li>
               <li>· 优先处理通道</li>
@@ -109,12 +109,12 @@ export default function PricingPage() {
               </div>
               <div className="text-xs text-green-600">单价 $0.20 / 张（省 33%）</div>
             </div>
-            <button
+            <a
+              href="/auth?mode=signup"
               className="mt-4 inline-flex items-center justify-center rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-black"
-              onClick={() => (window.location.href = '/auth?mode=signup')}
             >
               购买 1000 点数
-            </button>
+            </a>
             <ul className="mt-4 space-y-1 text-xs text-slate-600">
               <li>· 含约 1000 张修图额度</li>
               <li>· 精准并发处理</li>
