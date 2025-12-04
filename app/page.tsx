@@ -271,9 +271,6 @@ export default function Home() {
                 </div>
               </div>
             </div>
-            <p className="mt-3 text-[11px] text-slate-400">
-              * 请将示例图片命名为 <code className="rounded bg-slate-100 px-1 py-0.5">demo-before.jpg</code> 和 <code className="rounded bg-slate-100 px-1 py-0.5">demo-after.jpg</code> 放到 <code className="rounded bg-slate-100 px-1 py-0.5">public/</code> 目录。
-            </p>
           </div>
         </div>
       </section>
@@ -296,7 +293,7 @@ export default function Home() {
                 <span className="text-xl">✨</span>
               </div>
               <h2 className="mb-2 text-lg font-semibold text-slate-900">
-                欢迎体验 PropVision AI
+                欢迎体验 MetroVan AI
               </h2>
               <p className="mb-1 text-xs text-blue-600 font-medium">
                 3 张免费修图额度已发放！
