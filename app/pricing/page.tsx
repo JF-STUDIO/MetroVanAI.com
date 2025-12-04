@@ -36,7 +36,7 @@ export default function PricingPage() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-6 py-16">
+      <main className="mx-auto max-w-5xl px-4 md:px-6 py-10 pb-24">
         <div className="mb-10 text-center">
           <h1 className="mb-2 text-3xl font-semibold">简单的定价，按需购买</h1>
           <p className="text-sm text-slate-600">

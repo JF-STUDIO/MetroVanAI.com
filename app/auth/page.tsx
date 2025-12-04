@@ -104,10 +104,11 @@ function AuthInner() {
               <input
                 type="text"
                 required
-                placeholder="请输入用户名"
+                placeholder={lang === 'en' ? 'Your name' : '用户名'}
                 value={username}
                 onChange={e => setUsername(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1"
+              />
               />
             </div>
           )}
@@ -118,10 +119,10 @@ function AuthInner() {
             <input
               type="email"
               required
-              placeholder="name@example.com"
+              placeholder={lang === 'en' ? 'you@example.com' : 'name@example.com'}
               value={email}
               onChange={e => setEmail(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1"
             />
           </div>
           <div>
@@ -131,10 +132,10 @@ function AuthInner() {
             <input
               type="password"
               required
-              placeholder="请输入密码"
+              placeholder={lang === 'en' ? 'Password' : '请输入密码'}
               value={password}
               onChange={e => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1"
             />
           </div>
           <button

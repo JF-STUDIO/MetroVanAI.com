@@ -828,9 +828,9 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-6xl gap-4 px-4 py-4 md:px-6">
+      <main className="mx-auto flex max-w-6xl flex-col md:flex-row gap-4 px-4 py-4 md:px-6">
         {/* 左侧：图像工具 + 营销生成 */}
-        <aside className="flex w-72 flex-col gap-4 rounded-2xl bg-slate-900/80 p-4 border border-slate-800">
+        <aside className="flex w-full md:w-72 flex-col gap-4 rounded-2xl bg-slate-900/80 p-4 border border-slate-800">
           <div className="mb-1 text-xs font-semibold text-slate-300">图像工具</div>
           <div className="space-y-2 text-xs">
             <button
@@ -912,7 +912,7 @@ export default function DashboardPage() {
         </aside>
 
         {/* 右侧主画布 + 任务列表 */}
-        <section className="flex flex-1 flex-col gap-4">
+        <section className="flex-1 flex flex-col gap-4 mt-4 md:mt-0">
           {/* 天空替换 / 智能去杂物：大框上传 + 简洁任务状态 */}
           {(activeTool === 'sky' || activeTool === 'clutter') && (
             <div className="flex flex-1 flex-col rounded-2xl border border-slate-800 bg-slate-900/80 p-6 text-xs">
