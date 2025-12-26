@@ -2,8 +2,25 @@ import { Router } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabaseAdmin } from '../services/supabase';
 import { r2Client, BUCKET_NAME } from '../services/r2';
-import { PutObjectCommand, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+>>>>>>> SEARCH
+router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest, res) => {
+  const { jobId } = req.params;
+  const { files } = req.body; // [{ name: string, type: string }]
+  const userId = req.user?.id;
+
+  const results = await Promise.all(files.map(async (file: any) => {
+    const assetId = uuidv4();
+    const ext = file.name.split('.').pop();
+router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest, res) => {
+  const { jobId } = req.params;
+  const { files }: { files: {name: string, type: string}[] } = req.body;
+  const userId = req.user?.id;
+
+  const results = await Promise.all(files.map(async (file) => {
+    const assetId = uuidv4();
+    const ext = file.name.split('.').pop() || '';
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
@@ -23,12 +40,16 @@ router.get('/tools', async (req, res) => {
 
 // 2. 创建任务
 router.post('/jobs', authenticate, async (req: AuthRequest, res) => {
-  const { toolId } = req.body;
+  const { toolId, projectName } = req.body;
   const userId = req.user?.id;
+
+  if (!projectName) {
+    return res.status(400).json({ error: 'Project name is required' });
+  }
 
   const { data, error } = await supabaseAdmin
     .from('jobs')
-    .insert({ user_id: userId, tool_id: toolId, status: 'pending' })
+    .insert({ user_id: userId, tool_id: toolId, project_name: projectName, status: 'pending' })
     .select()
     .single();
 

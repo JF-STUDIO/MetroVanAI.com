@@ -15,17 +15,21 @@ export interface PhotoTool {
   point_cost: number;
   preview_url?: string;
   is_active?: boolean;
+  preview_original?: string;
+  preview_processed?: string;
 }
 
 export interface Job {
   id: string;
   user_id: string;
   tool_id: string;
+  project_name?: string;
   status: 'pending' | 'queued' | 'processing' | 'completed' | 'failed';
   error_message?: string;
   zip_key?: string;
   expires_at?: string;
   created_at: string;
+  photo_tools: { name: string }; // For joins
 }
 
 export interface JobAsset {

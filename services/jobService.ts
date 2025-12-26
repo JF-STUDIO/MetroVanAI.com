@@ -22,8 +22,8 @@ export const jobService = {
     return response.data;
   },
 
-  createJob: async (toolId: string) => {
-    const response = await api.post('/jobs', { toolId });
+  createJob: async (toolId: string, projectName: string) => {
+    const response = await api.post('/jobs', { toolId, projectName });
     return response.data;
   },
 

@@ -10,6 +10,19 @@ CREATE TABLE photo_tools (
     input_node_key TEXT NOT NULL DEFAULT 'input_image',
     point_cost INTEGER NOT NULL DEFAULT 1,
     preview_url TEXT,
+    preview_original TEXT,
+    preview_processed TEXT,
+>>>>>>> SEARCH
+-- 种子数据
+INSERT INTO photo_tools (name, description, workflow_id, input_node_key, point_cost, preview_url)
+VALUES 
+('Raw Retouch Pro', '专业级RAW格式照片优化，增强色彩与细节', 'wf_raw_001', 'main_input', 5, 'https://placehold.co/600x400?text=Raw+Retouch'),
+('Batch AI Upscaler', '批量AI无损放大，提升分辨率', 'wf_upscale_001', 'image_input', 2, 'https://placehold.co/600x400?text=AI+Upscaler');
+-- 种子数据
+INSERT INTO photo_tools (name, description, workflow_id, input_node_key, point_cost, preview_original, preview_processed)
+VALUES 
+('Real Estate Retouch', 'Professional AI photo optimization for property photography.', 'wf_raw_001', 'main_input', 1, '/previews/real-estate-before.jpg', '/previews/real-estate-after.jpg'),
+('Architecture Day to Night', 'Transform architectural photos from daylight to stunning evening shots.', 'wf_upscale_001', 'image_input', 1, null, null);
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -20,6 +33,7 @@ CREATE TABLE jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL, -- 对应 auth.users
     tool_id UUID REFERENCES photo_tools(id),
+    project_name TEXT, -- 新增的项目名称/地址字段
     status TEXT NOT NULL DEFAULT 'pending', -- pending, queued, processing, completed, failed
     error_message TEXT,
     zip_key TEXT,
