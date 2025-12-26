@@ -1,0 +1,73 @@
+services:
+  # 1. 后端 API 服务
+  - type: web
+    name: metrovan-server
+    env: node
+    plan: free
+    buildCommand: cd server && npm install && npm run build
+    startCommand: cd server && npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        value: wangzhan
+      - key: R2_PUBLIC_DOMAIN
+        sync: false
+      - key: RUNNINGHUB_API_KEY
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: metrovan-redis
+          property: connectionString
+
+  # 2. 后台 Worker 服务 (处理队列)
+  - type: worker
+    name: metrovan-worker
+    env: node
+    plan: free
+    buildCommand: cd server && npm install && npm run build
+    startCommand: cd server && npm run worker
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: metrovan-redis
+          property: connectionString
+      # Worker 也需要所有其他环境变量
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        value: wangzhan
+      - key: RUNNINGHUB_API_KEY
+        sync: false
+
+  # 3. Redis 服务
+  - type: redis
+    name: metrovan-redis
+    plan: free
+    ipAllowList: [] # 仅允许内部服务访问

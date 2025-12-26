@@ -1,15 +1,16 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { PhotoTool, User, Job } from '../types';
+import { PhotoTool, User, Job, JobAsset } from '../types';
 import { jobService } from '../services/jobService';
 import axios from 'axios';
 
+// Props for the main component
 interface EditorProps {
   user: User;
-  tool: PhotoTool;
-  job: Job;
+  tools: PhotoTool[];
   onUpdateUser: (user: User) => void;
 }
 
+// Data structure for an image being processed
 interface ImageItem {
   id: string; 
   file: File;
@@ -17,10 +18,9 @@ interface ImageItem {
   status: 'pending' | 'uploading' | 'processing' | 'done' | 'failed';
   progress: number;
   statusText?: string;
-  r2Key?: string;
-  putUrl?: string;
 }
 
+// The auto-playing, aspect-ratio-correct slider component
 const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ original, processed }) => {
   const [sliderPos, setSliderPos] = useState(50);
   const [isAnimating, setIsAnimating] = useState(true);
@@ -72,205 +72,280 @@ const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ o
   );
 };
 
-const Editor: React.FC<EditorProps> = ({ user, tool, job, onUpdateUser }) => {
+// Main Editor Component with multiple views
+const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
+  const [activeTool, setActiveTool] = useState<PhotoTool | null>(null);
+  const [showProjectInput, setShowProjectInput] = useState(false);
   const [images, setImages] = useState<ImageItem[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const [jobStatus, setJobStatus] = useState<string>(job.status);
+  const [job, setJob] = useState<Job | null>(null);
+  const [projectName, setProjectName] = useState('');
+  const [jobStatus, setJobStatus] = useState('idle');
   const [zipUrl, setZipUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   // Poll for job status
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    
-    // Initial fetch to load existing assets if returning to a job
-    const fetchJobData = async () => {
-        try {
-            const jobData = await jobService.getJobStatus(job.id);
-            setJobStatus(jobData.status);
-            // Here you would typically map existing assets to images state
-            // For now, we focus on status updates
-            if (jobData.status === 'completed') {
-                const { url } = await jobService.getPresignedDownloadUrl(job.id);
-                setZipUrl(url);
-            }
-        } catch (error) {
-            console.error("Failed to fetch job data", error);
-        }
-    };
-    fetchJobData();
+    if (!(job && jobStatus === 'processing')) return;
 
-    if (jobStatus === 'processing' || jobStatus === 'pending') {
-      timer = setInterval(async () => {
-        try {
-          const jobData = await jobService.getJobStatus(job.id);
-          setJobStatus(jobData.status);
-          
-          // Update image statuses based on job assets
-          setImages(prev => prev.map(img => {
-              const serverAsset = jobData.job_assets.find((a: any) => a.id === img.id);
-              if (serverAsset) {
-                  return {
-                      ...img,
-                      status: serverAsset.status === 'processed' ? 'done' : 
-                              serverAsset.status === 'failed' ? 'failed' : 'processing',
-                      progress: serverAsset.status === 'processed' ? 100 : 50
-                  };
-              }
-              return img;
-          }));
+    const timer = setInterval(async () => {
+      try {
+        const jobData = await jobService.getJobStatus(job.id);
+        setJobStatus(jobData.status);
 
-          if (jobData.status === 'completed') {
-            clearInterval(timer);
-            const { url } = await jobService.getPresignedDownloadUrl(job.id);
-            setZipUrl(url);
-            const profile = await jobService.getProfile();
-            onUpdateUser({ ...user, points: profile.points });
-          } else if (jobData.status === 'failed') {
-            clearInterval(timer);
+        setImages(prev => prev.map(img => {
+          const serverAsset = jobData.job_assets.find((a: JobAsset) => a.id === img.id);
+          if (serverAsset) {
+            return {
+              ...img,
+              status: serverAsset.status === 'processed' ? 'done' : 
+                      serverAsset.status === 'failed' ? 'failed' : 'processing',
+              progress: serverAsset.status === 'processed' ? 100 : 50,
+            };
           }
-        } catch (err) {
-          console.error('Polling error:', err);
-        }
-      }, 3000);
-    }
-    return () => clearInterval(timer);
-  }, [job.id, jobStatus, onUpdateUser, user]);
+          return img;
+        }));
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []) as File[];
+        if (jobData.status === 'completed') {
+          clearInterval(timer);
+          const { url } = await jobService.getPresignedDownloadUrl(job.id);
+          setZipUrl(url);
+          const profile = await jobService.getProfile();
+          onUpdateUser({ ...user, points: profile.points });
+        } else if (jobData.status === 'failed') {
+          clearInterval(timer);
+        }
+      } catch (err) { console.error('Polling error:', err); }
+    }, 3000);
+
+    return () => clearInterval(timer);
+  }, [job, jobStatus, onUpdateUser, user]);
+
+  // Unified file handler for both click and drop
+  const processFiles = (fileList: FileList | null) => {
+    const files = Array.from(fileList || []);
     if (files.length === 0) return;
 
     const newItems: ImageItem[] = files.map(file => ({
-      id: Math.random().toString(36).substr(2, 9),
+      id: Math.random().toString(36).substring(2, 9),
       file,
       preview: URL.createObjectURL(file),
       status: 'pending',
       progress: 0,
-      statusText: 'Ready'
+      statusText: 'Ready',
     }));
-
     setImages(prev => [...prev, ...newItems]);
-    if (activeIndex === null && newItems.length > 0) setActiveIndex(images.length);
+    if (activeIndex === null) setActiveIndex(images.length - 1 + newItems.length);
   };
 
-  const startBatchProcess = async () => {
-    if (images.length === 0) return;
+  // Handle new files from input click
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    processFiles(e.target.files);
+  };
 
-    const totalCost = images.length * tool.point_cost;
-    if (user.points < totalCost) {
-      alert(`Insufficient points! Needed: ${totalCost}, You have: ${user.points}`);
-      return;
-    }
+  // Drag and Drop handlers
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+    processFiles(e.dataTransfer.files);
+  };
+
+
+  // Main batch processing logic
+  const startBatchProcess = async () => {
+    if (!activeTool || images.length === 0 || !job) return alert('Error: Missing job details.');
+
+    const totalCost = images.length * activeTool.point_cost;
+    if (user.points < totalCost) return alert(`Insufficient points! Needed: ${totalCost}, You have: ${user.points}`);
 
     try {
       setJobStatus('uploading');
+      const presignedData: { assetId: string, putUrl: string, fileName: string }[] = await jobService.getPresignedUploadUrls(job.id, images.map(img => ({ name: img.file.name, type: img.file.type })));
       
-      // Get presigned URLs for the existing job
-      const presignedData = await jobService.getPresignedUploadUrls(job.id, images.map(img => ({
-        name: img.file.name,
-        type: img.file.type
-      })));
+      await Promise.all(images.map(async (img) => {
+        const presignInfo = presignedData.find((p) => p.fileName === img.file.name);
+        if (!presignInfo) return;
 
-      const updatedImages = [...images];
-      await Promise.all(presignedData.map(async (data: any, index: number) => {
-        // Simple mapping assumption: presignedData order matches images order because we sent them in order. 
-        // Better robustness: match by filename if possible, but index is okay for this context.
-        const img = updatedImages[index]; 
-        if (!img) return;
-
-        img.id = data.assetId;
+        img.id = presignInfo.assetId;
         img.status = 'uploading';
         
-        await axios.put(data.putUrl, img.file, {
+        await axios.put(presignInfo.putUrl, img.file, {
           headers: { 'Content-Type': img.file.type },
           onUploadProgress: (progressEvent) => {
             const total = progressEvent.total || 1;
             img.progress = Math.round((progressEvent.loaded * 100) / total);
-            setImages([...updatedImages]);
+            setImages(prev => [...prev]);
           }
         });
         
         img.status = 'processing';
         img.statusText = 'Uploaded';
-        setImages([...updatedImages]);
+        setImages(prev => [...prev]);
       }));
 
       await jobService.commitJob(job.id);
       setJobStatus('processing');
-
-    } catch (err: any) {
-      alert('Upload failed: ' + err.message);
+    } catch (err) {
+      if (err instanceof Error) {
+        alert('Upload failed: ' + err.message);
+      } else {
+        alert('An unknown upload error occurred.');
+      }
       setJobStatus('idle');
     }
   };
 
-  const downloadZip = () => {
-    if (zipUrl) window.location.href = zipUrl;
+  // UI Flow Handlers
+  const handleSelectTool = (tool: PhotoTool) => {
+    setActiveTool(tool);
+    setShowProjectInput(true);
+  };
+  
+  const handleProjectCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!projectName || !activeTool) return;
+    try {
+      const newJob = await jobService.createJob(activeTool.id, projectName);
+      setJob(newJob);
+      setJobStatus(newJob.status)
+      setShowProjectInput(false);
+    } catch (error) {
+      if (error instanceof Error) {
+        alert("Failed to create project: " + error.message);
+      } else {
+        alert('An unknown error occurred while creating the project.');
+      }
+    }
   };
 
-  const currentImage = activeIndex !== null ? images[activeIndex] : null;
+  // VIEW 1: Tool Selector
+  if (!activeTool) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] px-8 py-12">
+        <div className="max-w-7xl mx-auto mb-12 text-center text-white">
+          <h1 className="text-5xl font-black mb-2 uppercase tracking-tighter">Pro Studio Engines</h1>
+          <p className="font-medium opacity-40">Batch processing with R2 & RunningHub</p>
+        </div>
+        <div className="max-w-[1200px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-10">
+          {tools.map(tool => (
+            <div key={tool.id} className="glass rounded-[2.5rem] p-8 flex flex-col group transition-all hover:scale-[1.01] border border-white/5">
+              <div className="aspect-[3/2] mb-6 rounded-2xl overflow-hidden bg-black/40">
+                {tool.preview_original && tool.preview_processed ? (
+                  <ComparisonSlider original={tool.preview_original} processed={tool.preview_processed} />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-gray-700 font-bold uppercase tracking-widest text-[10px]">Preview Not Available</div>
+                )}
+              </div>
+              <h3 className="text-2xl font-black text-white mb-2 uppercase tracking-tight">{tool.name}</h3>
+              <p className="text-sm text-gray-500 mb-8 line-clamp-2">{tool.description}</p>
+              <div className="mt-auto flex items-center justify-between pt-6 border-t border-white/5">
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl font-black text-indigo-400">{tool.point_cost}</span>
+                  <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Pts</span>
+                </div>
+                <button onClick={() => handleSelectTool(tool)} className="gradient-btn text-white px-8 py-3 rounded-2xl text-xs font-black uppercase tracking-widest shadow-lg">Open Engine</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
+  // VIEW 2: Project Creation Form
+  if (showProjectInput) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center px-8">
+        <div className="glass w-full max-w-lg p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
+          <div className="text-center mb-10">
+            <h2 className="text-3xl font-black mb-2 uppercase tracking-tighter">Create New Project</h2>
+            <p className="text-gray-500">Enter the property address to begin.</p>
+          </div>
+          <form onSubmit={handleProjectCreate} className="space-y-6">
+            <div>
+              <label className="block text-[10px] font-bold text-gray-500 uppercase mb-2 tracking-widest pl-1">Property Address</label>
+              <input type="text" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none focus:border-indigo-500" placeholder="e.g., 123 Main St, Vancouver, BC" value={projectName} onChange={e => setProjectName(e.target.value)} />
+            </div>
+            <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg active:scale-95 transition">Create Project</button>
+          </form>
+           <button onClick={() => { setActiveTool(null); setShowProjectInput(false); }} className="w-full mt-4 text-xs text-gray-500 hover:text-white">Cancel</button>
+        </div>
+      </div>
+    );
+  }
+
+  // VIEW 3: Main Uploader & Editor
+  const currentImage = activeIndex !== null ? images[activeIndex] : null;
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button 
-            onClick={() => window.location.reload()} // Simple way to go back to list for now, or pass a handler
-            className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400 hover:text-white transition-colors"
-          >
+          <button onClick={() => { setActiveTool(null); setImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
             <i className="fa-solid fa-arrow-left"></i>
           </button>
           <div>
-            <h2 className="font-bold text-white text-sm uppercase">{job.project_name || 'Untitled Project'}</h2>
+            <h2 className="font-bold text-white text-sm uppercase">{projectName}</h2>
             <div className="flex items-center gap-2">
-                <p className="text-[9px] text-indigo-400 font-black tracking-widest uppercase">{jobStatus}</p>
-                <span className="text-[9px] text-gray-600 font-bold">| {tool.name}</span>
+              <p className="text-[9px] text-indigo-400 font-black tracking-widest uppercase">{jobStatus}</p>
+              <span className="text-[9px] text-gray-600 font-bold">| Balance: {user.points} Pts</span>
             </div>
           </div>
         </div>
-
         <div className="flex items-center gap-4">
-           {jobStatus === 'completed' && (
-             <button onClick={downloadZip} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
-                Download ZIP <i className="fa-solid fa-file-zipper"></i>
-             </button>
-           )}
-           <button 
-              onClick={startBatchProcess}
-              disabled={images.length === 0 || (jobStatus !== 'idle' && jobStatus !== 'pending')}
-              className="px-8 py-2.5 rounded-full bg-indigo-500 text-white text-xs font-black uppercase tracking-widest disabled:opacity-30 flex items-center gap-2 transition"
-           >
-             {jobStatus === 'idle' || jobStatus === 'pending' ? 'Start Batch Process' : 'Processing...'}
-             <i className="fa-solid fa-bolt-lightning"></i>
-           </button>
+          {jobStatus === 'completed' && (<button onClick={() => { if(zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">Download ZIP <i className="fa-solid fa-file-zipper"></i></button>)}
+          <button onClick={startBatchProcess} disabled={images.length === 0 || (jobStatus !== 'idle' && jobStatus !== 'pending')} className="px-8 py-2.5 rounded-full bg-indigo-500 text-white text-xs font-black uppercase tracking-widest disabled:opacity-30 flex items-center gap-2 transition">
+            {jobStatus === 'idle' || jobStatus === 'pending' ? 'Start Batch Process' : 'Processing...'}
+            <i className="fa-solid fa-bolt-lightning"></i>
+          </button>
         </div>
       </div>
-
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 p-8 flex flex-col overflow-hidden">
           {!currentImage ? (
-            <div onClick={() => fileInputRef.current?.click()} className="flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border-dashed border-2 border-white/5 cursor-pointer hover:bg-white/5 transition-colors">
-              <i className="fa-solid fa-cloud-arrow-up text-4xl text-indigo-500 mb-6"></i>
-              <h3 className="text-2xl font-black text-white uppercase tracking-tighter">Upload Photos</h3>
-              <p className="text-gray-500 text-sm mt-2">Drag & drop or click to browse</p>
-              <p className="text-xs text-gray-600 mt-4 font-mono">SUPPORTED: RAW, JPG, PNG</p>
+            <div 
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border-dashed border-2 transition-colors ${isDragging ? 'border-indigo-500 bg-indigo-500/10' : 'border-white/5'}`}
+            >
+              <div className="text-center">
+                <i className="fa-solid fa-cloud-arrow-up text-4xl text-indigo-500 mb-6"></i>
+                <h3 className="text-2xl font-black text-white uppercase tracking-tighter">Drop your photos here</h3>
+                <p className="text-gray-500 text-sm mt-2">or</p>
+                <button 
+                  onClick={() => fileInputRef.current?.click()}
+                  className="mt-4 px-6 py-2 bg-white/10 text-white font-bold rounded-lg hover:bg-white/20 transition-colors"
+                >
+                  Browse Files
+                </button>
+                <p className="text-xs text-gray-600 mt-6 font-mono">SUPPORTED: RAW, JPG, PNG</p>
+              </div>
             </div>
           ) : (
             <div className="flex-1 relative glass rounded-[3rem] overflow-hidden bg-black border border-white/5">
-                <img src={currentImage.preview} className="w-full h-full object-contain p-6" />
-                {currentImage.status !== 'pending' && currentImage.status !== 'done' && (
-                  <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center">
-                    <div className="w-64 bg-white/10 h-1.5 rounded-full overflow-hidden mb-4">
-                      <div className="h-full bg-indigo-500 transition-all" style={{ width: `${currentImage.progress}%` }}></div>
-                    </div>
-                    <p className="text-indigo-400 font-black text-[10px] uppercase tracking-widest">{currentImage.status}</p>
+              <img src={currentImage.preview} className="w-full h-full object-contain p-6" />
+              {currentImage.status !== 'pending' && currentImage.status !== 'done' && (
+                <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center">
+                  <div className="w-64 bg-white/10 h-1.5 rounded-full overflow-hidden mb-4">
+                    <div className="h-full bg-indigo-500 transition-all" style={{ width: `${currentImage.progress}%` }}></div>
                   </div>
-                )}
+                  <p className="text-indigo-400 font-black text-[10px] uppercase tracking-widest">{currentImage.status}</p>
+                </div>
+              )}
             </div>
           )}
         </div>
-
         <aside className="w-80 glass border-l border-white/5 p-6 overflow-y-auto">
           <div className="flex items-center justify-between mb-8">
             <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Project Assets</h3>
@@ -287,10 +362,8 @@ const Editor: React.FC<EditorProps> = ({ user, tool, job, onUpdateUser }) => {
           </div>
         </aside>
       </div>
-
-      <input type="file" multiple className="hidden" ref={fileInputRef} accept="image/*" onChange={handleFileChange} />
+      <input type="file" multiple className="hidden" ref={fileInputRef} accept="image/*,.raw,.arw,.cr2,.nef" onChange={handleFileChange} />
     </div>
   );
 };
-
 export default Editor;
