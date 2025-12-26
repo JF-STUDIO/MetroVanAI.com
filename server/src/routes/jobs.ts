@@ -5,40 +5,18 @@ import { r2Client, BUCKET_NAME } from '../services/r2.js';
 import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
-import IORedis from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthRequest } from '../types/auth.js';
+import { redisConnection } from '../services/redis.js';
 
 const router = Router();
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-console.log('Initializing Redis connection to:', REDIS_URL.split('@').pop()); // 安全地打印地址
-
-const connection = new (IORedis as any)(REDIS_URL, {
-    maxRetriesPerRequest: null,
-    retryStrategy(times: number) {
-        const delay = Math.min(times * 50, 2000);
-        return delay;
-    },
-    reconnectOnError(err: Error) {
-        console.error('Redis reconnecting on error:', err.message);
-        return true;
-    }
-});
-
-connection.on('error', (err: Error) => {
-    console.error('Redis connection error:', err.message);
-});
-
-connection.on('connect', () => {
-    console.log('Redis connected successfully');
-});
-
-const jobQueue = new Queue('job-queue', { connection });
+// 复用共享的 Redis 连接
+const jobQueue = new Queue('job-queue', { connection: redisConnection });
 
 // 1. 获取所有工具
 router.get('/tools', async (req: Request, res: Response) => {
-  const { data, error } = await supabaseAdmin.from('photo_tools').select('*').eq('is_active', true);
+  const { data, error } = await (supabaseAdmin.from('photo_tools') as any).select('*').eq('is_active', true);
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
@@ -59,8 +37,8 @@ router.post('/jobs', authenticate, async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const { data, error } = await supabaseAdmin
-      .from('jobs')
+    const { data, error } = await (supabaseAdmin
+      .from('jobs') as any)
       .insert({ user_id: userId, tool_id: toolId, project_name: projectName, status: 'pending' })
       .select()
       .single();
@@ -97,7 +75,7 @@ router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest
 
     const putUrl = await getSignedUrl(r2Client, command, { expiresIn: 3600 });
     
-    await supabaseAdmin.from('job_assets').insert({
+    await (supabaseAdmin.from('job_assets') as any).insert({
         id: assetId,
         job_id: jobId,
         r2_key: r2Key,
@@ -115,14 +93,14 @@ router.post('/jobs/:jobId/commit', authenticate, async (req: AuthRequest, res: R
   const { jobId } = req.params;
   const userId = req.user?.id;
 
-  const { data: job, error: jobErr } = await supabaseAdmin
-    .from('jobs').select('*').eq('id', jobId).eq('user_id', userId).single();
+  const { data: job, error: jobErr } = await (supabaseAdmin
+    .from('jobs') as any).select('*').eq('id', jobId).eq('user_id', userId).single();
   if (jobErr || !job) return res.status(404).json({ error: 'Job not found' });
 
-  const { data: assets } = await supabaseAdmin.from('job_assets').select('*').eq('job_id', jobId);
+  const { data: assets } = await (supabaseAdmin.from('job_assets') as any).select('*').eq('job_id', jobId);
   if (!assets || assets.length === 0) return res.status(400).json({ error: 'No assets found' });
 
-  await supabaseAdmin.from('jobs').update({ status: 'queued' }).eq('id', jobId);
+  await (supabaseAdmin.from('jobs') as any).update({ status: 'queued' }).eq('id', jobId);
   
   await jobQueue.add('process-job', { jobId }, {
       attempts: 3,
@@ -137,8 +115,8 @@ router.get('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Response)
     const { jobId } = req.params;
     const userId = req.user?.id;
 
-    const { data: job, error } = await supabaseAdmin
-        .from('jobs').select('*, photo_tools(*), job_assets(*)').eq('id', jobId).eq('user_id', userId).single();
+    const { data: job, error } = await (supabaseAdmin
+        .from('jobs') as any).select('*, photo_tools(*), job_assets(*)').eq('id', jobId).eq('user_id', userId).single();
     if (error) return res.status(404).json({ error: 'Job not found' });
     res.json(job);
 });
@@ -148,8 +126,8 @@ router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthReque
     const { jobId } = req.params;
     const userId = req.user?.id;
 
-    const { data: job } = await supabaseAdmin
-        .from('jobs').select('*').eq('id', jobId).eq('user_id', userId).single();
+    const { data: job } = await (supabaseAdmin
+        .from('jobs') as any).select('*').eq('id', jobId).eq('user_id', userId).single();
     if (!job || !job.zip_key) return res.status(400).json({ error: 'ZIP not ready or job not found' });
 
     const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: job.zip_key });
@@ -160,12 +138,12 @@ router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthReque
 // 7. 分页获取历史任务
 router.get('/jobs', authenticate, async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 10 } = req.query as any;
     const from = (Number(page) - 1) * Number(limit);
     const to = from + Number(limit) - 1;
 
-    const { data, error, count } = await supabaseAdmin
-        .from('jobs').select('*, photo_tools(name)', { count: 'exact' }).eq('user_id', userId).order('created_at', { ascending: false }).range(from, to);
+    const { data, error, count } = await (supabaseAdmin
+        .from('jobs') as any).select('*, photo_tools(name)', { count: 'exact' }).eq('user_id', userId).order('created_at', { ascending: false }).range(from, to);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ data, count });
 });
@@ -173,7 +151,7 @@ router.get('/jobs', authenticate, async (req: AuthRequest, res: Response) => {
 // 8. 获取个人资料 (含积分)
 router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
-    const { data, error } = await supabaseAdmin.from('profiles').select('*').eq('id', userId).single();
+    const { data, error } = await (supabaseAdmin.from('profiles') as any).select('*').eq('id', userId).single();
     if (error) return res.status(500).json({ error: error.message });
     res.json(data);
 });
@@ -185,14 +163,14 @@ router.post('/recharge', authenticate, async (req: AuthRequest, res: Response) =
 
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
-    const { data: profile } = await supabaseAdmin
-        .from('profiles').select('points').eq('id', userId).single();
+    const { data: profile } = await (supabaseAdmin
+        .from('profiles') as any).select('points').eq('id', userId).single();
     
     const newPoints = (profile?.points || 0) + amount;
 
-    await supabaseAdmin.from('profiles').update({ points: newPoints }).eq('id', userId);
+    await (supabaseAdmin.from('profiles') as any).update({ points: newPoints }).eq('id', userId);
     
-    await supabaseAdmin.from('transactions').insert({
+    await (supabaseAdmin.from('transactions') as any).insert({
         user_id: userId, amount: amount, type: 'recharge', description: `Recharged ${amount} points`
     });
 

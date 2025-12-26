@@ -1,30 +1,13 @@
 import { Worker, Job } from 'bullmq';
-import IORedis from 'ioredis';
 import { supabaseAdmin } from './services/supabase.js';
 import { r2Client, BUCKET_NAME } from './services/r2.js';
-import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import axios from 'axios';
-import archiver from 'archiver';
-import { PassThrough } from 'stream';
 import dotenv from 'dotenv';
+import { redisConnection } from './services/redis.js';
 
 // 加载环境变量
 dotenv.config();
-
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-console.log('Worker initializing Redis connection to:', REDIS_URL.split('@').pop());
-
-const connection = new (IORedis as any)(REDIS_URL, {
-    maxRetriesPerRequest: null,
-    retryStrategy(times: number) {
-        return Math.min(times * 50, 2000);
-    }
-});
-
-connection.on('error', (err: Error) => {
-    console.error('Worker Redis connection error:', err.message);
-});
 
 const worker = new Worker('job-queue', async (job: Job) => {
     const { jobId } = job.data;
@@ -70,7 +53,7 @@ const worker = new Worker('job-queue', async (job: Job) => {
         await (supabaseAdmin.from('jobs') as any).update({ status: 'failed' }).eq('id', jobId);
         throw error;
     }
-}, { connection });
+}, { connection: redisConnection });
 
 worker.on('completed', job => {
     console.log(`${job.id} has completed!`);
@@ -80,4 +63,4 @@ worker.on('failed', (job, err) => {
     console.log(`${job?.id} has failed with ${err.message}`);
 });
 
-console.log('Worker started...');
+console.log('Worker started with shared connection...');
