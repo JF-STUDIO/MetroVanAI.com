@@ -1,0 +1,8 @@
+
+{
+  "name": "Metrovan AI - AI Photography Studio",
+  "description": "A high-end photography editing platform featuring AI enhancements, point-based processing, and a powerful admin control center.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
