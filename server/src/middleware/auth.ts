@@ -1,12 +1,6 @@
-import { Request, Response, NextFunction } from 'express';
-import { supabaseAdmin } from '../services/supabase';
-
-export interface AuthRequest extends Request {
-  user?: {
-    id: string;
-    email?: string;
-  };
-}
+import { Response, NextFunction } from 'express';
+import { supabaseAdmin } from '../services/supabase.js';
+import { AuthRequest } from '../types/auth.js';
 
 export const authenticate = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
