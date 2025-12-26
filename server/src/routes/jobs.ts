@@ -23,8 +23,9 @@ router.get('/tools', async (req, res) => {
 
 // 2. 创建任务
 router.post('/jobs', authenticate, async (req: AuthRequest, res) => {
-  console.log('Received /api/jobs request:', req.body);
-  const { toolId, projectName } = req.body;
+  const anyReq = req as any;
+  console.log('Received /api/jobs request:', anyReq.body);
+  const { toolId, projectName } = anyReq.body;
   const userId = req.user?.id;
 
   if (!projectName) {
@@ -58,8 +59,9 @@ router.post('/jobs', authenticate, async (req: AuthRequest, res) => {
 
 // 3. 获取上传预签名 URL
 router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest, res) => {
-  const { jobId } = req.params;
-  const { files }: { files: {name: string, type: string}[] } = req.body;
+  const anyReq = req as any;
+  const { jobId } = anyReq.params;
+  const { files }: { files: {name: string, type: string}[] } = anyReq.body;
   const userId = req.user?.id;
 
   const results = await Promise.all(files.map(async (file) => {
@@ -90,7 +92,8 @@ router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest
 
 // 4. 提交任务 (校验并入队)
 router.post('/jobs/:jobId/commit', authenticate, async (req: AuthRequest, res) => {
-  const { jobId } = req.params;
+  const anyReq = req as any;
+  const { jobId } = anyReq.params;
   const userId = req.user?.id;
 
   const { data: job, error: jobErr } = await supabaseAdmin
@@ -112,7 +115,8 @@ router.post('/jobs/:jobId/commit', authenticate, async (req: AuthRequest, res) =
 
 // 5. 获取任务进度
 router.get('/jobs/:jobId', authenticate, async (req: AuthRequest, res) => {
-    const { jobId } = req.params;
+    const anyReq = req as any;
+    const { jobId } = anyReq.params;
     const userId = req.user?.id;
 
     const { data: job, error } = await supabaseAdmin
@@ -123,7 +127,8 @@ router.get('/jobs/:jobId', authenticate, async (req: AuthRequest, res) => {
 
 // 6. 获取下载预签名 URL
 router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthRequest, res) => {
-    const { jobId } = req.params;
+    const anyReq = req as any;
+    const { jobId } = anyReq.params;
     const userId = req.user?.id;
 
     const { data: job } = await supabaseAdmin
@@ -137,8 +142,9 @@ router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthReque
 
 // 7. 分页获取历史任务
 router.get('/jobs', authenticate, async (req: AuthRequest, res) => {
+    const anyReq = req as any;
     const userId = req.user?.id;
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 10 } = anyReq.query;
     const from = (Number(page) - 1) * Number(limit);
     const to = from + Number(limit) - 1;
 
@@ -158,8 +164,9 @@ router.get('/profile', authenticate, async (req: AuthRequest, res) => {
 
 // 9. 充值积分 (模拟实现)
 router.post('/recharge', authenticate, async (req: AuthRequest, res) => {
+    const anyReq = req as any;
     const userId = req.user?.id;
-    const { amount } = req.body;
+    const { amount } = anyReq.body;
 
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
