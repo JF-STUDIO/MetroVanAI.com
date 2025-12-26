@@ -4,8 +4,8 @@ services:
     name: metrovan-server
     env: node
     plan: free
-    buildCommand: cd server && npm install && npm run build
-    startCommand: cd server && npm start
+    buildCommand: cd server && pnpm install && pnpm run build
+    startCommand: cd server && pnpm start
     envVars:
       - key: NODE_ENV
         value: production
@@ -40,8 +40,8 @@ services:
     name: metrovan-worker
     env: node
     plan: free
-    buildCommand: cd server && npm install && npm run build
-    startCommand: cd server && npm run worker
+    buildCommand: cd server && pnpm install && pnpm run build
+    startCommand: cd server && pnpm run worker
     envVars:
       - key: NODE_ENV
         value: production
