@@ -63,6 +63,15 @@ const App: React.FC = () => {
     e.preventDefault();
     setLoading(true);
     try {
+      // 调试：打印连接信息
+      console.log('--- DEBUG INFO ---');
+      // @ts-ignore
+      console.log('Supabase URL:', supabase.supabaseUrl);
+      // @ts-ignore
+      console.log('Supabase Key (First 10 chars):', supabase.supabaseKey.substring(0, 10));
+      console.log('Target Email:', email);
+      console.log('--- END DEBUG ---');
+
       if (isRegister) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
