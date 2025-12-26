@@ -10,9 +10,30 @@ import { v4 as uuidv4 } from 'uuid';
 import { AuthRequest } from '../types/auth.js';
 
 const router = Router();
-const connection = new (IORedis as any)(process.env.REDIS_URL || 'redis://localhost:6379', {
+
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+console.log('Initializing Redis connection to:', REDIS_URL.split('@').pop()); // 安全地打印地址
+
+const connection = new (IORedis as any)(REDIS_URL, {
     maxRetriesPerRequest: null,
+    retryStrategy(times: number) {
+        const delay = Math.min(times * 50, 2000);
+        return delay;
+    },
+    reconnectOnError(err: Error) {
+        console.error('Redis reconnecting on error:', err.message);
+        return true;
+    }
 });
+
+connection.on('error', (err: Error) => {
+    console.error('Redis connection error:', err.message);
+});
+
+connection.on('connect', () => {
+    console.log('Redis connected successfully');
+});
+
 const jobQueue = new Queue('job-queue', { connection });
 
 // 1. 获取所有工具

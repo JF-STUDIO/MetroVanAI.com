@@ -12,8 +12,18 @@ import dotenv from 'dotenv';
 // 加载环境变量
 dotenv.config();
 
-const connection = new (IORedis as any)(process.env.REDIS_URL || 'redis://localhost:6379', {
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+console.log('Worker initializing Redis connection to:', REDIS_URL.split('@').pop());
+
+const connection = new (IORedis as any)(REDIS_URL, {
     maxRetriesPerRequest: null,
+    retryStrategy(times: number) {
+        return Math.min(times * 50, 2000);
+    }
+});
+
+connection.on('error', (err: Error) => {
+    console.error('Worker Redis connection error:', err.message);
 });
 
 const worker = new Worker('job-queue', async (job: Job) => {
