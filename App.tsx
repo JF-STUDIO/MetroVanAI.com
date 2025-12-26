@@ -63,32 +63,21 @@ const App: React.FC = () => {
     e.preventDefault();
     setLoading(true);
     try {
-      // 调试：打印连接信息
-      console.log('--- DEBUG INFO ---');
-      // @ts-ignore
-      console.log('Supabase URL:', supabase.supabaseUrl);
-      // @ts-ignore
-      console.log('Supabase Key (First 10 chars):', supabase.supabaseKey.substring(0, 10));
-      console.log('Target Email:', email);
-      console.log('--- END DEBUG ---');
-
       if (isRegister) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
         alert('Check your email for confirmation!');
       } else {
-        console.log('Attempting login with email:', email);
-        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) {
-          console.error('Supabase Login Error Detail:', error);
-          throw new Error(`Supabase Error: ${error.message} (${error.status})`);
-        }
-        console.log('Login success, user session created.');
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
         setView('editor');
       }
-    } catch (error: any) {
-      console.error('HandleAuth Error:', error);
-      alert(error.message || 'An unknown error occurred.');
+    } catch (error) {
+      if (error instanceof Error) {
+        alert(error.message);
+      } else {
+        alert('An unknown error occurred.');
+      }
     } finally {
       setLoading(false);
     }
