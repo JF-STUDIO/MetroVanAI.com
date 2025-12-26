@@ -1,12 +1,10 @@
+import './config.js';
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import dotenv from 'dotenv';
 import jobRoutes from './routes/jobs.js';
-
-// 加载环境变量
-dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 4000;

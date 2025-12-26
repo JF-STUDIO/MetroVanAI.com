@@ -1,9 +1,9 @@
 -- 1. 扩展与设置
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA extensions;
 
 -- 2. photo_tools 表
 CREATE TABLE IF NOT EXISTS photo_tools (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
     name TEXT NOT NULL,
     description TEXT,
     workflow_id TEXT NOT NULL,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS photo_tools (
 
 -- 3. jobs 表
 CREATE TABLE IF NOT EXISTS jobs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
     user_id UUID NOT NULL, -- 对应 auth.users
     tool_id UUID REFERENCES photo_tools(id),
     project_name TEXT, -- 新增的项目名称/地址字段
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 -- 4. job_assets 表
 CREATE TABLE IF NOT EXISTS job_assets (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
     job_id UUID REFERENCES jobs(id) ON DELETE CASCADE,
     r2_key TEXT NOT NULL,
     r2_output_key TEXT,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_assets (
 
 -- 5. job_events 表
 CREATE TABLE IF NOT EXISTS job_events (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
     job_id UUID REFERENCES jobs(id) ON DELETE CASCADE,
     event_type TEXT NOT NULL,
     message TEXT,
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 -- 7. transactions 表 (积分流水)
 CREATE TABLE IF NOT EXISTS transactions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
     user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     amount INTEGER NOT NULL, -- 正数为充值，负数为消耗
     type TEXT NOT NULL, -- recharge, consume, refund
