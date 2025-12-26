@@ -68,16 +68,18 @@ const App: React.FC = () => {
         if (error) throw error;
         alert('Check your email for confirmation!');
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        console.log('Attempting login with email:', email);
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) {
+          console.error('Supabase Login Error Detail:', error);
+          throw new Error(`Supabase Error: ${error.message} (${error.status})`);
+        }
+        console.log('Login success, user session created.');
         setView('editor');
       }
-    } catch (error) {
-      if (error instanceof Error) {
-        alert(error.message);
-      } else {
-        alert('An unknown error occurred.');
-      }
+    } catch (error: any) {
+      console.error('HandleAuth Error:', error);
+      alert(error.message || 'An unknown error occurred.');
     } finally {
       setLoading(false);
     }
