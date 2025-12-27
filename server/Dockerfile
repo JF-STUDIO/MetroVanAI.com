@@ -34,6 +34,7 @@ RUN corepack enable
 
 WORKDIR /app
 COPY --from=base /app/node_modules ./node_modules
+COPY --from=base /app/server/node_modules ./server/node_modules
 COPY --from=base /app/server/package.json ./server/package.json
 COPY --from=base /app/server/dist ./server/dist
 
@@ -41,4 +42,3 @@ ENV NODE_ENV=production
 
 WORKDIR /app/server
 CMD ["node", "dist/index.js"]
-
