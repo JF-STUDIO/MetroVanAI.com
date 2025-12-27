@@ -11,12 +11,26 @@ import { createRedis } from './services/redis.js';
 const app = express();
 const port = process.env.PORT || 4000;
 
-const corsOptions = {
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
-};
+
+const allowedOrigins = [
+  'https://metro-van-ai-com.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000'
+];
 
 app.use(helmet());
-app.use(cors(corsOptions));
+app.use(cors({
+  origin: function(origin, callback) {
+    // allow requests with no origin (like mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
 app.use(morgan('dev'));
 app.use(express.json());
 
