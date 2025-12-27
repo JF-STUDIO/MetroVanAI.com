@@ -1,29 +1,31 @@
 import IORedis from 'ioredis';
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+/**
+ * Creates a new Redis client instance.
+ * This factory function ensures that each part of the application (Queue, Worker, etc.)
+ * gets its own Redis connection, preventing issues with shared connections.
+ * It also enforces the use of REDIS_URL from environment variables and enables TLS,
+ * which is required for services like Upstash.
+ */
+export function createRedis() {
+  if (!process.env.REDIS_URL) {
+    throw new Error('REDIS_URL environment variable is not set.');
+  }
 
-export const redisConnection = new (IORedis as any)(REDIS_URL, {
-    maxRetriesPerRequest: null,
-    retryStrategy(times: number) {
-        return Math.min(times * 50, 2000);
-    },
-    reconnectOnError(err: Error) {
-        const targetError = 'READONLY';
-        if (err.message.slice(0, targetError.length) === targetError) {
-            return true;
-        }
-        return false;
-    }
-});
+  // Configuration for Upstash Redis or any other cloud Redis that requires TLS
+  const redisOptions = {
+    tls: {}, // Enable TLS
+    maxRetriesPerRequest: null, // From user's instruction
+    enableReadyCheck: false, // From user's instruction
+    keepAlive: 30000, // From user's instruction
+  };
 
-redisConnection.on('error', (err: Error) => {
-    console.error('Shared Redis connection error:', err.message);
-});
+  const client = new (IORedis as any)(process.env.REDIS_URL, redisOptions);
 
-redisConnection.on('connect', () => {
-    console.log('Shared Redis connection established');
-});
+  client.on('error', (err: Error) => {
+    // Optional: Add more robust logging here
+    console.error('Redis client error:', err.message);
+  });
 
-redisConnection.on('ready', () => {
-    console.log('Shared Redis connection ready for operations');
-});
+  return client;
+}

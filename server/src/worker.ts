@@ -1,13 +1,9 @@
+import './config.js';
 import { Worker, Job } from 'bullmq';
 import { supabaseAdmin } from './services/supabase.js';
 import { r2Client, BUCKET_NAME } from './services/r2.js';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
-import axios from 'axios';
-import dotenv from 'dotenv';
-import { redisConnection } from './services/redis.js';
-
-// 加载环境变量
-dotenv.config();
+import { createRedis } from './services/redis.js';
 
 const worker = new Worker('job-queue', async (job: Job) => {
     const { jobId } = job.data;
@@ -53,14 +49,21 @@ const worker = new Worker('job-queue', async (job: Job) => {
         await (supabaseAdmin.from('jobs') as any).update({ status: 'failed' }).eq('id', jobId);
         throw error;
     }
-}, { connection: redisConnection });
+}, { 
+    connection: createRedis(),
+    concurrency: 5,
+    removeOnComplete: { count: 1000 },
+    removeOnFail: { count: 5000 },
+});
 
-worker.on('completed', job => {
+const workerEvents = new Worker('job-queue', async () => {}, { connection: createRedis() });
+
+workerEvents.on('completed', job => {
     console.log(`${job.id} has completed!`);
 });
 
-worker.on('failed', (job, err) => {
+workerEvents.on('failed', (job, err) => {
     console.log(`${job?.id} has failed with ${err.message}`);
 });
 
-console.log('Worker started with shared connection...');
+console.log('Worker started...');

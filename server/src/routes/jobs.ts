@@ -7,12 +7,12 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthRequest } from '../types/auth.js';
-import { redisConnection } from '../services/redis.js';
+import { createRedis } from '../services/redis.js';
 
 const router = Router();
 
-// 复用共享的 Redis 连接
-const jobQueue = new Queue('job-queue', { connection: redisConnection });
+// Create a new Redis connection for the queue.
+const jobQueue = new Queue('job-queue', { connection: createRedis() });
 
 // 1. 获取所有工具
 router.get('/tools', async (req: Request, res: Response) => {
