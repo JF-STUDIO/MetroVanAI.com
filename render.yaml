@@ -11,7 +11,7 @@ services:
     env: node
     plan: free # or your desired plan
     rootDir: server
-    buildCommand: pnpm run build
+    buildCommand: pnpm install --prod=false && pnpm run build
     startCommand: pnpm start
     envVars:
       - key: NODE_ENV
