@@ -94,7 +94,7 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
 
   // Poll for job status
   useEffect(() => {
-    if (!(job && jobStatus === 'processing')) return;
+    if (!(job && (jobStatus === 'processing' || jobStatus === 'queued'))) return;
 
     const timer = setInterval(async () => {
       try {
@@ -149,6 +149,34 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
   useEffect(() => {
     loadHistory(1);
   }, [user.id]);
+
+  const formatDate = (value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
+  };
+
+  const openExistingJob = async (item: HistoryJob) => {
+    setImages([]);
+    setActiveIndex(null);
+    setZipUrl(null);
+    setProjectName(item.project_name || '');
+    setJobStatus(item.status);
+    setJob(item as Job);
+    setShowProjectInput(false);
+
+    try {
+      const jobData = await jobService.getJobStatus(item.id);
+      setJob(jobData);
+      setJobStatus(jobData.status);
+      if (jobData.status === 'completed') {
+        const { url } = await jobService.getPresignedDownloadUrl(jobData.id);
+        setZipUrl(url);
+      }
+    } catch (err) {
+      console.error('Failed to load project:', err);
+    }
+  };
 
   // Unified file handler for both click and drop
   const processFiles = (fileList: FileList | null) => {
@@ -264,74 +292,11 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
 
   // VIEW 1: Tool Selector
   if (!activeTool) {
-    const hasMoreHistory = history.length < historyCount;
-    const formatDate = (value: string) => {
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return value;
-      return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
-    };
-
     return (
       <div className="min-h-screen bg-[#0a0a0a] px-8 py-12">
         <div className="max-w-7xl mx-auto mb-12 text-center text-white">
           <h1 className="text-5xl font-black mb-2 uppercase tracking-tighter">Pro Studio Engines</h1>
           <p className="font-medium opacity-40">Batch processing with R2 & RunningHub</p>
-        </div>
-        <div className="max-w-7xl mx-auto mb-12">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Recent Projects</h2>
-            {historyLoading && <span className="text-[10px] text-gray-600 uppercase tracking-widest">Loading...</span>}
-          </div>
-          {historyError && (
-            <div className="text-sm text-red-400 mb-4">Failed to load projects: {historyError}</div>
-          )}
-          {!historyLoading && history.length === 0 && (
-            <div className="text-sm text-gray-500 glass p-6 rounded-2xl border border-white/5">
-              No projects yet. Create one to see it here.
-            </div>
-          )}
-          {history.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {history.map((item) => (
-                <div key={item.id} className="glass p-6 rounded-2xl border border-white/5 flex flex-col gap-4">
-                  <div>
-                    <div className="text-[10px] text-gray-500 uppercase tracking-widest">
-                      {item.photo_tools?.name || 'Studio Tool'}
-                    </div>
-                    <div className="text-lg font-bold text-white">{item.project_name || 'Untitled Project'}</div>
-                    <div className="text-[10px] text-gray-600 uppercase tracking-widest mt-1">
-                      {item.status} | {formatDate(item.created_at)}
-                    </div>
-                  </div>
-                  {item.status === 'completed' ? (
-                    <button
-                      onClick={async () => {
-                        const { url } = await jobService.getPresignedDownloadUrl(item.id);
-                        if (url) window.location.href = url;
-                      }}
-                      className="mt-auto px-4 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
-                    >
-                      Download ZIP
-                    </button>
-                  ) : (
-                    <div className="mt-auto text-[10px] text-gray-500 uppercase tracking-widest">
-                      Processing status: {item.status}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {hasMoreHistory && (
-            <div className="mt-6">
-              <button
-                onClick={() => loadHistory(historyPage + 1)}
-                className="px-6 py-2 rounded-full border border-white/10 text-xs text-gray-300 hover:bg-white/5 transition"
-              >
-                Load More
-              </button>
-            </div>
-          )}
         </div>
         <div className="max-w-[1200px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-10">
           {tools.map(tool => (
@@ -361,21 +326,82 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
 
   // VIEW 2: Project Creation Form
   if (showProjectInput) {
+    const toolHistory = activeTool ? history.filter(item => item.tool_id === activeTool.id) : [];
+    const hasMoreHistory = history.length < historyCount;
+
     return (
-      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center px-8">
-        <div className="glass w-full max-w-lg p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
-          <div className="text-center mb-10">
-            <h2 className="text-3xl font-black mb-2 uppercase tracking-tighter">Create New Project</h2>
-            <p className="text-gray-500">Enter the property address to begin.</p>
-          </div>
-          <form onSubmit={handleProjectCreate} className="space-y-6">
-            <div>
-              <label className="block text-[10px] font-bold text-gray-500 uppercase mb-2 tracking-widest pl-1">Property Address</label>
-              <input type="text" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none focus:border-indigo-500" placeholder="e.g., 123 Main St, Vancouver, BC" value={projectName} onChange={e => setProjectName(e.target.value)} />
+      <div className="min-h-screen bg-[#0a0a0a] px-8 py-12">
+        <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-10">
+          <div className="glass w-full p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
+            <div className="text-center mb-10">
+              <h2 className="text-3xl font-black mb-2 uppercase tracking-tighter">Create New Project</h2>
+              <p className="text-gray-500">Enter the property address to begin.</p>
             </div>
-            <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg active:scale-95 transition">Create Project</button>
-          </form>
-           <button onClick={() => { setActiveTool(null); setShowProjectInput(false); }} className="w-full mt-4 text-xs text-gray-500 hover:text-white">Cancel</button>
+            <form onSubmit={handleProjectCreate} className="space-y-6">
+              <div>
+                <label className="block text-[10px] font-bold text-gray-500 uppercase mb-2 tracking-widest pl-1">Property Address</label>
+                <input type="text" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none focus:border-indigo-500" placeholder="e.g., 123 Main St, Vancouver, BC" value={projectName} onChange={e => setProjectName(e.target.value)} />
+              </div>
+              <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg active:scale-95 transition">Create Project</button>
+            </form>
+             <button onClick={() => { setActiveTool(null); setShowProjectInput(false); }} className="w-full mt-4 text-xs text-gray-500 hover:text-white">Cancel</button>
+          </div>
+          <div className="glass w-full p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Existing Projects</h3>
+              {historyLoading && <span className="text-[10px] text-gray-600 uppercase tracking-widest">Loading...</span>}
+            </div>
+            {historyError && (
+              <div className="text-sm text-red-400 mb-4">Failed to load projects: {historyError}</div>
+            )}
+            {!historyLoading && toolHistory.length === 0 && (
+              <div className="text-sm text-gray-500 glass p-6 rounded-2xl border border-white/5">
+                No projects yet for this tool.
+              </div>
+            )}
+            {toolHistory.length > 0 && (
+              <div className="space-y-4">
+                {toolHistory.map((item) => (
+                  <div key={item.id} className="p-4 rounded-2xl border border-white/5 flex items-center justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-white">{item.project_name || 'Untitled Project'}</div>
+                      <div className="text-[10px] text-gray-600 uppercase tracking-widest mt-1">
+                        {item.status} | {formatDate(item.created_at)}
+                      </div>
+                    </div>
+                    {item.status === 'completed' ? (
+                      <button
+                        onClick={async () => {
+                          const { url } = await jobService.getPresignedDownloadUrl(item.id);
+                          if (url) window.location.href = url;
+                        }}
+                        className="px-4 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
+                      >
+                        Download ZIP
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => openExistingJob(item)}
+                        className="px-4 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                      >
+                        Open Project
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {hasMoreHistory && (
+              <div className="mt-6">
+                <button
+                  onClick={() => loadHistory(historyPage + 1)}
+                  className="px-6 py-2 rounded-full border border-white/10 text-xs text-gray-300 hover:bg-white/5 transition"
+                >
+                  Load More
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
