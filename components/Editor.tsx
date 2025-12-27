@@ -20,6 +20,8 @@ interface ImageItem {
   statusText?: string;
 }
 
+type HistoryJob = Job & { photo_tools?: { name?: string } | null };
+
 // The auto-playing, aspect-ratio-correct slider component
 const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ original, processed }) => {
   const [sliderPos, setSliderPos] = useState(50);
@@ -84,6 +86,11 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
   const [zipUrl, setZipUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [history, setHistory] = useState<HistoryJob[]>([]);
+  const [historyCount, setHistoryCount] = useState(0);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   // Poll for job status
   useEffect(() => {
@@ -121,6 +128,27 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
 
     return () => clearInterval(timer);
   }, [job, jobStatus, onUpdateUser, user]);
+
+  const loadHistory = async (page = 1) => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const response = await jobService.getHistory(page);
+      const data = Array.isArray(response?.data) ? response.data : [];
+      const count = Number(response?.count || 0);
+      setHistory(prev => (page === 1 ? data : [...prev, ...data]));
+      setHistoryCount(count);
+      setHistoryPage(page);
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : 'Failed to load projects.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadHistory(1);
+  }, [user.id]);
 
   // Unified file handler for both click and drop
   const processFiles = (fileList: FileList | null) => {
@@ -220,6 +248,11 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
       setJob(newJob);
       setJobStatus(newJob.status)
       setShowProjectInput(false);
+      setHistory(prev => [{
+        ...(newJob as Job),
+        photo_tools: { name: activeTool.name }
+      }, ...prev]);
+      setHistoryCount(prev => prev + 1);
     } catch (error) {
       if (error instanceof Error) {
         alert("Failed to create project: " + error.message);
@@ -231,11 +264,74 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
 
   // VIEW 1: Tool Selector
   if (!activeTool) {
+    const hasMoreHistory = history.length < historyCount;
+    const formatDate = (value: string) => {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
+    };
+
     return (
       <div className="min-h-screen bg-[#0a0a0a] px-8 py-12">
         <div className="max-w-7xl mx-auto mb-12 text-center text-white">
           <h1 className="text-5xl font-black mb-2 uppercase tracking-tighter">Pro Studio Engines</h1>
           <p className="font-medium opacity-40">Batch processing with R2 & RunningHub</p>
+        </div>
+        <div className="max-w-7xl mx-auto mb-12">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Recent Projects</h2>
+            {historyLoading && <span className="text-[10px] text-gray-600 uppercase tracking-widest">Loading...</span>}
+          </div>
+          {historyError && (
+            <div className="text-sm text-red-400 mb-4">Failed to load projects: {historyError}</div>
+          )}
+          {!historyLoading && history.length === 0 && (
+            <div className="text-sm text-gray-500 glass p-6 rounded-2xl border border-white/5">
+              No projects yet. Create one to see it here.
+            </div>
+          )}
+          {history.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {history.map((item) => (
+                <div key={item.id} className="glass p-6 rounded-2xl border border-white/5 flex flex-col gap-4">
+                  <div>
+                    <div className="text-[10px] text-gray-500 uppercase tracking-widest">
+                      {item.photo_tools?.name || 'Studio Tool'}
+                    </div>
+                    <div className="text-lg font-bold text-white">{item.project_name || 'Untitled Project'}</div>
+                    <div className="text-[10px] text-gray-600 uppercase tracking-widest mt-1">
+                      {item.status} | {formatDate(item.created_at)}
+                    </div>
+                  </div>
+                  {item.status === 'completed' ? (
+                    <button
+                      onClick={async () => {
+                        const { url } = await jobService.getPresignedDownloadUrl(item.id);
+                        if (url) window.location.href = url;
+                      }}
+                      className="mt-auto px-4 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
+                    >
+                      Download ZIP
+                    </button>
+                  ) : (
+                    <div className="mt-auto text-[10px] text-gray-500 uppercase tracking-widest">
+                      Processing status: {item.status}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {hasMoreHistory && (
+            <div className="mt-6">
+              <button
+                onClick={() => loadHistory(historyPage + 1)}
+                className="px-6 py-2 rounded-full border border-white/10 text-xs text-gray-300 hover:bg-white/5 transition"
+              >
+                Load More
+              </button>
+            </div>
+          )}
         </div>
         <div className="max-w-[1200px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-10">
           {tools.map(tool => (
