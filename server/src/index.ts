@@ -41,7 +41,10 @@ app.use('/api', jobRoutes);
 app.use('/api', workflowRoutes);
 app.use('/api', adminRoutes);
 
-if (process.env.ENABLE_INLINE_WORKER === 'true') {
+const inlineWorkerEnabled = process.env.ENABLE_INLINE_WORKER === 'true';
+console.log(`Inline worker enabled: ${inlineWorkerEnabled ? 'true' : 'false'}`);
+if (inlineWorkerEnabled) {
+  console.log('Starting inline worker...');
   import('./worker.js').catch((error) => {
     console.error('Failed to start inline worker:', error);
   });
