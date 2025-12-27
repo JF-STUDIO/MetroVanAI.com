@@ -7,7 +7,7 @@ services:
 
   # 2. Web Service (API + Worker combined)
   - type: web
-    name: metrovan-server
+    name: metrovan-server-docker
     env: docker
     plan: free # or your desired plan
     dockerfilePath: server/Dockerfile
