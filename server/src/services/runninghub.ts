@@ -38,6 +38,8 @@ const buildHeaders = () => {
   };
 };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const resolveApiMode = (runtimeConfig?: Record<string, unknown> | null): RunningHubApiMode => {
   const mode = (runtimeConfig?.api_mode as string | undefined) || 'workflow';
   return mode === 'task_openapi' ? 'task_openapi' : 'workflow';
@@ -47,6 +49,25 @@ const normalizeUrl = (baseUrl: string, path: string) => {
   const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
   const suffix = path.startsWith('/') ? path : `/${path}`;
   return `${base}${suffix}`;
+};
+
+let lastCreateAt = 0;
+let createLock = Promise.resolve();
+const waitForCreateSlot = async (minIntervalMs: number) => {
+  if (minIntervalMs <= 0) return;
+  let release: () => void = () => {};
+  const prev = createLock;
+  createLock = new Promise((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  const now = Date.now();
+  const waitMs = Math.max(minIntervalMs - (now - lastCreateAt), 0);
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  lastCreateAt = Date.now();
+  release();
 };
 
 const applyTemplate = (value: unknown, context: RunningHubPayloadContext): unknown => {
@@ -68,6 +89,30 @@ const applyTemplate = (value: unknown, context: RunningHubPayloadContext): unkno
   }
   return value;
 };
+
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) return error.message;
+  return String(error);
+};
+
+const isTooFastError = (message: string) => (
+  message.includes('TASK_CREATE_TOO_FAST') ||
+  message.includes('"code":420') ||
+  message.includes('code":420') ||
+  message.includes('code=420')
+);
+
+const isQueueMaxedError = (message: string) => (
+  message.includes('TASK_QUEUE_MAXED') ||
+  message.includes('"code":421') ||
+  message.includes('code":421') ||
+  message.includes('code=421')
+);
+
+const isNonRetryableError = (message: string) => (
+  message.includes('WORKFLOW_NOT_EXISTS') ||
+  message.includes('NOT_FOUND')
+);
 
 const buildPayload = (
   workflowRemoteId: string,
@@ -289,17 +334,56 @@ export const createRunningHubTask = async (
       throw new Error('RunningHub input_node_id is required for task_openapi');
     }
 
+    const createIntervalMs = Number(runtimeConfig?.create_throttle_sec ?? 1) * 1000;
+    const retryLimit = Number(runtimeConfig?.create_retry_max ?? 6);
+    const fastBackoffCap = Number(runtimeConfig?.create_fast_backoff_cap ?? 30);
+    const queueBackoffCap = Number(runtimeConfig?.create_queue_backoff_cap ?? 60);
+
+    let attempt = 0;
+    let fastBackoff = 2;
+    let queueBackoff = 10;
+    let genericBackoff = 2;
+
     const { tempDir, filePath } = await downloadInputToFile(inputUrl);
     try {
       const uploaded = await uploadTaskOpenApi(provider.base_url, filePath, runtimeConfig);
-      return await createTaskOpenApi(
-        provider.base_url,
-        workflowRemoteId,
-        inputKey,
-        String(inputNodeId),
-        uploaded.fileName,
-        runtimeConfig
-      );
+
+      while (true) {
+        await waitForCreateSlot(createIntervalMs);
+        try {
+          return await createTaskOpenApi(
+            provider.base_url,
+            workflowRemoteId,
+            inputKey,
+            String(inputNodeId),
+            uploaded.fileName,
+            runtimeConfig
+          );
+        } catch (error) {
+          const message = getErrorMessage(error);
+          if (isNonRetryableError(message)) throw error;
+
+          if (isTooFastError(message)) {
+            await sleep(fastBackoff * 1000);
+            fastBackoff = Math.min(fastBackoff * 2, fastBackoffCap);
+            continue;
+          }
+
+          if (isQueueMaxedError(message)) {
+            await sleep(queueBackoff * 1000);
+            queueBackoff = Math.min(queueBackoff * 2, queueBackoffCap);
+            continue;
+          }
+
+          attempt += 1;
+          if (retryLimit <= 0 || attempt <= retryLimit) {
+            await sleep(genericBackoff * 1000);
+            genericBackoff = Math.min(genericBackoff * 2, 30);
+            continue;
+          }
+          throw error;
+        }
+      }
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
@@ -406,18 +490,26 @@ export const pollRunningHub = async (
   const pollIntervalSeconds = (runtimeConfig?.poll_interval as number | undefined) ?? 5;
   const timeoutAt = Date.now() + timeoutSeconds * 1000;
   const apiMode = resolveApiMode(runtimeConfig);
+  let failureCount = 0;
 
   while (Date.now() < timeoutAt) {
-    const result = await fetchRunningHubStatus(provider, taskId, runtimeConfig);
-    if (result.status === 'SUCCESS' || result.status === 'FAILED') {
-      if (result.status === 'SUCCESS' && apiMode === 'task_openapi') {
-        const outputs = await fetchTaskOpenApiOutputs(provider, taskId, runtimeConfig);
-        const outputUrls = pickOutputFromOpenApi(outputs, runtimeConfig);
-        return { ...result, outputUrls };
+    try {
+      const result = await fetchRunningHubStatus(provider, taskId, runtimeConfig);
+      failureCount = 0;
+      if (result.status === 'SUCCESS' || result.status === 'FAILED') {
+        if (result.status === 'SUCCESS' && apiMode === 'task_openapi') {
+          const outputs = await fetchTaskOpenApiOutputs(provider, taskId, runtimeConfig);
+          const outputUrls = pickOutputFromOpenApi(outputs, runtimeConfig);
+          return { ...result, outputUrls };
+        }
+        return result;
       }
-      return result;
+      await sleep(pollIntervalSeconds * 1000);
+    } catch (error) {
+      failureCount += 1;
+      const backoff = Math.min(2 * failureCount, 20);
+      await sleep(backoff * 1000);
     }
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalSeconds * 1000));
   }
 
   throw new Error('RunningHub status polling timed out');

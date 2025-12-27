@@ -398,39 +398,64 @@ const processRunningHubGroup = async (
     throw new Error('HDR output missing for group');
   }
 
-  const inputUrl = await getPresignedGetUrl(HDR_BUCKET, group.hdr_key, 3600);
-  const { taskId } = await createRunningHubTask(
-    context.provider,
-    context.version.workflow_remote_id,
-    context.inputKey,
-    inputUrl,
-    context.runtimeConfig
-  );
+  const maxAttempts = Number(context.runtimeConfig.max_attempts ?? 3);
+  const retryBase = Number(context.runtimeConfig.ai_retry_backoff_sec ?? 2);
+  const retryCap = Number(context.runtimeConfig.ai_retry_backoff_cap ?? 30);
+  let attempts = group.attempts || 0;
+  let backoff = retryBase;
 
-  const result = await pollRunningHub(context.provider, taskId, context.runtimeConfig);
-  if (result.status !== 'SUCCESS') {
-    throw new Error('RunningHub processing failed');
+  while (attempts < maxAttempts) {
+    attempts += 1;
+    try {
+      const inputUrl = await getPresignedGetUrl(HDR_BUCKET, group.hdr_key, 3600);
+      const { taskId } = await createRunningHubTask(
+        context.provider,
+        context.version.workflow_remote_id,
+        context.inputKey,
+        inputUrl,
+        context.runtimeConfig
+      );
+
+      const result = await pollRunningHub(context.provider, taskId, context.runtimeConfig);
+      if (result.status !== 'SUCCESS') {
+        throw new Error('RunningHub processing failed');
+      }
+
+      const outputUrl = result.outputUrls[0];
+      if (!outputUrl) {
+        throw new Error('RunningHub output URL missing');
+      }
+
+      const outputKey = `jobs/${jobId}/${group.id}.jpg`;
+      await downloadOutputToJpg(outputUrl, OUTPUT_BUCKET, outputKey);
+      await deleteObject(HDR_BUCKET, group.hdr_key);
+
+      await (supabaseAdmin.from('job_groups') as any)
+        .update({
+          output_bucket: OUTPUT_BUCKET,
+          output_key: outputKey,
+          status: 'ai_ok',
+          attempts,
+          last_error: null
+        })
+        .eq('id', group.id);
+      return;
+    } catch (error) {
+      const message = (error as Error).message;
+      if (attempts >= maxAttempts) {
+        await (supabaseAdmin.from('job_groups') as any)
+          .update({ status: 'failed', attempts, last_error: message })
+          .eq('id', group.id);
+        throw error;
+      }
+
+      await (supabaseAdmin.from('job_groups') as any)
+        .update({ attempts, last_error: message })
+        .eq('id', group.id);
+      await new Promise((resolve) => setTimeout(resolve, backoff * 1000));
+      backoff = Math.min(backoff * 2, retryCap);
+    }
   }
-
-  const outputUrl = result.outputUrls[0];
-  if (!outputUrl) {
-    throw new Error('RunningHub output URL missing');
-  }
-
-  const outputKey = `jobs/${jobId}/${group.id}.jpg`;
-  await downloadOutputToJpg(outputUrl, OUTPUT_BUCKET, outputKey);
-  await deleteObject(HDR_BUCKET, group.hdr_key);
-
-  const attempts = (group.attempts || 0) + 1;
-  await (supabaseAdmin.from('job_groups') as any)
-    .update({
-      output_bucket: OUTPUT_BUCKET,
-      output_key: outputKey,
-      status: 'ai_ok',
-      attempts,
-      last_error: null
-    })
-    .eq('id', group.id);
 };
 
 const processPipelineJob = async (jobId: string) => {
@@ -444,6 +469,8 @@ const processPipelineJob = async (jobId: string) => {
   if (!job.workflow_id || !job.workflow_version_id) throw new Error('Pipeline job missing workflow metadata');
 
   const context = await fetchWorkflowContext(job.workflow_id, job.workflow_version_id);
+  const hdrConcurrency = Number(context.runtimeConfig.hdr_concurrency ?? HDR_CONCURRENCY);
+  const aiConcurrency = Number(context.runtimeConfig.ai_concurrency ?? AI_CONCURRENCY);
 
   await (supabaseAdmin.from('jobs') as any)
     .update({ status: 'preprocessing', error_message: null })
@@ -459,7 +486,7 @@ const processPipelineJob = async (jobId: string) => {
   }
 
   const pendingHdr = ((hdrGroups || []) as any[]).filter((group: any) => group.status === 'queued');
-  await runWithConcurrency(pendingHdr, HDR_CONCURRENCY, async (group) => {
+  await runWithConcurrency(pendingHdr, hdrConcurrency, async (group) => {
     try {
       await processHdrGroup(jobId, group);
       await updateJobProgress(jobId);
@@ -483,7 +510,7 @@ const processPipelineJob = async (jobId: string) => {
   const pendingAi = ((aiGroups || []) as any[]).filter((group: any) => (
     group.status === 'preprocess_ok' || group.status === 'hdr_ok'
   ));
-  await runWithConcurrency(pendingAi, AI_CONCURRENCY, async (group) => {
+  await runWithConcurrency(pendingAi, aiConcurrency, async (group) => {
     try {
       await processRunningHubGroup(jobId, group, context);
       await updateJobProgress(jobId);
