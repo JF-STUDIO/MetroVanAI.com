@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { authenticate } from '../middleware/auth.js';
 import { requireAdmin } from '../middleware/admin.js';
@@ -232,45 +233,52 @@ router.post('/admin/workflows/:id/publish/:versionId', async (req: Request, res:
 });
 
 router.post('/admin/workflows/:id/test-run', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { input_url, r2_key, r2_bucket } = req.body || {};
+  try {
+    const { id } = req.params;
+    const { input_url, r2_key, r2_bucket } = req.body || {};
 
-  const { data: version, error: versionError } = await (supabaseAdmin.from('workflow_versions') as any)
-    .select('id, workflow_remote_id, input_schema, runtime_config, workflows(provider_id)')
-    .eq('workflow_id', id)
-    .eq('is_published', true)
-    .single();
+    const { data: version, error: versionError } = await (supabaseAdmin.from('workflow_versions') as any)
+      .select('id, workflow_remote_id, input_schema, runtime_config, workflows(provider_id)')
+      .eq('workflow_id', id)
+      .eq('is_published', true)
+      .single();
 
-  if (versionError || !version) return res.status(400).json({ error: 'No published workflow version' });
+    if (versionError || !version) return res.status(400).json({ error: 'No published workflow version' });
 
-  const { data: provider } = await (supabaseAdmin.from('workflow_providers') as any)
-    .select('id, name, base_url, create_path, status_path, status_mode')
-    .eq('id', version.workflows?.provider_id)
-    .single();
+    const { data: provider } = await (supabaseAdmin.from('workflow_providers') as any)
+      .select('id, name, base_url, create_path, status_path, status_mode')
+      .eq('id', version.workflows?.provider_id)
+      .single();
 
-  if (!provider) return res.status(400).json({ error: 'Provider not found' });
+    if (!provider) return res.status(400).json({ error: 'Provider not found' });
 
-  let inputUrl = input_url;
-  if (!inputUrl && r2_key) {
-    const bucket = r2_bucket || RAW_BUCKET;
-    inputUrl = await getPresignedGetUrl(bucket, r2_key, 900);
+    let inputUrl = input_url;
+    if (!inputUrl && r2_key) {
+      const bucket = r2_bucket || RAW_BUCKET;
+      inputUrl = await getPresignedGetUrl(bucket, r2_key, 900);
+    }
+
+    if (!inputUrl) return res.status(400).json({ error: 'input_url or r2_key is required' });
+
+    const runtimeConfig = (version.runtime_config || {}) as Record<string, unknown>;
+    const inputKey = (runtimeConfig.input_node_key as string | undefined) || 'main_input';
+
+    const created = await createRunningHubTask(provider, version.workflow_remote_id, inputKey, inputUrl, runtimeConfig);
+    const status = await pollRunningHub(provider, created.taskId, runtimeConfig);
+
+    res.json({
+      task_id: created.taskId,
+      status: status.status,
+      output_urls: status.outputUrls,
+      raw_create: created.raw,
+      raw_status: status.raw
+    });
+  } catch (error) {
+    const axiosError = axios.isAxiosError(error) ? error : null;
+    const detail = axiosError?.response?.data || (error as Error).message || String(error);
+    console.error('Admin test-run failed:', detail);
+    res.status(502).json({ error: 'Test-run failed', detail });
   }
-
-  if (!inputUrl) return res.status(400).json({ error: 'input_url or r2_key is required' });
-
-  const runtimeConfig = (version.runtime_config || {}) as Record<string, unknown>;
-  const inputKey = (runtimeConfig.input_node_key as string | undefined) || 'main_input';
-
-  const created = await createRunningHubTask(provider, version.workflow_remote_id, inputKey, inputUrl, runtimeConfig);
-  const status = await pollRunningHub(provider, created.taskId, runtimeConfig);
-
-  res.json({
-    task_id: created.taskId,
-    status: status.status,
-    output_urls: status.outputUrls,
-    raw_create: created.raw,
-    raw_status: status.raw
-  });
 });
 
 router.get('/admin/credits', async (_req: Request, res: Response) => {
