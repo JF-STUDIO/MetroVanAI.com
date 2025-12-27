@@ -14,14 +14,22 @@ export function createRedis() {
   }
   
   // Log the Redis host to confirm the correct URL is being used, without exposing the password.
-  console.log(`Connecting to Redis at ${redisUrl.split('@')[1]}...`);
+  let hostLabel = 'unknown';
+  try {
+    hostLabel = new URL(redisUrl).host;
+  } catch {
+    hostLabel = redisUrl.split('@').pop() || 'unknown';
+  }
+  console.log(`Connecting to Redis at ${hostLabel}...`);
 
-  // Configuration for Upstash Redis or any other cloud Redis that requires TLS
+  const useTls = redisUrl.startsWith('rediss://') || process.env.REDIS_TLS === 'true';
+
+  // Configuration for Redis; only enable TLS when required.
   const redisOptions = {
-    tls: {}, // Enable TLS
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
     keepAlive: 30000,
+    ...(useTls ? { tls: {} } : {}),
   };
 
   const client = new (IORedis as any)(redisUrl, redisOptions);
