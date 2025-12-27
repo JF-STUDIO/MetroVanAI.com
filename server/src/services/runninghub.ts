@@ -95,10 +95,16 @@ const extractTaskId = (data: any) => {
   if (!data) return null;
   if (typeof data === 'string') return data;
   if (typeof data.data === 'string') return data.data;
+  if (typeof data.taskId === 'string') return data.taskId;
+  if (typeof data.taskID === 'string') return data.taskID;
   return (
     data.task_id ||
     data.id ||
+    data.taskId ||
+    data.taskID ||
     data?.data?.task_id ||
+    data?.data?.taskId ||
+    data?.data?.taskID ||
     data?.data?.id ||
     data?.data?.workflow_task_id ||
     null
@@ -191,7 +197,15 @@ export const createRunningHubTask = async (
 
   const taskId = extractTaskId(data);
   if (!taskId) {
-    throw new Error('RunningHub task id missing from response');
+    const details =
+      data?.message ||
+      data?.msg ||
+      data?.error ||
+      data?.code ||
+      data?.status ||
+      null;
+    const hint = details ? ` (${details})` : '';
+    throw new Error(`RunningHub task id missing from response${hint}`);
   }
 
   return { taskId, raw: data };
