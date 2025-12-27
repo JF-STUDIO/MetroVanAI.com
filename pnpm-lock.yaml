@@ -72,6 +72,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.38.4
         version: 2.89.0
+      '@types/node':
+        specifier: ^20.11.30
+        version: 20.19.27
       archiver:
         specifier: ^6.0.1
         version: 6.0.2
@@ -115,9 +118,6 @@ importers:
       '@types/morgan':
         specifier: ^1.9.9
         version: 1.9.10
-      '@types/node':
-        specifier: ^20.11.30
-        version: 20.19.27
       '@types/uuid':
         specifier: ^9.0.7
         version: 9.0.8
