@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+.git
+.vercel
+.env*
+*.log
+*.tmp
+*.swp
+coverage
+tmp
+cache
+node_modules
+dist
+

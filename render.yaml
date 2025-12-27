@@ -8,16 +8,17 @@ services:
   # 2. Web Service (API + Worker combined)
   - type: web
     name: metrovan-server
-    env: node
+    env: docker
     plan: free # or your desired plan
-    rootDir: server
-    buildCommand: pnpm install --prod=false && pnpm run build
-    startCommand: pnpm start
+    dockerfilePath: server/Dockerfile
+    dockerContext: .
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 10000
+      - key: ENABLE_INLINE_WORKER
+        value: "true"
       - key: REDIS_URL
         fromService:
           type: redis
