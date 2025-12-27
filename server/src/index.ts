@@ -9,8 +9,12 @@ import jobRoutes from './routes/jobs.js';
 const app = express();
 const port = process.env.PORT || 4000;
 
+const corsOptions = {
+  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+};
+
 app.use(helmet());
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(morgan('dev'));
 app.use(express.json());
 
