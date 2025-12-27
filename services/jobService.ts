@@ -17,6 +17,11 @@ api.interceptors.request.use(async (config) => {
 });
 
 export const jobService = {
+  getWorkflows: async () => {
+    const response = await api.get('/workflows');
+    return response.data;
+  },
+
   getTools: async () => {
     const response = await api.get('/tools');
     return response.data;
@@ -27,8 +32,38 @@ export const jobService = {
     return response.data;
   },
 
+  createWorkflowJob: async (workflowId: string, projectName: string) => {
+    const response = await api.post('/jobs/create', { workflowId, projectName });
+    return response.data;
+  },
+
+  getPresignedRawUploadUrls: async (jobId: string, files: { name: string; type: string }[]) => {
+    const response = await api.post(`/jobs/${jobId}/presign-raw`, { files });
+    return response.data;
+  },
+
   getPresignedUploadUrls: async (jobId: string, files: { name: string; type: string }[]) => {
     const response = await api.post(`/jobs/${jobId}/presign-upload`, { files });
+    return response.data;
+  },
+
+  uploadComplete: async (jobId: string, files: { r2_key: string; filename?: string; size?: number; exif_time?: string | null }[]) => {
+    const response = await api.post(`/jobs/${jobId}/upload-complete`, { files });
+    return response.data;
+  },
+
+  analyzeJob: async (jobId: string) => {
+    const response = await api.post(`/jobs/${jobId}/analyze`);
+    return response.data;
+  },
+
+  startJob: async (jobId: string) => {
+    const response = await api.post(`/jobs/${jobId}/start`);
+    return response.data;
+  },
+
+  getPipelineStatus: async (jobId: string) => {
+    const response = await api.get(`/jobs/${jobId}/status`);
     return response.data;
   },
 
