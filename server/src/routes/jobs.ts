@@ -195,4 +195,81 @@ router.post('/recharge', authenticate, async (req: AuthRequest, res: Response) =
     res.json({ points: newPoints });
 });
 
+// New pipeline: create job from workflow
+router.post('/jobs/create', authenticate, async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    const { workflowId, workflowSlug, projectName } = req.body || {};
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!workflowId && !workflowSlug) {
+        return res.status(400).json({ error: 'workflowId or workflowSlug is required' });
+    }
+
+    let workflowQuery = (supabaseAdmin.from('workflows') as any)
+        .select('id, credit_per_unit, is_active');
+    if (workflowId) {
+        workflowQuery = workflowQuery.eq('id', workflowId);
+    } else {
+        workflowQuery = workflowQuery.eq('slug', workflowSlug);
+    }
+
+    const { data: workflow, error: workflowError } = await workflowQuery.single();
+    if (workflowError || !workflow || !workflow.is_active) {
+        return res.status(404).json({ error: 'Workflow not found or inactive' });
+    }
+
+    const { data: version, error: versionError } = await (supabaseAdmin.from('workflow_versions') as any)
+        .select('id, version')
+        .eq('workflow_id', workflow.id)
+        .eq('is_published', true)
+        .single();
+    if (versionError || !version) {
+        return res.status(400).json({ error: 'No published workflow version' });
+    }
+
+    const { data: job, error: jobError } = await (supabaseAdmin
+        .from('jobs') as any)
+        .insert({
+            user_id: userId,
+            workflow_id: workflow.id,
+            workflow_version_id: version.id,
+            project_name: projectName || null,
+            status: 'draft'
+        })
+        .select()
+        .single();
+
+    if (jobError) return res.status(500).json({ error: jobError.message });
+    res.json(job);
+});
+
+// New pipeline: job status
+router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { data: job, error } = await (supabaseAdmin
+        .from('jobs') as any)
+        .select('id, status, estimated_units, reserved_units, settled_units, progress, zip_key, created_at, project_name')
+        .eq('id', jobId)
+        .eq('user_id', userId)
+        .single();
+    if (error || !job) return res.status(404).json({ error: 'Job not found' });
+
+    const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
+        .select('status')
+        .eq('job_id', jobId);
+
+    const summary = (groups || []).reduce((acc: any, group: any) => {
+        acc.total += 1;
+        if (group.status === 'ai_ok') acc.success += 1;
+        if (group.status === 'failed') acc.failed += 1;
+        return acc;
+    }, { total: 0, success: 0, failed: 0 });
+
+    res.json({ job, groups: summary });
+});
+
 export default router;

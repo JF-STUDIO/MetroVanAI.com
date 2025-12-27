@@ -5,6 +5,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import jobRoutes from './routes/jobs.js';
+import workflowRoutes from './routes/workflows.js';
 import './worker.js'; // Start the worker in the same process
 import { createRedis } from './services/redis.js';
 
@@ -37,6 +38,7 @@ app.use(express.json());
 
 // 路由
 app.use('/api', jobRoutes);
+app.use('/api', workflowRoutes);
 
 // 健康检查
 app.get('/health', (req, res) => {
