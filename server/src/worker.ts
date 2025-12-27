@@ -1,5 +1,5 @@
 import './config.js';
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, QueueEvents } from 'bullmq';
 import { createReadStream, createWriteStream, promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -571,14 +571,14 @@ const worker = new Worker('job-queue', async (job: Job) => {
   removeOnFail: { count: 5000 }
 });
 
-const workerEvents = new Worker('job-queue', async () => {}, { connection: createRedis() });
+const workerEvents = new QueueEvents('job-queue', { connection: createRedis() });
 
-workerEvents.on('completed', (job) => {
-  console.log(`${job.id} has completed!`);
+workerEvents.on('completed', ({ jobId }) => {
+  console.log(`${jobId} has completed!`);
 });
 
-workerEvents.on('failed', (job, err) => {
-  console.log(`${job?.id} has failed with ${err.message}`);
+workerEvents.on('failed', ({ jobId, failedReason }) => {
+  console.log(`${jobId} has failed with ${failedReason}`);
 });
 
 console.log('Worker started...');
