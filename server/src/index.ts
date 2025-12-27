@@ -5,6 +5,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import jobRoutes from './routes/jobs.js';
+import './worker.js'; // Start the worker in the same process
 
 const app = express();
 const port = process.env.PORT || 4000;

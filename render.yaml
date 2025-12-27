@@ -1,17 +1,17 @@
 services:
-  # 1. Redis 服务
+  # 1. Redis a service (if you use Upstash, you can remove this)
   - type: redis
     name: metrovan-redis
     plan: free
     ipAllowList: []
 
-  # 2. 后端 API 服务
+  # 2. Web Service (API + Worker combined)
   - type: web
     name: metrovan-server
     env: node
-    plan: free
+    plan: free # or your desired plan
     rootDir: server
-    buildCommand: pnpm install && pnpm run build
+    buildCommand: pnpm run build
     startCommand: pnpm start
     envVars:
       - key: NODE_ENV
@@ -42,35 +42,4 @@ services:
       - key: RUNNINGHUB_API_KEY
         sync: false
       - key: CORS_ORIGIN
-        sync: false
-
-  # 3. 后台 Worker 服务
-  - type: worker
-    name: metrovan-worker
-    env: node
-    plan: free
-    rootDir: server
-    buildCommand: pnpm install && pnpm run build
-    startCommand: pnpm run worker
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: metrovan-redis
-          property: connectionString
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: R2_ENDPOINT
-        sync: false
-      - key: R2_ACCESS_KEY_ID
-        sync: false
-      - key: R2_SECRET_ACCESS_KEY
-        sync: false
-      - key: R2_BUCKET_NAME
-        value: wangzhan
-      - key: RUNNINGHUB_API_KEY
         sync: false
