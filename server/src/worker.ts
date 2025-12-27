@@ -1,9 +1,12 @@
 import './config.js';
 import { Worker, Job } from 'bullmq';
-import { createReadStream } from 'fs';
+import { createReadStream, createWriteStream, promises as fs } from 'fs';
+import os from 'os';
 import path from 'path';
+import { pipeline } from 'stream/promises';
 import axios from 'axios';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
+import archiver from 'archiver';
+import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { supabaseAdmin } from './services/supabase.js';
 import {
   r2Client,
@@ -11,7 +14,8 @@ import {
   HDR_BUCKET,
   OUTPUT_BUCKET,
   getPresignedGetUrl,
-  deleteObject
+  deleteObject,
+  headObject
 } from './services/r2.js';
 import { createRedis } from './services/redis.js';
 import { createHdrForGroup, cleanupHdrTemp } from './services/hdr.js';
@@ -119,6 +123,168 @@ const downloadOutputToR2 = async (outputUrl: string, bucket: string, key: string
   );
 };
 
+const downloadR2ObjectToFile = async (bucket: string, key: string, filePath: string) => {
+  const { Body } = await r2Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  if (!Body || typeof (Body as NodeJS.ReadableStream).pipe !== 'function') {
+    throw new Error('R2 object body is not a readable stream');
+  }
+  await pipeline(Body as NodeJS.ReadableStream, createWriteStream(filePath));
+};
+
+const createZipArchive = async (files: { path: string; name: string }[], zipPath: string) => {
+  await new Promise<void>((resolve, reject) => {
+    const output = createWriteStream(zipPath);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    output.on('close', () => resolve());
+    output.on('error', (err) => reject(err));
+    archive.on('error', (err) => reject(err));
+
+    archive.pipe(output);
+    for (const file of files) {
+      archive.file(file.path, { name: file.name });
+    }
+    archive.finalize().catch(reject);
+  });
+};
+
+const applyCreditAdjustments = async (
+  job: { id: string; user_id: string; workflow_id: string; settled_units?: number | null; reserved_units?: number | null },
+  totalGroups: number,
+  successCount: number,
+  finalFailureCount: number
+) => {
+  const { data: workflow } = await (supabaseAdmin.from('workflows') as any)
+    .select('credit_per_unit')
+    .eq('id', job.workflow_id)
+    .single();
+
+  const creditPerUnit = workflow?.credit_per_unit || 1;
+  const prevSettled = job.settled_units || 0;
+  const prevReserved = job.reserved_units ?? totalGroups;
+  const releasedAlready = Math.max(totalGroups - prevReserved - prevSettled, 0);
+
+  const settleDelta = Math.max(successCount - prevSettled, 0);
+  const releaseDelta = Math.max(finalFailureCount - releasedAlready, 0);
+
+  if (settleDelta > 0) {
+    await (supabaseAdmin as any).rpc('credit_settle', {
+      p_user_id: job.user_id,
+      p_job_id: job.id,
+      p_units: settleDelta * creditPerUnit,
+      p_idempotency_key: `settle:${job.id}:${prevSettled}->${successCount}`,
+      p_note: 'Settle credits for completed groups'
+    });
+  }
+
+  if (releaseDelta > 0) {
+    await (supabaseAdmin as any).rpc('credit_release', {
+      p_user_id: job.user_id,
+      p_job_id: job.id,
+      p_units: releaseDelta * creditPerUnit,
+      p_idempotency_key: `release:${job.id}:${releasedAlready}->${finalFailureCount}`,
+      p_note: 'Release credits for failed groups'
+    });
+  }
+
+  const remainingReserved = Math.max(totalGroups - successCount - finalFailureCount, 0);
+  return { settled_units: successCount, reserved_units: remainingReserved };
+};
+
+const finalizePipelineJob = async (
+  job: { id: string; user_id: string; workflow_id: string; settled_units?: number | null; reserved_units?: number | null },
+  runtimeConfig: Record<string, unknown>
+) => {
+  const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
+    .select('id, group_index, status, output_bucket, output_key, attempts')
+    .eq('job_id', job.id)
+    .order('group_index', { ascending: true });
+
+  const totalGroups = groups?.length || 0;
+  if (!groups || totalGroups === 0) {
+    await (supabaseAdmin.from('jobs') as any)
+      .update({ status: 'failed', error_message: 'No job groups found' })
+      .eq('id', job.id);
+    return;
+  }
+
+  const maxAttempts = Number(runtimeConfig.max_attempts ?? 3);
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-zip-'));
+  const zipEntries: { path: string; name: string }[] = [];
+
+  try {
+    for (const group of groups) {
+      if (group.status !== 'ai_ok' || !group.output_key) {
+        continue;
+      }
+
+      const bucket = group.output_bucket || OUTPUT_BUCKET;
+      const exists = await headObject(bucket, group.output_key);
+      if (!exists) {
+        const attempts = (group.attempts || 0) + 1;
+        await (supabaseAdmin.from('job_groups') as any)
+          .update({
+            status: 'failed',
+            attempts,
+            last_error: 'Output missing in R2'
+          })
+          .eq('id', group.id);
+        continue;
+      }
+
+      const baseName = path.basename(group.output_key);
+      const entryName = `${String(group.group_index).padStart(3, '0')}_${baseName}`;
+      const localPath = path.join(tempDir, entryName);
+      await downloadR2ObjectToFile(bucket, group.output_key, localPath);
+      zipEntries.push({ path: localPath, name: entryName });
+    }
+
+    const { data: refreshedGroups } = await (supabaseAdmin.from('job_groups') as any)
+      .select('status, attempts')
+      .eq('job_id', job.id);
+
+    const successCount = zipEntries.length;
+    const failedFinalCount = (refreshedGroups || []).filter((group: any) => (
+      group.status === 'failed' && (group.attempts || 0) >= maxAttempts
+    )).length;
+
+    const creditUpdate = await applyCreditAdjustments(job, totalGroups, successCount, failedFinalCount);
+
+    if (successCount === 0) {
+      await (supabaseAdmin.from('jobs') as any)
+        .update({
+          status: 'failed',
+          error_message: 'No successful outputs',
+          ...creditUpdate
+        })
+        .eq('id', job.id);
+      return;
+    }
+
+    await (supabaseAdmin.from('jobs') as any)
+      .update({ status: 'zipping' })
+      .eq('id', job.id);
+
+    const zipPath = path.join(tempDir, 'outputs.zip');
+    await createZipArchive(zipEntries, zipPath);
+
+    const zipKey = `jobs/${job.id}/outputs.zip`;
+    await uploadFileToR2(OUTPUT_BUCKET, zipKey, zipPath, 'application/zip');
+
+    const status = successCount === totalGroups ? 'completed' : 'partial';
+    await (supabaseAdmin.from('jobs') as any)
+      .update({
+        status,
+        zip_key: zipKey,
+        progress: 100,
+        ...creditUpdate
+      })
+      .eq('id', job.id);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+};
+
 const processHdrGroup = async (jobId: string, group: any) => {
   const { data: files } = await (supabaseAdmin.from('job_files') as any)
     .select('id, r2_bucket, r2_key')
@@ -212,7 +378,7 @@ const processRunningHubGroup = async (
 const processPipelineJob = async (jobId: string) => {
   const { data: job, error: jobError } = await (supabaseAdmin
     .from('jobs') as any)
-    .select('id, user_id, status, workflow_id, workflow_version_id')
+    .select('id, user_id, workflow_id, workflow_version_id, settled_units, reserved_units')
     .eq('id', jobId)
     .single();
 
@@ -269,23 +435,7 @@ const processPipelineJob = async (jobId: string) => {
     }
   });
 
-  const { data: finalGroups } = await (supabaseAdmin.from('job_groups') as any)
-    .select('status')
-    .eq('job_id', jobId);
-
-  const total = finalGroups?.length || 0;
-  const success = finalGroups?.filter((group: any) => group.status === 'ai_ok').length || 0;
-  const failed = finalGroups?.filter((group: any) => group.status === 'failed').length || 0;
-
-  if (total > 0 && success === total) {
-    await (supabaseAdmin.from('jobs') as any)
-      .update({ status: 'zipping', progress: 100 })
-      .eq('id', jobId);
-  } else if (failed > 0) {
-    await (supabaseAdmin.from('jobs') as any)
-      .update({ status: 'partial' })
-      .eq('id', jobId);
-  }
+  await finalizePipelineJob(job, context.runtimeConfig);
 };
 
 const processLegacyJob = async (jobId: string) => {

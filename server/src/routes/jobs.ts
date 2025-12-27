@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
-import { r2Client, BUCKET_NAME, RAW_BUCKET, getPresignedPutUrl } from '../services/r2.js';
+import { r2Client, BUCKET_NAME, RAW_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl } from '../services/r2.js';
 import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
@@ -127,10 +127,11 @@ router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthReque
     const userId = req.user?.id;
 
     const { data: job } = await (supabaseAdmin
-        .from('jobs') as any).select('*').eq('id', jobId).eq('user_id', userId).single();
+        .from('jobs') as any).select('id, zip_key, workflow_id').eq('id', jobId).eq('user_id', userId).single();
     if (!job || !job.zip_key) return res.status(400).json({ error: 'ZIP not ready or job not found' });
 
-    const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: job.zip_key });
+    const bucket = job.workflow_id ? OUTPUT_BUCKET : BUCKET_NAME;
+    const command = new GetObjectCommand({ Bucket: bucket, Key: job.zip_key });
     const url = await getSignedUrl(r2Client, command, { expiresIn: 900 });
     res.json({ url });
 });
@@ -423,6 +424,70 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
     }
 
     res.json({ reserved_units: job.estimated_units, credits_reserved: creditsToReserve, balance });
+});
+
+// New pipeline: retry missing/failed groups
+router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { data: job, error: jobError } = await (supabaseAdmin
+        .from('jobs') as any)
+        .select('id, workflow_version_id, status')
+        .eq('id', jobId)
+        .eq('user_id', userId)
+        .single();
+    if (jobError || !job) return res.status(404).json({ error: 'Job not found' });
+
+    const { data: version } = await (supabaseAdmin.from('workflow_versions') as any)
+        .select('runtime_config')
+        .eq('id', job.workflow_version_id)
+        .single();
+
+    const runtimeConfig = (version?.runtime_config || {}) as Record<string, any>;
+    const maxAttempts = Number(runtimeConfig.max_attempts ?? 3);
+
+    const { data: groups, error: groupError } = await (supabaseAdmin.from('job_groups') as any)
+        .select('id, status, attempts')
+        .eq('job_id', jobId);
+    if (groupError) return res.status(500).json({ error: groupError.message });
+
+    const retryable = (groups || []).filter((group: any) => (
+        group.status === 'failed' && (group.attempts || 0) < maxAttempts
+    ));
+
+    if (retryable.length === 0) {
+        return res.json({ retried: 0, message: 'No retryable groups' });
+    }
+
+    const retryIds = retryable.map((group: any) => group.id);
+    const { error: retryError } = await (supabaseAdmin.from('job_groups') as any)
+        .update({
+            status: 'queued',
+            hdr_bucket: null,
+            hdr_key: null,
+            output_bucket: null,
+            output_key: null,
+            last_error: null
+        })
+        .in('id', retryIds);
+    if (retryError) return res.status(500).json({ error: retryError.message });
+
+    await (supabaseAdmin.from('jobs') as any)
+        .update({ status: 'reserved', progress: 0 })
+        .eq('id', jobId)
+        .eq('user_id', userId);
+
+    await jobQueue.add('pipeline-job', { jobId }, {
+        jobId: `pipeline:${jobId}:retry:${Date.now()}`,
+        attempts: 1,
+        removeOnComplete: true,
+        removeOnFail: true
+    });
+
+    res.json({ retried: retryIds.length });
 });
 
 // New pipeline: create job from workflow
