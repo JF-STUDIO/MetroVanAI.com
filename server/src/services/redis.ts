@@ -23,8 +23,23 @@ export function createRedis() {
   const client = new (IORedis as any)(process.env.REDIS_URL, redisOptions);
 
   client.on('error', (err: Error) => {
-    // Optional: Add more robust logging here
-    console.error('Redis client error:', err.message);
+    console.error('Redis client error:', err);
+  });
+
+  client.on('connect', () => {
+    console.log('Redis client connected.');
+  });
+
+  client.on('ready', () => {
+    console.log('Redis client ready.');
+  });
+
+  client.on('close', () => {
+    console.log('Redis client connection closed.');
+  });
+
+  client.on('reconnecting', () => {
+    console.log('Redis client reconnecting...');
   });
 
   return client;
