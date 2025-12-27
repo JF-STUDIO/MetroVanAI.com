@@ -411,6 +411,17 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
         .eq('id', jobId)
         .eq('user_id', userId);
 
+    try {
+        await jobQueue.add('pipeline-job', { jobId }, {
+            jobId: `pipeline:${jobId}`,
+            attempts: 1,
+            removeOnComplete: true,
+            removeOnFail: true
+        });
+    } catch (error) {
+        console.warn('Failed to enqueue pipeline job:', (error as Error).message);
+    }
+
     res.json({ reserved_units: job.estimated_units, credits_reserved: creditsToReserve, balance });
 });
 
