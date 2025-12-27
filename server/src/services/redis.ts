@@ -8,19 +8,23 @@ import IORedis from 'ioredis';
  * which is required for services like Upstash.
  */
 export function createRedis() {
-  if (!process.env.REDIS_URL) {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) {
     throw new Error('REDIS_URL environment variable is not set.');
   }
+  
+  // Log the Redis host to confirm the correct URL is being used, without exposing the password.
+  console.log(`Connecting to Redis at ${redisUrl.split('@')[1]}...`);
 
   // Configuration for Upstash Redis or any other cloud Redis that requires TLS
   const redisOptions = {
     tls: {}, // Enable TLS
-    maxRetriesPerRequest: null, // From user's instruction
-    enableReadyCheck: false, // From user's instruction
-    keepAlive: 30000, // From user's instruction
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+    keepAlive: 30000,
   };
 
-  const client = new (IORedis as any)(process.env.REDIS_URL, redisOptions);
+  const client = new (IORedis as any)(redisUrl, redisOptions);
 
   client.on('error', (err: Error) => {
     console.error('Redis client error:', err);
