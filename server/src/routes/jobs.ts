@@ -151,8 +151,26 @@ router.get('/jobs', authenticate, async (req: AuthRequest, res: Response) => {
 // 8. 获取个人资料 (含积分)
 router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
-    const { data, error } = await (supabaseAdmin.from('profiles') as any).select('*').eq('id', userId).single();
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { data, error } = await (supabaseAdmin.from('profiles') as any).select('*').eq('id', userId).maybeSingle();
     if (error) return res.status(500).json({ error: error.message });
+
+    if (!data) {
+        const fallbackProfile = {
+            id: userId,
+            email: req.user?.email || null,
+            points: 10,
+            is_admin: false
+        };
+        const { data: created, error: createError } = await (supabaseAdmin.from('profiles') as any)
+            .upsert(fallbackProfile)
+            .select()
+            .single();
+        if (createError) return res.status(500).json({ error: createError.message });
+        return res.json(created);
+    }
+
     res.json(data);
 });
 
