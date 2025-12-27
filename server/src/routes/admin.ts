@@ -8,8 +8,7 @@ import { createRunningHubTask, pollRunningHub } from '../services/runninghub.js'
 
 const router = Router();
 
-router.use(authenticate);
-router.use(requireAdmin);
+router.use('/admin', authenticate, requireAdmin);
 
 const resolveProvider = async (providerId?: string, providerName?: string) => {
   if (providerId) {
