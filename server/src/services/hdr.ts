@@ -5,6 +5,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { spawn } from 'child_process';
 import { r2Client } from './r2.js';
+import { exiftool } from 'exiftool-vendored';
 
 const RAW_EXTENSIONS = new Set([
   'arw',
@@ -55,6 +56,19 @@ const resolveBinary = async (name: string) => {
     });
     return stdout;
   } catch {
+    const candidates = [
+      `/Applications/Hugin/Hugin.app/Contents/MacOS/${name}`,
+      `/Applications/Hugin/tools_mac/${name}`,
+      `/Applications/Hugin/PTBatcherGUI.app/Contents/MacOS/${name}`
+    ];
+    for (const candidate of candidates) {
+      try {
+        await fs.stat(candidate);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
     return null;
   }
 };
@@ -62,6 +76,52 @@ const resolveBinary = async (name: string) => {
 const isRawFile = (filePath: string) => {
   const ext = path.extname(filePath).replace('.', '').toLowerCase();
   return RAW_EXTENSIONS.has(ext);
+};
+
+const ensureExiftoolShutdown = (() => {
+  let registered = false;
+  return () => {
+    if (registered) return;
+    registered = true;
+    const shutdown = () => {
+      exiftool.end().catch(() => undefined);
+    };
+    process.on('exit', shutdown);
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  };
+})();
+
+const fileExists = async (filePath: string) => {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat.size > 0;
+  } catch {
+    return false;
+  }
+};
+
+const extractEmbeddedJpeg = async (inputPath: string, outputPath: string) => {
+  ensureExiftoolShutdown();
+  try {
+    await fs.rm(outputPath, { force: true });
+    await exiftool.extractJpgFromRaw(inputPath, outputPath);
+  } catch {
+    // ignore and fallback
+  }
+
+  if (await fileExists(outputPath)) {
+    return true;
+  }
+
+  try {
+    await fs.rm(outputPath, { force: true });
+    await exiftool.extractPreview(inputPath, outputPath);
+  } catch {
+    return false;
+  }
+
+  return fileExists(outputPath);
 };
 
 const downloadObject = async (bucket: string, key: string, dest: string) => {
@@ -89,7 +149,7 @@ const convertRawToTiff = async (inputPath: string, outputPath: string) => {
   await fs.rename(generatedPath, outputPath);
 };
 
-const convertToJpeg = async (inputPath: string, outputPath: string) => {
+export const convertToJpeg = async (inputPath: string, outputPath: string) => {
   const magick = (await resolveBinary('magick')) || (await resolveBinary('convert'));
   if (!magick) {
     throw new Error('ImageMagick is not installed (magick/convert)');
@@ -147,12 +207,46 @@ export const createHdrForGroup = async (sources: HdrSource[], outputName: string
     if (localPaths.length === 1) {
       const onlyPath = localPaths[0];
       if (isRawFile(onlyPath)) {
+        const embeddedPath = path.join(tempDir, `${path.parse(onlyPath).name}_embedded.jpg`);
+        const extracted = await extractEmbeddedJpeg(onlyPath, embeddedPath);
+        if (extracted) {
+          await fs.copyFile(embeddedPath, outputPath);
+          return { outputPath, tempDir };
+        }
+
         const tiffPath = path.join(tempDir, `${path.parse(onlyPath).name}.tiff`);
         await convertRawToTiff(onlyPath, tiffPath);
         await convertToJpeg(tiffPath, outputPath);
       } else {
-        await fs.copyFile(onlyPath, outputPath);
+        const ext = path.extname(onlyPath).toLowerCase();
+        if (ext === '.jpg' || ext === '.jpeg') {
+          await fs.copyFile(onlyPath, outputPath);
+        } else {
+          await convertToJpeg(onlyPath, outputPath);
+        }
       }
+      return { outputPath, tempDir };
+    }
+
+    const jpegInputs: string[] = [];
+    const rawInputs: string[] = [];
+
+    for (const localPath of localPaths) {
+      if (isRawFile(localPath)) {
+        const embeddedPath = path.join(tempDir, `${path.parse(localPath).name}_embedded.jpg`);
+        const extracted = await extractEmbeddedJpeg(localPath, embeddedPath);
+        if (extracted) {
+          jpegInputs.push(embeddedPath);
+        } else {
+          rawInputs.push(localPath);
+        }
+      } else {
+        jpegInputs.push(localPath);
+      }
+    }
+
+    if (jpegInputs.length >= 2 && rawInputs.length === 0) {
+      await alignAndFuse(jpegInputs, outputPath, tempDir);
       return { outputPath, tempDir };
     }
 

@@ -1,18 +1,132 @@
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
-import { r2Client, BUCKET_NAME, RAW_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl } from '../services/r2.js';
-import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { r2Client, BUCKET_NAME, RAW_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl } from '../services/r2.js';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthRequest } from '../types/auth.js';
 import { createRedis } from '../services/redis.js';
+import { extractExifFromR2 } from '../services/exif.js';
 
 const router = Router();
 
 // Create a new Redis connection for the queue.
 const jobQueue = new Queue('job-queue', { connection: createRedis() });
+
+const runWithConcurrency = async <T>(
+    items: T[],
+    limit: number,
+    handler: (item: T) => Promise<void>
+) => {
+    if (!items.length) return;
+    const queue = [...items];
+    const workers = Array.from({ length: Math.max(limit, 1) }, async () => {
+        while (queue.length > 0) {
+            const item = queue.shift();
+            if (!item) return;
+            await handler(item);
+        }
+    });
+    await Promise.all(workers);
+};
+
+const exposurePlan = (count: number) => {
+    const sizes = [7, 5, 3];
+    const memo = new Map<number, number[]>();
+    const best = (remaining: number): number[] => {
+        if (memo.has(remaining)) return memo.get(remaining)!;
+        let bestSizes: number[] = [];
+        let bestUsed = 0;
+        for (const size of sizes) {
+            if (remaining < size) continue;
+            const candidate = [size, ...best(remaining - size)];
+            const used = candidate.reduce((sum, value) => sum + value, 0);
+            if (used > bestUsed) {
+                bestUsed = used;
+                bestSizes = candidate;
+            }
+        }
+        memo.set(remaining, bestSizes);
+        return bestSizes;
+    };
+    const chosen = best(count);
+    const used = chosen.reduce((sum, value) => sum + value, 0);
+    return { sizes: chosen, remainder: count - used };
+};
+
+const RAW_EXTENSIONS = new Set(['cr2', 'cr3', 'nef', 'arw', 'dng', 'raf', 'rw2', 'orf']);
+const JPG_EXTENSIONS = new Set(['jpg', 'jpeg']);
+const PNG_EXTENSIONS = new Set(['png']);
+
+const detectInputKind = (filename?: string | null, key?: string | null) => {
+    const source = filename || key || '';
+    const ext = source.split('.').pop()?.toLowerCase() || '';
+    if (RAW_EXTENSIONS.has(ext)) return 'raw';
+    if (JPG_EXTENSIONS.has(ext)) return 'jpg';
+    if (PNG_EXTENSIONS.has(ext)) return 'png';
+    return 'other';
+};
+
+const normalizeOutputFilename = (filename?: string | null, fallback = 'image') => {
+    const base = (filename || fallback).replace(/\.[^.]+$/, '');
+    return `${base}.jpg`;
+};
+
+const scoreTime = (files: any[]) => {
+    const timestamps = files
+        .map(file => file.exif_time ? new Date(file.exif_time).getTime() : null)
+        .filter((value: number | null) => value !== null) as number[];
+    if (timestamps.length < files.length) return 0;
+    const min = Math.min(...timestamps);
+    const max = Math.max(...timestamps);
+    const delta = max - min;
+    if (delta <= 2000) return 0.4;
+    if (delta >= 6000) return 0;
+    const factor = 1 - (delta - 2000) / 4000;
+    return 0.4 * Math.max(0, Math.min(1, factor));
+};
+
+const scoreExposureSteps = (files: any[]) => {
+    const evs = files
+        .map(file => typeof file.ev === 'number' ? file.ev : null)
+        .filter((value: number | null) => value !== null) as number[];
+    if (evs.length < 2) return 0;
+    const sorted = [...evs].sort((a, b) => b - a);
+    const diffs = sorted.slice(1).map((value, index) => Math.abs(value - sorted[index]));
+    if (diffs.length === 0) return 0;
+
+    const scoreForTarget = (target: number) => {
+        const matches = diffs.filter(diff => Math.abs(diff - target) <= 0.3).length;
+        return matches / diffs.length;
+    };
+
+    const best = Math.max(scoreForTarget(1), scoreForTarget(2));
+    return 0.35 * best;
+};
+
+const scoreParams = (files: any[]) => {
+    const isoValues = files.map(file => file.iso).filter((value: number | null) => typeof value === 'number');
+    if (isoValues.length < files.length) return 0;
+    const first = isoValues[0];
+    const sameIso = isoValues.every(value => Math.abs(value - first) < 0.5);
+    return sameIso ? 0.15 : 0;
+};
+
+const scoreCamera = (files: any[]) => {
+    const make = files[0]?.camera_make || null;
+    const model = files[0]?.camera_model || null;
+    if (!make || !model) return 0;
+    const same = files.every(file => file.camera_make === make && file.camera_model === model);
+    return same ? 0.1 : 0;
+};
+
+const computeHdrConfidence = (files: any[]) => {
+    if (files.length < 2) return 0;
+    const score = scoreTime(files) + scoreExposureSteps(files) + scoreParams(files) + scoreCamera(files);
+    return Math.max(0, Math.min(1, score));
+};
 
 // 1. 获取所有工具
 router.get('/tools', async (req: Request, res: Response) => {
@@ -122,18 +236,45 @@ router.get('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Response)
 });
 
 // 6. 获取下载预签名 URL
+const buildDownloadResponse = async (jobId: string, userId: string) => {
+    const { data: job } = await (supabaseAdmin
+        .from('jobs') as any)
+        .select('id, workflow_id, zip_key, output_zip_key, output_file_key, output_file_name')
+        .eq('id', jobId)
+        .eq('user_id', userId)
+        .single();
+
+    if (!job) return null;
+
+    const bucket = job.workflow_id ? OUTPUT_BUCKET : BUCKET_NAME;
+    if (job.output_file_key) {
+        const url = await getPresignedGetUrl(bucket, job.output_file_key, 900, job.output_file_name || null);
+        return { url, type: 'jpg' };
+    }
+
+    const zipKey = job.output_zip_key || job.zip_key;
+    if (!zipKey) return null;
+    const url = await getPresignedGetUrl(bucket, zipKey, 900);
+    return { url, type: 'zip' };
+};
+
 router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthRequest, res: Response) => {
     const { jobId } = req.params;
     const userId = req.user?.id;
 
-    const { data: job } = await (supabaseAdmin
-        .from('jobs') as any).select('id, zip_key, workflow_id').eq('id', jobId).eq('user_id', userId).single();
-    if (!job || !job.zip_key) return res.status(400).json({ error: 'ZIP not ready or job not found' });
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const payload = await buildDownloadResponse(jobId, userId);
+    if (!payload) return res.status(400).json({ error: 'Output not ready or job not found' });
+    res.json(payload);
+});
 
-    const bucket = job.workflow_id ? OUTPUT_BUCKET : BUCKET_NAME;
-    const command = new GetObjectCommand({ Bucket: bucket, Key: job.zip_key });
-    const url = await getSignedUrl(r2Client, command, { expiresIn: 900 });
-    res.json({ url });
+router.get('/jobs/:jobId/download', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const payload = await buildDownloadResponse(jobId, userId);
+    if (!payload) return res.status(400).json({ error: 'Output not ready or job not found' });
+    res.json(payload);
 });
 
 // 7. 分页获取历史任务
@@ -144,7 +285,11 @@ router.get('/jobs', authenticate, async (req: AuthRequest, res: Response) => {
     const to = from + Number(limit) - 1;
 
     const { data, error, count } = await (supabaseAdmin
-        .from('jobs') as any).select('*, photo_tools(name)', { count: 'exact' }).eq('user_id', userId).order('created_at', { ascending: false }).range(from, to);
+        .from('jobs') as any)
+        .select('*, photo_tools(name), workflows(display_name)', { count: 'exact' })
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .range(from, to);
     if (error) return res.status(500).json({ error: error.message });
     res.json({ data, count });
 });
@@ -172,7 +317,18 @@ router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => 
         return res.json(created);
     }
 
-    res.json(data);
+    const { data: credits } = await (supabaseAdmin.from('credit_balances') as any)
+        .select('available_credits, reserved_credits')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    const availableCredits = credits?.available_credits ?? data.points ?? 0;
+    res.json({
+        ...data,
+        points: availableCredits,
+        available_credits: availableCredits,
+        reserved_credits: credits?.reserved_credits ?? 0
+    });
 });
 
 // 9. 充值积分 (模拟实现)
@@ -233,16 +389,20 @@ router.post('/jobs/:jobId/upload-complete', authenticate, async (req: AuthReques
         .from('jobs') as any).select('id, status').eq('id', jobId).eq('user_id', userId).single();
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
-    const rows = files.map((file: any) => ({
-        job_id: jobId,
-        r2_bucket: file.r2_bucket || RAW_BUCKET,
-        r2_key: file.r2_key || file.r2Key || file.key,
-        filename: file.filename || file.name,
-        exif_time: file.exif_time || null,
-        size: file.size || null,
-        camera_make: file.camera_make || null,
-        camera_model: file.camera_model || null
-    })).filter((row: any) => row.r2_key);
+    const rows = files.map((file: any) => {
+        const filename = file.filename || file.name;
+        return {
+            job_id: jobId,
+            r2_bucket: file.r2_bucket || RAW_BUCKET,
+            r2_key: file.r2_key || file.r2Key || file.key,
+            filename,
+            input_kind: detectInputKind(filename, file.r2_key || file.r2Key || file.key),
+            exif_time: file.exif_time || null,
+            size: file.size || null,
+            camera_make: file.camera_make || null,
+            camera_model: file.camera_model || null
+        };
+    }).filter((row: any) => row.r2_key);
 
     if (rows.length === 0) return res.status(400).json({ error: 'No valid file keys provided' });
 
@@ -279,31 +439,80 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         .eq('user_id', userId);
 
     const { data: files, error: filesError } = await (supabaseAdmin.from('job_files') as any)
-        .select('id, r2_key, exif_time')
+        .select('id, r2_bucket, r2_key, filename, input_kind, exif_time, camera_make, camera_model, size, exposure_time, fnumber, iso, ev')
         .eq('job_id', jobId);
     if (filesError) return res.status(500).json({ error: filesError.message });
     if (!files || files.length === 0) return res.status(400).json({ error: 'No files to analyze' });
 
-    const sorted = [...files].sort((a: any, b: any) => {
+    const fileList = [...files];
+    const originalFilenames = fileList.map((file: any) => file.filename || file.r2_key.split('/').pop());
+
+    const kindUpdates: { id: string; input_kind: string }[] = [];
+    for (const file of fileList) {
+        const kind = detectInputKind(file.filename, file.r2_key);
+        if (file.input_kind !== kind) {
+            file.input_kind = kind;
+            kindUpdates.push({ id: file.id, input_kind: kind });
+        }
+    }
+    if (kindUpdates.length > 0) {
+        await runWithConcurrency(kindUpdates, 3, async (update) => {
+            await (supabaseAdmin.from('job_files') as any)
+                .update({ input_kind: update.input_kind })
+                .eq('id', update.id);
+        });
+    }
+
+    const needsExif = fileList.filter((file: any) => file.input_kind === 'raw' && (!file.exif_time || file.ev === null || file.exposure_time === null || file.fnumber === null || file.iso === null));
+    if (needsExif.length > 0) {
+        await runWithConcurrency(needsExif, 2, async (file: any) => {
+            try {
+                const meta = await extractExifFromR2(file.r2_bucket || RAW_BUCKET, file.r2_key);
+                const updates: Record<string, any> = {};
+                if (meta.exif_time) updates.exif_time = meta.exif_time;
+                if (meta.camera_make) updates.camera_make = meta.camera_make;
+                if (meta.camera_model) updates.camera_model = meta.camera_model;
+                if (meta.size) updates.size = meta.size;
+                if (meta.exposure_time !== null) updates.exposure_time = meta.exposure_time;
+                if (meta.fnumber !== null) updates.fnumber = meta.fnumber;
+                if (meta.iso !== null) updates.iso = meta.iso;
+                if (meta.ev !== null) updates.ev = meta.ev;
+
+                if (Object.keys(updates).length > 0) {
+                    await (supabaseAdmin.from('job_files') as any)
+                        .update(updates)
+                        .eq('id', file.id);
+                    Object.assign(file, updates);
+                }
+            } catch (error) {
+                console.warn('EXIF extraction failed for', file.r2_key, (error as Error).message);
+            }
+        });
+    }
+
+    const rawFiles = fileList.filter((file: any) => file.input_kind === 'raw');
+    const imageFiles = fileList.filter((file: any) => file.input_kind === 'jpg' || file.input_kind === 'png');
+
+    const sortedRaw = [...rawFiles].sort((a: any, b: any) => {
         if (a.exif_time && b.exif_time) {
             return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
         }
         if (!a.exif_time && b.exif_time) return -1;
         if (a.exif_time && !b.exif_time) return 1;
-        return 0;
+        return (a.filename || '').localeCompare(b.filename || '');
     });
 
     const thresholdMs = 2000;
-    const groups: any[][] = [];
+    const timeGroups: any[][] = [];
     let current: any[] = [];
 
-    for (const file of sorted) {
+    for (const file of sortedRaw) {
         if (!file.exif_time) {
             if (current.length > 0) {
-                groups.push(current);
+                timeGroups.push(current);
                 current = [];
             }
-            groups.push([file]);
+            timeGroups.push([file]);
             continue;
         }
 
@@ -314,7 +523,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
 
         const last = current[current.length - 1];
         if (!last.exif_time) {
-            groups.push(current);
+            timeGroups.push(current);
             current = [file];
             continue;
         }
@@ -323,12 +532,90 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         if (delta <= thresholdMs) {
             current.push(file);
         } else {
-            groups.push(current);
+            timeGroups.push(current);
             current = [file];
         }
     }
 
-    if (current.length > 0) groups.push(current);
+    if (current.length > 0) timeGroups.push(current);
+
+    const groups: { files: any[]; group_type: string; hdr_confidence: number | null; output_filename: string }[] = [];
+
+    for (const cluster of timeGroups) {
+        if (cluster.length < 3) {
+            const confidence = computeHdrConfidence(cluster);
+            if (cluster.length >= 2 && confidence >= 0.7) {
+                const lead = cluster[0];
+                groups.push({
+                    files: cluster,
+                    group_type: 'hdr',
+                    hdr_confidence: confidence,
+                    output_filename: normalizeOutputFilename(lead.filename, lead.r2_key.split('/').pop() || 'hdr')
+                });
+            } else {
+                for (const file of cluster) {
+                    groups.push({
+                        files: [file],
+                        group_type: 'raw',
+                        hdr_confidence: confidence,
+                        output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
+                    });
+                }
+            }
+            continue;
+        }
+
+        const { sizes } = exposurePlan(cluster.length);
+        let offset = 0;
+        for (const size of sizes) {
+            const subset = cluster.slice(offset, offset + size);
+            offset += size;
+            const confidence = computeHdrConfidence(subset);
+            if (confidence >= 0.7) {
+                const lead = subset[0];
+                groups.push({
+                    files: subset,
+                    group_type: 'hdr',
+                    hdr_confidence: confidence,
+                    output_filename: normalizeOutputFilename(lead.filename, lead.r2_key.split('/').pop() || 'hdr')
+                });
+            } else {
+                for (const file of subset) {
+                    groups.push({
+                        files: [file],
+                        group_type: 'raw',
+                        hdr_confidence: confidence,
+                        output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
+                    });
+                }
+            }
+        }
+
+        const remaining = cluster.length - offset;
+        for (let i = 0; i < remaining; i += 1) {
+            const file = cluster[offset + i];
+            groups.push({
+                files: [file],
+                group_type: 'raw',
+                hdr_confidence: null,
+                output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
+            });
+        }
+    }
+
+    for (const file of imageFiles) {
+        groups.push({
+            files: [file],
+            group_type: 'image',
+            hdr_confidence: null,
+            output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
+        });
+    }
+
+    const hdrScores = groups.map(group => group.hdr_confidence || 0);
+    const maxHdrConfidence = hdrScores.length ? Math.max(...hdrScores) : null;
+    const hasHdr = groups.some(group => group.group_type === 'hdr');
+    const inputType = hasHdr ? 'hdr' : groups.length > 1 ? 'batch' : 'single';
 
     await (supabaseAdmin.from('job_groups') as any)
         .delete()
@@ -338,8 +625,11 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         id: uuidv4(),
         job_id: jobId,
         group_index: index + 1,
-        raw_count: group.length,
-        status: 'queued'
+        raw_count: group.files.filter(file => file.input_kind === 'raw').length,
+        status: 'queued',
+        group_type: group.group_type,
+        hdr_confidence: group.hdr_confidence,
+        output_filename: group.output_filename
     }));
 
     const { error: groupError } = await (supabaseAdmin.from('job_groups') as any)
@@ -349,14 +639,21 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
     for (let index = 0; index < groups.length; index += 1) {
         const group = groups[index];
         const groupId = groupRows[index].id;
-        const ids = group.map(item => item.id);
+        const ids = group.files.map((item: any) => item.id);
         await (supabaseAdmin.from('job_files') as any)
             .update({ group_id: groupId })
             .in('id', ids);
     }
 
     await (supabaseAdmin.from('jobs') as any)
-        .update({ status: 'uploaded', estimated_units: groupRows.length, progress: 0 })
+        .update({
+            status: 'input_resolved',
+            estimated_units: groupRows.length,
+            progress: 0,
+            input_type: inputType,
+            hdr_confidence: maxHdrConfidence,
+            original_filenames: originalFilenames
+        })
         .eq('id', jobId)
         .eq('user_id', userId);
 

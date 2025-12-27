@@ -62,6 +62,11 @@ export const jobService = {
     return response.data;
   },
 
+  retryMissing: async (jobId: string) => {
+    const response = await api.post(`/jobs/${jobId}/retry-missing`);
+    return response.data;
+  },
+
   getPipelineStatus: async (jobId: string) => {
     const response = await api.get(`/jobs/${jobId}/status`);
     return response.data;
@@ -89,6 +94,51 @@ export const jobService = {
 
   getProfile: async () => {
     const response = await api.get('/profile');
+    return response.data;
+  },
+
+  adminGetWorkflows: async () => {
+    const response = await api.get('/admin/workflows');
+    return response.data;
+  },
+
+  adminCreateWorkflow: async (payload: Record<string, unknown>) => {
+    const response = await api.post('/admin/workflows', payload);
+    return response.data;
+  },
+
+  adminUpdateWorkflow: async (id: string, payload: Record<string, unknown>) => {
+    const response = await api.patch(`/admin/workflows/${id}`, payload);
+    return response.data;
+  },
+
+  adminGetVersions: async (workflowId: string) => {
+    const response = await api.get(`/admin/workflows/${workflowId}/versions`);
+    return response.data;
+  },
+
+  adminCreateVersion: async (workflowId: string, payload: Record<string, unknown>) => {
+    const response = await api.post(`/admin/workflows/${workflowId}/versions`, payload);
+    return response.data;
+  },
+
+  adminPublishVersion: async (workflowId: string, versionId: string) => {
+    const response = await api.post(`/admin/workflows/${workflowId}/publish/${versionId}`);
+    return response.data;
+  },
+
+  adminTestRun: async (workflowId: string, payload: Record<string, unknown>) => {
+    const response = await api.post(`/admin/workflows/${workflowId}/test-run`, payload);
+    return response.data;
+  },
+
+  adminGetCredits: async () => {
+    const response = await api.get('/admin/credits');
+    return response.data;
+  },
+
+  adminAdjustCredits: async (payload: Record<string, unknown>) => {
+    const response = await api.post('/admin/credits/adjust', payload);
     return response.data;
   },
 

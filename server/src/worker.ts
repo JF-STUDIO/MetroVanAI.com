@@ -18,7 +18,7 @@ import {
   headObject
 } from './services/r2.js';
 import { createRedis } from './services/redis.js';
-import { createHdrForGroup, cleanupHdrTemp } from './services/hdr.js';
+import { createHdrForGroup, cleanupHdrTemp, convertToJpeg } from './services/hdr.js';
 import { createRunningHubTask, pollRunningHub } from './services/runninghub.js';
 
 const HDR_CONCURRENCY = Number.parseInt(process.env.HDR_CONCURRENCY || '2', 10);
@@ -110,17 +110,40 @@ const uploadFileToR2 = async (bucket: string, key: string, filePath: string, con
   );
 };
 
-const downloadOutputToR2 = async (outputUrl: string, bucket: string, key: string) => {
+const downloadOutputToJpg = async (outputUrl: string, bucket: string, key: string) => {
   const response = await axios.get(outputUrl, { responseType: 'arraybuffer' });
-  const contentType = response.headers['content-type'] || 'image/jpeg';
-  await r2Client.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: response.data,
-      ContentType: contentType
-    })
-  );
+  const contentType = response.headers['content-type'] || '';
+  const extension = (() => {
+    try {
+      return path.extname(new URL(outputUrl).pathname).toLowerCase();
+    } catch {
+      return '';
+    }
+  })();
+
+  const isJpeg = contentType.includes('jpeg') || contentType.includes('jpg') || ['.jpg', '.jpeg'].includes(extension);
+  if (isJpeg) {
+    await r2Client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: response.data,
+        ContentType: 'image/jpeg'
+      })
+    );
+    return;
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-output-'));
+  try {
+    const sourcePath = path.join(tempDir, `source${extension || '.bin'}`);
+    const jpgPath = path.join(tempDir, 'output.jpg');
+    await fs.writeFile(sourcePath, response.data);
+    await convertToJpeg(sourcePath, jpgPath);
+    await uploadFileToR2(bucket, key, jpgPath, 'image/jpeg');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 };
 
 const downloadR2ObjectToFile = async (bucket: string, key: string, filePath: string) => {
@@ -145,6 +168,24 @@ const createZipArchive = async (files: { path: string; name: string }[], zipPath
       archive.file(file.path, { name: file.name });
     }
     archive.finalize().catch(reject);
+  });
+};
+
+const sanitizeZipName = (value: string | null | undefined) => {
+  const base = (value || 'project').trim().replace(/\s+/g, '_');
+  const safe = base.replace(/[^a-zA-Z0-9_-]/g, '');
+  return safe || 'project';
+};
+
+const dedupeNames = (names: string[]) => {
+  const seen = new Map<string, number>();
+  return names.map((name) => {
+    const count = seen.get(name) ?? 0;
+    seen.set(name, count + 1);
+    if (count === 0) return name;
+    const ext = path.extname(name);
+    const base = name.slice(0, name.length - ext.length);
+    return `${base}_${count + 1}${ext}`;
   });
 };
 
@@ -192,11 +233,11 @@ const applyCreditAdjustments = async (
 };
 
 const finalizePipelineJob = async (
-  job: { id: string; user_id: string; workflow_id: string; settled_units?: number | null; reserved_units?: number | null },
+  job: { id: string; user_id: string; workflow_id: string; project_name?: string | null; settled_units?: number | null; reserved_units?: number | null },
   runtimeConfig: Record<string, unknown>
 ) => {
   const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
-    .select('id, group_index, status, output_bucket, output_key, attempts')
+    .select('id, group_index, status, output_bucket, output_key, output_filename, attempts')
     .eq('job_id', job.id)
     .order('group_index', { ascending: true });
 
@@ -211,6 +252,7 @@ const finalizePipelineJob = async (
   const maxAttempts = Number(runtimeConfig.max_attempts ?? 3);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-zip-'));
   const zipEntries: { path: string; name: string }[] = [];
+  const successful: { output_key: string; output_filename: string }[] = [];
 
   try {
     for (const group of groups) {
@@ -232,18 +274,15 @@ const finalizePipelineJob = async (
         continue;
       }
 
-      const baseName = path.basename(group.output_key);
-      const entryName = `${String(group.group_index).padStart(3, '0')}_${baseName}`;
-      const localPath = path.join(tempDir, entryName);
-      await downloadR2ObjectToFile(bucket, group.output_key, localPath);
-      zipEntries.push({ path: localPath, name: entryName });
+      const outputName = group.output_filename || path.basename(group.output_key);
+      successful.push({ output_key: group.output_key, output_filename: outputName });
     }
 
     const { data: refreshedGroups } = await (supabaseAdmin.from('job_groups') as any)
       .select('status, attempts')
       .eq('job_id', job.id);
 
-    const successCount = zipEntries.length;
+    const successCount = successful.length;
     const failedFinalCount = (refreshedGroups || []).filter((group: any) => (
       group.status === 'failed' && (group.attempts || 0) >= maxAttempts
     )).length;
@@ -261,20 +300,46 @@ const finalizePipelineJob = async (
       return;
     }
 
+    if (successCount === 1) {
+      const only = successful[0];
+      const status = successCount === totalGroups ? 'completed' : 'partial';
+      await (supabaseAdmin.from('jobs') as any)
+        .update({
+          status,
+          output_file_key: only.output_key,
+          output_file_name: only.output_filename,
+          progress: 100,
+          ...creditUpdate
+        })
+        .eq('id', job.id);
+      return;
+    }
+
     await (supabaseAdmin.from('jobs') as any)
-      .update({ status: 'zipping' })
+      .update({ status: 'packaging' })
       .eq('id', job.id);
+
+    const dedupedNames = dedupeNames(successful.map(item => item.output_filename));
+    for (let index = 0; index < successful.length; index += 1) {
+      const item = successful[index];
+      const entryName = dedupedNames[index];
+      const localPath = path.join(tempDir, entryName);
+      await downloadR2ObjectToFile(OUTPUT_BUCKET, item.output_key, localPath);
+      zipEntries.push({ path: localPath, name: entryName });
+    }
 
     const zipPath = path.join(tempDir, 'outputs.zip');
     await createZipArchive(zipEntries, zipPath);
 
-    const zipKey = `jobs/${job.id}/outputs.zip`;
+    const zipName = `${sanitizeZipName(job.project_name)}_processed.zip`;
+    const zipKey = `jobs/${job.id}/${zipName}`;
     await uploadFileToR2(OUTPUT_BUCKET, zipKey, zipPath, 'application/zip');
 
     const status = successCount === totalGroups ? 'completed' : 'partial';
     await (supabaseAdmin.from('jobs') as any)
       .update({
         status,
+        output_zip_key: zipKey,
         zip_key: zipKey,
         progress: 100,
         ...creditUpdate
@@ -312,7 +377,7 @@ const processHdrGroup = async (jobId: string, group: any) => {
     .update({
       hdr_bucket: HDR_BUCKET,
       hdr_key: hdrKey,
-      status: 'hdr_ok',
+      status: 'preprocess_ok',
       attempts,
       last_error: null
     })
@@ -352,15 +417,8 @@ const processRunningHubGroup = async (
     throw new Error('RunningHub output URL missing');
   }
 
-  let outputExt = '.jpg';
-  try {
-    outputExt = path.extname(new URL(outputUrl).pathname) || '.jpg';
-  } catch {
-    outputExt = '.jpg';
-  }
-
-  const outputKey = `jobs/${jobId}/${group.id}${outputExt}`;
-  await downloadOutputToR2(outputUrl, OUTPUT_BUCKET, outputKey);
+  const outputKey = `jobs/${jobId}/${group.id}.jpg`;
+  await downloadOutputToJpg(outputUrl, OUTPUT_BUCKET, outputKey);
   await deleteObject(HDR_BUCKET, group.hdr_key);
 
   const attempts = (group.attempts || 0) + 1;
@@ -378,7 +436,7 @@ const processRunningHubGroup = async (
 const processPipelineJob = async (jobId: string) => {
   const { data: job, error: jobError } = await (supabaseAdmin
     .from('jobs') as any)
-    .select('id, user_id, workflow_id, workflow_version_id, settled_units, reserved_units')
+    .select('id, user_id, workflow_id, workflow_version_id, settled_units, reserved_units, project_name')
     .eq('id', jobId)
     .single();
 
@@ -388,7 +446,7 @@ const processPipelineJob = async (jobId: string) => {
   const context = await fetchWorkflowContext(job.workflow_id, job.workflow_version_id);
 
   await (supabaseAdmin.from('jobs') as any)
-    .update({ status: 'hdr_processing', error_message: null })
+    .update({ status: 'preprocessing', error_message: null })
     .eq('id', jobId);
 
   const { data: hdrGroups } = await (supabaseAdmin.from('job_groups') as any)
@@ -414,7 +472,7 @@ const processPipelineJob = async (jobId: string) => {
   });
 
   await (supabaseAdmin.from('jobs') as any)
-    .update({ status: 'ai_processing' })
+    .update({ status: 'workflow_running' })
     .eq('id', jobId);
 
   const { data: aiGroups } = await (supabaseAdmin.from('job_groups') as any)
@@ -422,7 +480,9 @@ const processPipelineJob = async (jobId: string) => {
     .eq('job_id', jobId)
     .order('group_index', { ascending: true });
 
-  const pendingAi = ((aiGroups || []) as any[]).filter((group: any) => group.status === 'hdr_ok');
+  const pendingAi = ((aiGroups || []) as any[]).filter((group: any) => (
+    group.status === 'preprocess_ok' || group.status === 'hdr_ok'
+  ));
   await runWithConcurrency(pendingAi, AI_CONCURRENCY, async (group) => {
     try {
       await processRunningHubGroup(jobId, group, context);
@@ -434,6 +494,10 @@ const processPipelineJob = async (jobId: string) => {
         .eq('id', group.id);
     }
   });
+
+  await (supabaseAdmin.from('jobs') as any)
+    .update({ status: 'postprocess' })
+    .eq('id', jobId);
 
   await finalizePipelineJob(job, context.runtimeConfig);
 };

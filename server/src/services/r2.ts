@@ -42,9 +42,14 @@ export const getPresignedPutUrl = async (
 export const getPresignedGetUrl = async (
   bucket: string,
   key: string,
-  expiresIn = 900
+  expiresIn = 900,
+  filename?: string | null
 ) => {
-  const command = new GetObjectCommand({ Bucket: bucket, Key: key });
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    ResponseContentDisposition: filename ? `attachment; filename="${filename}"` : undefined
+  });
   return getSignedUrl(r2Client, command, { expiresIn });
 };
 

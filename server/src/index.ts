@@ -6,7 +6,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import jobRoutes from './routes/jobs.js';
 import workflowRoutes from './routes/workflows.js';
-import './worker.js'; // Start the worker in the same process
+import adminRoutes from './routes/admin.js';
 import { createRedis } from './services/redis.js';
 
 const app = express();
@@ -39,6 +39,7 @@ app.use(express.json());
 // 路由
 app.use('/api', jobRoutes);
 app.use('/api', workflowRoutes);
+app.use('/api', adminRoutes);
 
 // 健康检查
 app.get('/health', (req, res) => {

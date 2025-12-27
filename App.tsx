@@ -2,13 +2,14 @@ import React, { useState, useEffect } from 'react';
 import Layout from './components/Layout';
 import Home from './components/Home';
 import Editor from './components/Editor';
-import { User, PhotoTool } from './types';
+import Admin from './components/Admin';
+import { User, Workflow } from './types';
 import { supabase } from './services/supabaseClient';
 import { jobService } from './services/jobService';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
-  const [tools, setTools] = useState<PhotoTool[]>([]);
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [view, setView] = useState<string>('home');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -25,7 +26,7 @@ const App: React.FC = () => {
             id: session.user.id,
             email: session.user.email || '',
             name: session.user.email?.split('@')[0] || '',
-            points: profile.points,
+            points: profile.available_credits ?? profile.points ?? 0,
             isAdmin: profile.is_admin || false
           });
         } catch (e) { console.error('Failed to load profile', e); }
@@ -41,7 +42,7 @@ const App: React.FC = () => {
             id: session.user.id,
             email: session.user.email || '',
             name: session.user.email?.split('@')[0] || '',
-            points: profile.points,
+            points: profile.available_credits ?? profile.points ?? 0,
             isAdmin: profile.is_admin || false
           });
         }).catch(e => console.error('Failed to load profile on auth change', e));
@@ -55,7 +56,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (user) {
-      jobService.getTools().then(setTools).catch(err => console.error('Failed to fetch tools:', err));
+      jobService.getWorkflows().then(setWorkflows).catch(err => console.error('Failed to fetch workflows:', err));
     }
   }, [user]);
 
@@ -126,7 +127,9 @@ const App: React.FC = () => {
           </div>
         );
       case 'editor':
-        return user ? <Editor user={user} tools={tools} onUpdateUser={setUser} /> : null;
+        return user ? <Editor user={user} workflows={workflows} onUpdateUser={setUser} /> : null;
+      case 'admin':
+        return user ? <Admin user={user} /> : null;
       default:
         return <Home onStart={() => setView('editor')} />;
     }

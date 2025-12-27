@@ -6,30 +6,57 @@ export interface User {
   isAdmin: boolean;
 }
 
-export interface PhotoTool {
+export interface Workflow {
   id: string;
-  name: string;
-  description: string;
-  workflow_id: string;
-  input_node_key: string;
-  point_cost: number;
-  preview_url?: string;
-  is_active?: boolean;
+  slug: string;
+  display_name: string;
+  description?: string;
+  credit_per_unit: number;
   preview_original?: string;
   preview_processed?: string;
+  is_active?: boolean;
+  version_id?: string | null;
+  version?: number | null;
+}
+
+export interface WorkflowVersion {
+  id: string;
+  version: number;
+  workflow_remote_id: string;
+  input_schema?: Record<string, unknown>;
+  output_schema?: Record<string, unknown>;
+  runtime_config?: Record<string, unknown>;
+  notes?: string | null;
+  is_published?: boolean;
+  created_at?: string;
+}
+
+export interface AdminWorkflow extends Workflow {
+  provider_id?: string | null;
+  provider_name?: string | null;
+  published_version?: WorkflowVersion | null;
 }
 
 export interface Job {
   id: string;
   user_id: string;
-  tool_id: string;
+  tool_id?: string | null;
+  workflow_id?: string | null;
+  workflow_version_id?: string | null;
   project_name?: string;
-  status: 'pending' | 'queued' | 'processing' | 'completed' | 'failed';
+  input_type?: 'single' | 'hdr' | 'batch' | null;
+  hdr_confidence?: number | null;
+  original_filenames?: string[] | null;
+  status: 'draft' | 'uploaded' | 'analyzing' | 'input_resolved' | 'reserved' | 'preprocessing' | 'hdr_processing' | 'workflow_running' | 'ai_processing' | 'postprocess' | 'packaging' | 'zipping' | 'completed' | 'failed' | 'canceled' | 'partial' | 'pending' | 'queued' | 'processing';
   error_message?: string;
   zip_key?: string;
+  output_zip_key?: string | null;
+  output_file_key?: string | null;
+  output_file_name?: string | null;
   expires_at?: string;
   created_at: string;
-  photo_tools: { name: string }; // For joins
+  photo_tools?: { name?: string } | null;
+  workflows?: { display_name?: string } | null;
 }
 
 export interface JobAsset {
@@ -38,4 +65,12 @@ export interface JobAsset {
   r2_key: string;
   r2_output_key?: string;
   status: 'pending' | 'processing' | 'processed' | 'failed';
+}
+
+export interface CreditRow {
+  user_id: string;
+  email: string | null;
+  is_admin: boolean;
+  available_credits: number;
+  reserved_credits: number;
 }

@@ -6,21 +6,37 @@ const router = Router();
 
 router.get('/workflows', authenticate, async (_req: Request, res: Response) => {
   const { data, error } = await (supabaseAdmin
-    .from('workflow_versions') as any)
-    .select('id, version, workflow_id, workflows(id, slug, display_name, credit_per_unit, is_active)')
-    .eq('is_published', true)
-    .eq('workflows.is_active', true);
+    .from('workflows') as any)
+    .select(`
+      id,
+      slug,
+      display_name,
+      description,
+      credit_per_unit,
+      preview_original,
+      preview_processed,
+      is_active,
+      workflow_versions(id, version, is_published)
+    `)
+    .eq('is_active', true)
+    .eq('workflow_versions.is_published', true);
 
   if (error) return res.status(500).json({ error: error.message });
 
-  const workflows = (data || []).map((row: any) => ({
-    id: row.workflows?.id,
-    slug: row.workflows?.slug,
-    display_name: row.workflows?.display_name,
-    credit_per_unit: row.workflows?.credit_per_unit,
-    version_id: row.id,
-    version: row.version,
-  }));
+  const workflows = (data || []).map((row: any) => {
+    const published = (row.workflow_versions || [])[0];
+    return {
+      id: row.id,
+      slug: row.slug,
+      display_name: row.display_name,
+      description: row.description,
+      credit_per_unit: row.credit_per_unit,
+      preview_original: row.preview_original,
+      preview_processed: row.preview_processed,
+      version_id: published?.id || null,
+      version: published?.version || null
+    };
+  });
 
   res.json(workflows);
 });

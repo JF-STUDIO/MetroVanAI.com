@@ -1,12 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { PhotoTool, User, Job, JobAsset } from '../types';
+import { Workflow, User, Job, JobAsset } from '../types';
 import { jobService } from '../services/jobService';
 import axios from 'axios';
 
 // Props for the main component
 interface EditorProps {
   user: User;
-  tools: PhotoTool[];
+  workflows: Workflow[];
   onUpdateUser: (user: User) => void;
 }
 
@@ -20,7 +20,7 @@ interface ImageItem {
   statusText?: string;
 }
 
-type HistoryJob = Job & { photo_tools?: { name?: string } | null };
+type HistoryJob = Job & { photo_tools?: { name?: string } | null; workflows?: { display_name?: string } | null };
 
 // The auto-playing, aspect-ratio-correct slider component
 const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ original, processed }) => {
@@ -75,8 +75,8 @@ const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ o
 };
 
 // Main Editor Component with multiple views
-const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
-  const [activeTool, setActiveTool] = useState<PhotoTool | null>(null);
+const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
+  const [activeTool, setActiveTool] = useState<Workflow | null>(null);
   const [showProjectInput, setShowProjectInput] = useState(false);
   const [images, setImages] = useState<ImageItem[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -94,34 +94,67 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
 
   // Poll for job status
   useEffect(() => {
-    if (!(job && (jobStatus === 'processing' || jobStatus === 'queued'))) return;
+    const pipelineStatuses = new Set([
+      'reserved',
+      'input_resolved',
+      'preprocessing',
+      'hdr_processing',
+      'workflow_running',
+      'ai_processing',
+      'postprocess',
+      'packaging',
+      'zipping'
+    ]);
+    if (!job) return;
+    if (job.workflow_id) {
+      if (!pipelineStatuses.has(jobStatus)) return;
+    } else if (!(jobStatus === 'processing' || jobStatus === 'queued')) {
+      return;
+    }
 
     const timer = setInterval(async () => {
       try {
-        const jobData = await jobService.getJobStatus(job.id);
-        setJobStatus(jobData.status);
+        if (job.workflow_id) {
+          const { job: pipelineJob } = await jobService.getPipelineStatus(job.id);
+          setJob(pipelineJob);
+          setJobStatus(pipelineJob.status);
 
-        setImages(prev => prev.map(img => {
-          const serverAsset = jobData.job_assets.find((a: JobAsset) => a.id === img.id);
-          if (serverAsset) {
-            return {
-              ...img,
-              status: serverAsset.status === 'processed' ? 'done' : 
-                      serverAsset.status === 'failed' ? 'failed' : 'processing',
-              progress: serverAsset.status === 'processed' ? 100 : 50,
-            };
+          if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
+            clearInterval(timer);
+            const { url } = await jobService.getPresignedDownloadUrl(job.id);
+            setZipUrl(url);
+            const profile = await jobService.getProfile();
+            onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
+            setImages(prev => prev.map(img => ({ ...img, status: 'done', progress: 100 })));
+          } else if (pipelineJob.status === 'failed') {
+            clearInterval(timer);
           }
-          return img;
-        }));
+        } else {
+          const jobData = await jobService.getJobStatus(job.id);
+          setJobStatus(jobData.status);
 
-        if (jobData.status === 'completed') {
-          clearInterval(timer);
-          const { url } = await jobService.getPresignedDownloadUrl(job.id);
-          setZipUrl(url);
-          const profile = await jobService.getProfile();
-          onUpdateUser({ ...user, points: profile.points });
-        } else if (jobData.status === 'failed') {
-          clearInterval(timer);
+          setImages(prev => prev.map(img => {
+            const serverAsset = jobData.job_assets.find((a: JobAsset) => a.id === img.id);
+            if (serverAsset) {
+              return {
+                ...img,
+                status: serverAsset.status === 'processed' ? 'done' :
+                        serverAsset.status === 'failed' ? 'failed' : 'processing',
+                progress: serverAsset.status === 'processed' ? 100 : 50,
+              };
+            }
+            return img;
+          }));
+
+          if (jobData.status === 'completed') {
+            clearInterval(timer);
+            const { url } = await jobService.getPresignedDownloadUrl(job.id);
+            setZipUrl(url);
+            const profile = await jobService.getProfile();
+            onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
+          } else if (jobData.status === 'failed') {
+            clearInterval(timer);
+          }
         }
       } catch (err) { console.error('Polling error:', err); }
     }, 3000);
@@ -166,12 +199,22 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
     setShowProjectInput(false);
 
     try {
-      const jobData = await jobService.getJobStatus(item.id);
-      setJob(jobData);
-      setJobStatus(jobData.status);
-      if (jobData.status === 'completed') {
-        const { url } = await jobService.getPresignedDownloadUrl(jobData.id);
-        setZipUrl(url);
+      if (item.workflow_id) {
+        const { job: pipelineJob } = await jobService.getPipelineStatus(item.id);
+        setJob(pipelineJob);
+        setJobStatus(pipelineJob.status);
+        if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
+          const { url } = await jobService.getPresignedDownloadUrl(pipelineJob.id);
+          setZipUrl(url);
+        }
+      } else {
+        const jobData = await jobService.getJobStatus(item.id);
+        setJob(jobData);
+        setJobStatus(jobData.status);
+        if (jobData.status === 'completed') {
+          const { url } = await jobService.getPresignedDownloadUrl(jobData.id);
+          setZipUrl(url);
+        }
       }
     } catch (err) {
       console.error('Failed to load project:', err);
@@ -217,25 +260,38 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
     processFiles(e.dataTransfer.files);
   };
 
+  const handleRetryMissing = async () => {
+    if (!job) return;
+    try {
+      const result = await jobService.retryMissing(job.id);
+      if (result?.retried > 0) {
+        setJob(prev => (prev ? { ...prev, status: 'reserved' } : prev));
+        setJobStatus('reserved');
+      } else {
+        alert('No retryable groups.');
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Retry failed.');
+    }
+  };
 
   // Main batch processing logic
   const startBatchProcess = async () => {
     if (!activeTool || images.length === 0 || !job) return alert('Error: Missing job details.');
 
-    const totalCost = images.length * activeTool.point_cost;
-    if (user.points < totalCost) return alert(`Insufficient points! Needed: ${totalCost}, You have: ${user.points}`);
-
     try {
       setJobStatus('uploading');
-      const presignedData: { assetId: string, putUrl: string, fileName: string }[] = await jobService.getPresignedUploadUrls(job.id, images.map(img => ({ name: img.file.name, type: img.file.type })));
-      
+      const presignedData: { r2Key: string; putUrl: string; fileName: string }[] = await jobService.getPresignedRawUploadUrls(
+        job.id,
+        images.map(img => ({ name: img.file.name, type: img.file.type }))
+      );
+
+      const uploadedFiles: { r2_key: string; filename: string }[] = [];
       await Promise.all(images.map(async (img) => {
         const presignInfo = presignedData.find((p) => p.fileName === img.file.name);
         if (!presignInfo) return;
 
-        img.id = presignInfo.assetId;
         img.status = 'uploading';
-        
         await axios.put(presignInfo.putUrl, img.file, {
           headers: { 'Content-Type': img.file.type },
           onUploadProgress: (progressEvent) => {
@@ -244,14 +300,32 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
             setImages(prev => [...prev]);
           }
         });
-        
+
+        uploadedFiles.push({ r2_key: presignInfo.r2Key, filename: img.file.name });
         img.status = 'processing';
         img.statusText = 'Uploaded';
+        img.progress = 100;
         setImages(prev => [...prev]);
       }));
 
-      await jobService.commitJob(job.id);
-      setJobStatus('processing');
+      await jobService.uploadComplete(job.id, uploadedFiles);
+      const analysis = await jobService.analyzeJob(job.id);
+      const estimatedUnits = analysis?.estimated_units || 0;
+
+      const profile = await jobService.getProfile();
+      const availableCredits = profile.available_credits ?? profile.points ?? 0;
+      const totalCost = estimatedUnits * activeTool.credit_per_unit;
+      if (availableCredits < totalCost) {
+        onUpdateUser({ ...user, points: availableCredits });
+        setJobStatus('uploaded');
+        return alert(`Insufficient credits. Needed: ${totalCost}, You have: ${availableCredits}`);
+      }
+
+      const startResponse = await jobService.startJob(job.id);
+      setJobStatus('reserved');
+      const balanceRow = Array.isArray(startResponse?.balance) ? startResponse.balance[0] : startResponse?.balance;
+      const nextAvailable = balanceRow?.available_credits ?? (availableCredits - totalCost);
+      onUpdateUser({ ...user, points: nextAvailable });
     } catch (err) {
       if (err instanceof Error) {
         alert('Upload failed: ' + err.message);
@@ -263,7 +337,7 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
   };
 
   // UI Flow Handlers
-  const handleSelectTool = (tool: PhotoTool) => {
+  const handleSelectTool = (tool: Workflow) => {
     setActiveTool(tool);
     setShowProjectInput(true);
   };
@@ -272,13 +346,14 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
     e.preventDefault();
     if (!projectName || !activeTool) return;
     try {
-      const newJob = await jobService.createJob(activeTool.id, projectName);
+      const newJob = await jobService.createWorkflowJob(activeTool.id, projectName);
       setJob(newJob);
       setJobStatus(newJob.status)
       setShowProjectInput(false);
       setHistory(prev => [{
         ...(newJob as Job),
-        photo_tools: { name: activeTool.name }
+        workflows: { display_name: activeTool.display_name },
+        workflow_id: activeTool.id
       }, ...prev]);
       setHistoryCount(prev => prev + 1);
     } catch (error) {
@@ -299,7 +374,7 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
           <p className="font-medium opacity-40">Batch processing with R2 & RunningHub</p>
         </div>
         <div className="max-w-[1200px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-10">
-          {tools.map(tool => (
+          {workflows.map(tool => (
             <div key={tool.id} className="glass rounded-[2.5rem] p-8 flex flex-col group transition-all hover:scale-[1.01] border border-white/5">
               <div className="aspect-[3/2] mb-6 rounded-2xl overflow-hidden bg-black/40">
                 {tool.preview_original && tool.preview_processed ? (
@@ -308,11 +383,11 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
                   <div className="w-full h-full flex items-center justify-center text-gray-700 font-bold uppercase tracking-widest text-[10px]">Preview Not Available</div>
                 )}
               </div>
-              <h3 className="text-2xl font-black text-white mb-2 uppercase tracking-tight">{tool.name}</h3>
+              <h3 className="text-2xl font-black text-white mb-2 uppercase tracking-tight">{tool.display_name}</h3>
               <p className="text-sm text-gray-500 mb-8 line-clamp-2">{tool.description}</p>
               <div className="mt-auto flex items-center justify-between pt-6 border-t border-white/5">
                 <div className="flex items-center gap-2">
-                  <span className="text-2xl font-black text-indigo-400">{tool.point_cost}</span>
+                  <span className="text-2xl font-black text-indigo-400">{tool.credit_per_unit}</span>
                   <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Pts</span>
                 </div>
                 <button onClick={() => handleSelectTool(tool)} className="gradient-btn text-white px-8 py-3 rounded-2xl text-xs font-black uppercase tracking-widest shadow-lg">Open Engine</button>
@@ -326,7 +401,7 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
 
   // VIEW 2: Project Creation Form
   if (showProjectInput) {
-    const toolHistory = activeTool ? history.filter(item => item.tool_id === activeTool.id) : [];
+    const toolHistory = activeTool ? history.filter(item => item.workflow_id === activeTool.id || item.tool_id === activeTool.id) : [];
     const hasMoreHistory = history.length < historyCount;
 
     return (
@@ -369,11 +444,11 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
                         {item.status} | {formatDate(item.created_at)}
                       </div>
                     </div>
-                    {item.status === 'completed' ? (
+                    {item.status === 'completed' || item.status === 'partial' ? (
                       <button
                         onClick={async () => {
-                          const { url } = await jobService.getPresignedDownloadUrl(item.id);
-                          if (url) window.location.href = url;
+                        const { url } = await jobService.getPresignedDownloadUrl(item.id);
+                        if (url) window.location.href = url;
                         }}
                         className="px-4 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
                       >
@@ -425,9 +500,22 @@ const Editor: React.FC<EditorProps> = ({ user, tools, onUpdateUser }) => {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          {jobStatus === 'completed' && (<button onClick={() => { if(zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">Download ZIP <i className="fa-solid fa-file-zipper"></i></button>)}
-          <button onClick={startBatchProcess} disabled={images.length === 0 || (jobStatus !== 'idle' && jobStatus !== 'pending')} className="px-8 py-2.5 rounded-full bg-indigo-500 text-white text-xs font-black uppercase tracking-widest disabled:opacity-30 flex items-center gap-2 transition">
-            {jobStatus === 'idle' || jobStatus === 'pending' ? 'Start Batch Process' : 'Processing...'}
+          {(jobStatus === 'completed' || jobStatus === 'partial') && (
+            <button onClick={() => { if(zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
+              Download ZIP <i className="fa-solid fa-file-zipper"></i>
+            </button>
+          )}
+          {job?.workflow_id && (jobStatus === 'partial' || jobStatus === 'failed') && (
+            <button onClick={handleRetryMissing} className="px-6 py-2.5 rounded-full bg-white/10 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
+              Retry Missing <i className="fa-solid fa-rotate-right"></i>
+            </button>
+          )}
+          <button
+            onClick={startBatchProcess}
+            disabled={images.length === 0 || !['idle', 'draft', 'uploaded'].includes(jobStatus)}
+            className="px-8 py-2.5 rounded-full bg-indigo-500 text-white text-xs font-black uppercase tracking-widest disabled:opacity-30 flex items-center gap-2 transition"
+          >
+            {['idle', 'draft', 'uploaded'].includes(jobStatus) ? 'Start Batch Process' : 'Processing...'}
             <i className="fa-solid fa-bolt-lightning"></i>
           </button>
         </div>
