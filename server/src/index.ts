@@ -41,6 +41,12 @@ app.use('/api', jobRoutes);
 app.use('/api', workflowRoutes);
 app.use('/api', adminRoutes);
 
+if (process.env.ENABLE_INLINE_WORKER === 'true') {
+  import('./worker.js').catch((error) => {
+    console.error('Failed to start inline worker:', error);
+  });
+}
+
 // 健康检查
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
