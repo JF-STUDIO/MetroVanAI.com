@@ -62,6 +62,11 @@ export const jobService = {
     return response.data;
   },
 
+  cancelJob: async (jobId: string) => {
+    const response = await api.post(`/jobs/${jobId}/cancel`);
+    return response.data;
+  },
+
   retryMissing: async (jobId: string) => {
     const response = await api.post(`/jobs/${jobId}/retry-missing`);
     return response.data;

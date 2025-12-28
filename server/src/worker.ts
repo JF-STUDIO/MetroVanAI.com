@@ -264,6 +264,15 @@ const releaseCreditsForFailure = async (jobId: string, errorMessage: string) => 
   }
 };
 
+const isJobCanceled = async (jobId: string) => {
+  const { data: job } = await (supabaseAdmin
+    .from('jobs') as any)
+    .select('status')
+    .eq('id', jobId)
+    .single();
+  return job?.status === 'canceled';
+};
+
 const finalizePipelineJob = async (
   job: { id: string; user_id: string; workflow_id: string; project_name?: string | null; settled_units?: number | null; reserved_units?: number | null },
   runtimeConfig: Record<string, unknown>
@@ -493,17 +502,19 @@ const processRunningHubGroup = async (
 const processPipelineJob = async (jobId: string) => {
   const { data: job, error: jobError } = await (supabaseAdmin
     .from('jobs') as any)
-    .select('id, user_id, workflow_id, workflow_version_id, settled_units, reserved_units, project_name')
+    .select('id, user_id, workflow_id, workflow_version_id, settled_units, reserved_units, project_name, status')
     .eq('id', jobId)
     .single();
 
   if (jobError || !job) throw new Error('Pipeline job not found');
   if (!job.workflow_id || !job.workflow_version_id) throw new Error('Pipeline job missing workflow metadata');
+  if (job.status === 'canceled') return;
 
   const context = await fetchWorkflowContext(job.workflow_id, job.workflow_version_id);
   const hdrConcurrency = Number(context.runtimeConfig.hdr_concurrency ?? HDR_CONCURRENCY);
   const aiConcurrency = Number(context.runtimeConfig.ai_concurrency ?? AI_CONCURRENCY);
 
+  if (await isJobCanceled(jobId)) return;
   await (supabaseAdmin.from('jobs') as any)
     .update({ status: 'preprocessing', error_message: null })
     .eq('id', jobId);
@@ -519,6 +530,7 @@ const processPipelineJob = async (jobId: string) => {
 
   const pendingHdr = ((hdrGroups || []) as any[]).filter((group: any) => group.status === 'queued');
   await runWithConcurrency(pendingHdr, hdrConcurrency, async (group) => {
+    if (await isJobCanceled(jobId)) return;
     try {
       await processHdrGroup(jobId, group);
       await updateJobProgress(jobId);
@@ -530,6 +542,7 @@ const processPipelineJob = async (jobId: string) => {
     }
   });
 
+  if (await isJobCanceled(jobId)) return;
   await (supabaseAdmin.from('jobs') as any)
     .update({ status: 'workflow_running' })
     .eq('id', jobId);
@@ -543,6 +556,7 @@ const processPipelineJob = async (jobId: string) => {
     group.status === 'preprocess_ok' || group.status === 'hdr_ok'
   ));
   await runWithConcurrency(pendingAi, aiConcurrency, async (group) => {
+    if (await isJobCanceled(jobId)) return;
     try {
       await processRunningHubGroup(jobId, group, context);
       await updateJobProgress(jobId);
@@ -554,6 +568,7 @@ const processPipelineJob = async (jobId: string) => {
     }
   });
 
+  if (await isJobCanceled(jobId)) return;
   await (supabaseAdmin.from('jobs') as any)
     .update({ status: 'postprocess' })
     .eq('id', jobId);

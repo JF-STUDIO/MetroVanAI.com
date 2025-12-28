@@ -843,6 +843,51 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
     res.json({ reserved_units: job.estimated_units, credits_reserved: creditsToReserve, balance });
 });
 
+// New pipeline: cancel job
+router.post('/jobs/:jobId/cancel', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { data: job, error } = await (supabaseAdmin
+        .from('jobs') as any)
+        .select('id, status, reserved_units')
+        .eq('id', jobId)
+        .eq('user_id', userId)
+        .single();
+
+    if (error || !job) return res.status(404).json({ error: 'Job not found' });
+
+    const terminalStatuses = new Set(['completed', 'failed', 'canceled', 'partial']);
+    if (terminalStatuses.has(job.status)) {
+        return res.json({ canceled: false, status: job.status });
+    }
+
+    await (supabaseAdmin.from('jobs') as any)
+        .update({ status: 'canceled', error_message: 'Canceled by user', reserved_units: 0 })
+        .eq('id', jobId)
+        .eq('user_id', userId);
+
+    await (supabaseAdmin.from('job_groups') as any)
+        .update({ status: 'failed', last_error: 'Canceled by user' })
+        .eq('job_id', jobId)
+        .neq('status', 'ai_ok');
+
+    if (job.reserved_units && job.reserved_units > 0) {
+        const releaseKey = `release:${jobId}:cancel`;
+        await (supabaseAdmin as any).rpc('credit_release', {
+            p_user_id: userId,
+            p_job_id: jobId,
+            p_units: job.reserved_units,
+            p_idempotency_key: releaseKey,
+            p_note: 'Release credits on cancel'
+        });
+    }
+
+    res.json({ canceled: true, status: 'canceled' });
+});
+
 // New pipeline: retry missing/failed groups
 router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest, res: Response) => {
     const { jobId } = req.params;

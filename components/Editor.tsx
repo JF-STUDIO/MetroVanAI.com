@@ -325,6 +325,22 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
+  const handleCancelJob = async () => {
+    if (!job?.id) return;
+    if (!window.confirm('Cancel this job? This will stop remaining processing and release unused credits.')) {
+      return;
+    }
+    try {
+      await jobService.cancelJob(job.id);
+      setJobStatus('canceled');
+      const profile = await jobService.getProfile();
+      onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to cancel job.';
+      alert(message);
+    }
+  };
+
   const deleteExistingJob = async (item: HistoryJob) => {
     if (!window.confirm(`Delete project "${item.project_name || 'Untitled Project'}"? This will remove files and cannot be undone.`)) {
       return;
@@ -706,6 +722,20 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   // VIEW 3: Main Uploader & Editor
   const currentImage = activeIndex !== null ? galleryItems[activeIndex] : null;
+  const cancelableStatuses = new Set([
+    'reserved',
+    'input_resolved',
+    'preprocessing',
+    'hdr_processing',
+    'workflow_running',
+    'ai_processing',
+    'postprocess',
+    'packaging',
+    'zipping',
+    'processing',
+    'queued'
+  ]);
+  const canCancel = job?.id && cancelableStatuses.has(jobStatus);
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
@@ -744,6 +774,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           {job?.workflow_id && (jobStatus === 'partial' || jobStatus === 'failed') && (
             <button onClick={handleRetryMissing} className="px-6 py-2.5 rounded-full bg-white/10 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
               Retry Missing <i className="fa-solid fa-rotate-right"></i>
+            </button>
+          )}
+          {canCancel && (
+            <button onClick={handleCancelJob} className="px-6 py-2.5 rounded-full bg-red-500/20 text-red-200 text-xs font-black uppercase tracking-widest flex items-center gap-2 hover:bg-red-500/30 transition">
+              Cancel Processing <i className="fa-solid fa-ban"></i>
             </button>
           )}
           <button
