@@ -121,6 +121,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [projectSearch, setProjectSearch] = useState('');
   const [showNewProjectForm, setShowNewProjectForm] = useState(false);
+  const [autoUploadQueued, setAutoUploadQueued] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const editorStateKey = 'mvai:editor_state';
   const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
@@ -645,6 +646,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
     setImages(prev => [...prev, ...newItems]);
     if (activeIndex === null) setActiveIndex(images.length - 1 + newItems.length);
+    if (job && ['idle', 'draft', 'uploaded'].includes(jobStatus)) {
+      setAutoUploadQueued(true);
+    }
   };
 
   // Handle new files from input click
@@ -751,6 +755,15 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setUploadComplete(false);
     }
   };
+
+  useEffect(() => {
+    if (!autoUploadQueued) return;
+    if (!job) return;
+    if (!['idle', 'draft', 'uploaded'].includes(jobStatus)) return;
+    if (images.length === 0) return;
+    setAutoUploadQueued(false);
+    void startBatchProcess();
+  }, [autoUploadQueued, images.length, job?.id, jobStatus]);
 
   const startEnhanceProcess = async () => {
     if (!job || !activeTool) {
