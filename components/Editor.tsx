@@ -106,6 +106,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [projectSearch, setProjectSearch] = useState('');
   const [showNewProjectForm, setShowNewProjectForm] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
+  const editorStateKey = 'mvai:editor_state';
   const pipelineStages = new Set([
     'reserved',
     'input_resolved',
@@ -232,16 +233,42 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   useEffect(() => {
     if (resumeAttempted || activeTool || workflows.length === 0) return;
     let cached: { jobId?: string; workflowId?: string } | null = null;
+    let editorState: { mode?: 'projects' | 'studio'; workflowId?: string; jobId?: string } | null = null;
     try {
       cached = JSON.parse(localStorage.getItem('mvai:last_job') || 'null');
     } catch (error) {
       cached = null;
     }
-    if (!cached?.jobId || !cached?.workflowId) {
+    try {
+      editorState = JSON.parse(localStorage.getItem(editorStateKey) || 'null');
+    } catch (error) {
+      editorState = null;
+    }
+
+    if (editorState?.mode === 'projects' && editorState.workflowId) {
+      const workflow = workflows.find(tool => tool.id === editorState?.workflowId);
+      if (workflow) {
+        setActiveTool(workflow);
+        setShowProjectInput(true);
+        setShowNewProjectForm(false);
+        setProjectSearch('');
+        setImages([]);
+        setActiveIndex(null);
+        setZipUrl(null);
+        setPipelineItems([]);
+        setPipelineProgress(null);
+        setUploadComplete(true);
+      }
       setResumeAttempted(true);
       return;
     }
-    const workflow = workflows.find(tool => tool.id === cached?.workflowId);
+    const jobId = editorState?.jobId || cached?.jobId;
+    const workflowId = editorState?.workflowId || cached?.workflowId;
+    if (!jobId || !workflowId) {
+      setResumeAttempted(true);
+      return;
+    }
+    const workflow = workflows.find(tool => tool.id === workflowId);
     if (!workflow) {
       setResumeAttempted(true);
       return;
@@ -254,7 +281,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setPipelineItems([]);
     setPipelineProgress(null);
     setUploadComplete(true);
-    jobService.getPipelineStatus(cached.jobId)
+    jobService.getPipelineStatus(jobId)
       .then(async (response) => {
         const pipelineJob = response.job;
         setJob(pipelineJob);
@@ -279,6 +306,19 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       });
   }, [workflows, activeTool, resumeAttempted]);
 
+  const saveEditorState = (mode: 'projects' | 'studio', workflowId?: string | null, jobId?: string | null) => {
+    const payload = {
+      mode,
+      workflowId: workflowId || undefined,
+      jobId: jobId || undefined
+    };
+    localStorage.setItem(editorStateKey, JSON.stringify(payload));
+  };
+
+  const clearEditorState = () => {
+    localStorage.removeItem(editorStateKey);
+  };
+
   const formatDate = (value: string) => {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return value;
@@ -294,8 +334,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setJob(item as Job);
     setShowProjectInput(false);
     setUploadComplete(true);
+    setShowNewProjectForm(false);
     if (item.workflow_id) {
       saveLastJob(item.id, item.workflow_id);
+      saveEditorState('studio', item.workflow_id, item.id);
     }
 
     try {
@@ -517,6 +559,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setPipelineProgress(null);
     setLightboxUrl(null);
     setUploadComplete(false);
+    localStorage.removeItem('mvai:last_job');
+    saveEditorState('projects', tool.id, null);
   };
   
   const handleProjectCreate = async (e: React.FormEvent) => {
@@ -533,6 +577,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPipelineProgress(null);
       setLightboxUrl(null);
       saveLastJob(newJob.id, activeTool.id);
+      saveEditorState('studio', activeTool.id, newJob.id);
       setHistory(prev => [{
         ...(newJob as Job),
         workflows: { display_name: activeTool.display_name },
@@ -579,7 +624,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft' || jobStatus === 'uploaded';
   const showUploadOnly = jobStatus === 'uploading';
   const galleryItems = pipelineItems.length > 0
-    ? pipelineItems.map(mapPipelineItem)
+    ? pipelineItems.filter((item) => item.output_url || item.hdr_url || item.status === 'failed').map(mapPipelineItem)
     : showRawPreviews
       ? images.map(mapUploadItem)
       : [];
@@ -659,7 +704,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         <div className="max-w-6xl mx-auto space-y-8">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
             <div className="flex items-center gap-3">
-              <button onClick={() => { setActiveTool(null); setShowProjectInput(false); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+              <button onClick={() => { setActiveTool(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); clearEditorState(); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
                 <i className="fa-solid fa-arrow-left"></i>
               </button>
               <div>
@@ -815,7 +860,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button onClick={() => { setActiveTool(null); setImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+          <button onClick={() => { setActiveTool(null); setImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); clearEditorState(); localStorage.removeItem('mvai:last_job'); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
             <i className="fa-solid fa-arrow-left"></i>
           </button>
           <div>
