@@ -18,6 +18,7 @@ interface ImageItem {
   status: 'pending' | 'uploading' | 'processing' | 'done' | 'failed';
   progress: number;
   statusText?: string;
+  isRaw?: boolean;
 }
 
 type HistoryJob = Job & { photo_tools?: { name?: string } | null; workflows?: { display_name?: string } | null };
@@ -128,6 +129,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     'zipping'
   ]);
   const [resumeAttempted, setResumeAttempted] = useState(false);
+  const rawExtensions = new Set(['arw', 'cr2', 'cr3', 'nef', 'dng', 'rw2', 'orf', 'raf']);
+  const isRawFile = (file: File) => {
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    return ext ? rawExtensions.has(ext) : false;
+  };
 
   useEffect(() => {
     if (!lightboxUrl) return;
@@ -490,14 +496,18 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       }
     }
 
-    const newItems: ImageItem[] = files.map(file => ({
-      id: Math.random().toString(36).substring(2, 9),
-      file,
-      preview: URL.createObjectURL(file),
-      status: 'pending',
-      progress: 0,
-      statusText: 'Ready',
-    }));
+    const newItems: ImageItem[] = files.map(file => {
+      const raw = isRawFile(file);
+      return {
+        id: Math.random().toString(36).substring(2, 9),
+        file,
+        preview: raw ? '' : URL.createObjectURL(file),
+        status: 'pending',
+        progress: 0,
+        statusText: raw ? 'RAW' : 'Ready',
+        isRaw: raw
+      };
+    });
     if (pipelineItems.length > 0) {
       setPipelineItems([]);
       setPipelineProgress(null);
@@ -693,7 +703,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const galleryItems = pipelineItems.length > 0
     ? pipelineItems.filter((item) => item.output_url || item.hdr_url || item.status === 'failed').map(mapPipelineItem)
     : showRawPreviews
-      ? images.map(mapUploadItem)
+      ? images.filter((img) => !img.isRaw).map(mapUploadItem)
       : [];
 
   const uploadProgress = images.length
@@ -966,7 +976,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   ]);
   const canCancel = job?.id && cancelableStatuses.has(jobStatus);
   const showWaitingForResults = !showUploadOnly && galleryItems.length === 0 && pipelineStages.has(jobStatus);
-  const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !currentImage;
+  const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !currentImage && images.length === 0;
+  const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
@@ -1073,7 +1084,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             </div>
           ) : (
             <div className="flex-1 relative glass rounded-[3rem] overflow-hidden bg-black border border-white/5">
-              {currentImage.preview ? (
+              {currentImage?.preview ? (
                 <button
                   type="button"
                   onClick={() => setLightboxUrl(currentImage.preview || null)}
@@ -1082,16 +1093,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                   <img src={currentImage.preview} className="w-full h-full object-contain p-6" />
                 </button>
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-xs text-gray-500 uppercase tracking-widest">
-                  Waiting for preview
+                <div className="w-full h-full flex items-center justify-center text-xs text-gray-500 uppercase tracking-widest text-center px-6">
+                  {hasHiddenUploads ? 'RAW files uploaded. Start processing to generate HDR previews.' : 'Waiting for preview'}
                 </div>
               )}
-              {currentImage.label && (
+              {currentImage?.label && (
                 <div className="absolute top-4 left-4 px-3 py-1 rounded-full bg-black/60 text-[10px] text-white uppercase tracking-widest">
                   {currentImage.label}
                 </div>
               )}
-              {currentImage.status !== 'pending' && currentImage.status !== 'done' && (
+              {currentImage?.status && currentImage.status !== 'pending' && currentImage.status !== 'done' && (
                 <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center">
                   <div className="w-64 bg-white/10 h-1.5 rounded-full overflow-hidden mb-4">
                     <div className="h-full bg-indigo-500 transition-all" style={{ width: `${currentImage.progress}%` }}></div>
@@ -1101,12 +1112,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                   </p>
                 </div>
               )}
-              {currentImage.stage && currentImage.status !== 'failed' && (
+              {currentImage?.stage && currentImage.status !== 'failed' && (
                 <div className="absolute bottom-4 left-4 px-3 py-1 rounded-full bg-black/70 text-[10px] text-white uppercase tracking-widest">
                   {currentImage.stage === 'hdr' ? 'HDR Ready' : currentImage.stage === 'output' ? 'Processed' : 'Input'}
                 </div>
               )}
-              {currentImage.status === 'failed' && currentImage.error && (
+              {currentImage?.status === 'failed' && currentImage.error && (
                 <div className="absolute bottom-4 left-4 right-4 text-[10px] text-red-300 bg-black/60 px-3 py-2 rounded-xl">
                   {currentImage.error}
                 </div>
@@ -1127,7 +1138,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             )}
             {!showUploadOnly && galleryItems.length === 0 && (
               <div className="text-xs text-gray-500 border border-white/10 rounded-2xl p-4">
-                Waiting for results...
+                {hasHiddenUploads ? 'RAW files uploaded. Start processing to see previews.' : 'Waiting for results...'}
               </div>
             )}
             {!showUploadOnly && galleryItems.map((img, idx) => (

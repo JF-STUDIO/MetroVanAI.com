@@ -772,10 +772,12 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
             .in('id', ids);
     }
 
+    const estimatedUnits = groups.reduce((sum, group) => sum + group.files.length, 0);
+
     await (supabaseAdmin.from('jobs') as any)
         .update({
             status: 'input_resolved',
-            estimated_units: groupRows.length,
+            estimated_units: estimatedUnits,
             progress: 0,
             input_type: inputType,
             hdr_confidence: maxHdrConfidence,
@@ -784,7 +786,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         .eq('id', jobId)
         .eq('user_id', userId);
 
-    res.json({ estimated_units: groupRows.length });
+    res.json({ estimated_units: estimatedUnits });
 });
 
 // New pipeline: reserve credits and enqueue job
