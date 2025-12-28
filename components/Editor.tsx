@@ -613,6 +613,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const processFiles = (fileList: FileList | null) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
+    const isProcessing = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
+    if (job && isProcessing) {
+      pushNotice('error', 'Processing is already running. Please wait or cancel before adding more files.');
+      return;
+    }
     const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
     const maxFileBytes = Number(import.meta.env.VITE_MAX_FILE_BYTES || (200 * 1024 * 1024));
     if (maxFiles > 0 && images.length + files.length > maxFiles) {
@@ -646,7 +651,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
     setImages(prev => [...prev, ...newItems]);
     if (activeIndex === null) setActiveIndex(images.length - 1 + newItems.length);
-    if (job && ['idle', 'draft', 'uploaded'].includes(jobStatus)) {
+    if (job && ['idle', 'draft', 'uploaded', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus)) {
       setAutoUploadQueued(true);
     }
   };
@@ -654,6 +659,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   // Handle new files from input click
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     processFiles(e.target.files);
+    e.target.value = '';
   };
 
   // Drag and Drop handlers
@@ -745,6 +751,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       if (previewResponse?.previews) {
         setPreviewSummary(previewResponse.previews);
       }
+      setImages([]);
     } catch (err) {
       if (err instanceof Error) {
         pushNotice('error', `Upload failed: ${err.message}`);
@@ -842,6 +849,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     stage: 'input'
   });
 
+  const hasPendingUploads = images.some((img) => img.status === 'pending' || img.status === 'uploading');
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
   const showUploadOnly = jobStatus === 'uploading';
 
@@ -1208,8 +1216,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && images.length === 0;
   const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
-  const canEnhance = jobStatus === 'input_resolved';
-  const canUploadBatch = images.length > 0 && ['idle', 'draft', 'uploaded'].includes(jobStatus);
+  const canEnhance = jobStatus === 'input_resolved' && !hasPendingUploads;
+  const canUploadBatch = hasPendingUploads && ['idle', 'draft', 'uploaded', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
   const canAddMore = ['idle', 'draft', 'uploaded', 'input_resolved'].includes(jobStatus);
   const downloadLabel = downloadType === 'jpg' ? 'Download JPG' : 'Download ZIP';
   const showReadyToEnhanceNotice = uploadComplete && jobStatus === 'input_resolved' && !processingActive;
