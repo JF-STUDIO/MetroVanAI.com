@@ -92,6 +92,11 @@ export const jobService = {
     return response.data;
   },
 
+  deleteJob: async (jobId: string) => {
+    const response = await api.delete(`/jobs/${jobId}`);
+    return response.data;
+  },
+
   getProfile: async () => {
     const response = await api.get('/profile');
     return response.data;

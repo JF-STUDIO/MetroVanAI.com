@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
-import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl } from '../services/r2.js';
+import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl, deletePrefix } from '../services/r2.js';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
@@ -60,9 +60,9 @@ const exposurePlan = (count: number) => {
 const RAW_EXTENSIONS = new Set(['cr2', 'cr3', 'nef', 'arw', 'dng', 'raf', 'rw2', 'orf']);
 const JPG_EXTENSIONS = new Set(['jpg', 'jpeg']);
 const PNG_EXTENSIONS = new Set(['png']);
-const MAX_UPLOAD_FILES = Number.parseInt(process.env.MAX_UPLOAD_FILES || '200', 10);
+const MAX_UPLOAD_FILES = Number.parseInt(process.env.MAX_UPLOAD_FILES || '0', 10);
 const MAX_FILE_BYTES = Number.parseInt(process.env.MAX_FILE_BYTES || `${200 * 1024 * 1024}`, 10);
-const MAX_TOTAL_BYTES = Number.parseInt(process.env.MAX_UPLOAD_BYTES || `${2 * 1024 * 1024 * 1024}`, 10);
+const MAX_TOTAL_BYTES = Number.parseInt(process.env.MAX_UPLOAD_BYTES || '0', 10);
 
 const sanitizeFilename = (value: string | null | undefined, fallback = 'image') => {
     const raw = value || fallback;
@@ -199,7 +199,7 @@ router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest
   if (!Array.isArray(files) || files.length === 0) {
     return res.status(400).json({ error: 'files required' });
   }
-  if (files.length > MAX_UPLOAD_FILES) {
+  if (MAX_UPLOAD_FILES > 0 && files.length > MAX_UPLOAD_FILES) {
     return res.status(413).json({ error: `Too many files (max ${MAX_UPLOAD_FILES})` });
   }
 
@@ -321,6 +321,65 @@ router.get('/jobs', authenticate, async (req: AuthRequest, res: Response) => {
     res.json({ data, count });
 });
 
+// 7.1 删除任务（同步清理 DB + R2）
+router.delete('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    const { jobId } = req.params;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { data: job, error: jobError } = await (supabaseAdmin
+        .from('jobs') as any)
+        .select('id, user_id, status, reserved_units')
+        .eq('id', jobId)
+        .eq('user_id', userId)
+        .single();
+
+    if (jobError || !job) return res.status(404).json({ error: 'Job not found' });
+
+    const busyStatuses = new Set([
+        'analyzing',
+        'reserved',
+        'preprocessing',
+        'hdr_processing',
+        'workflow_running',
+        'ai_processing',
+        'postprocess',
+        'packaging',
+        'zipping',
+        'processing',
+        'queued'
+    ]);
+
+    if (busyStatuses.has(job.status)) {
+        return res.status(409).json({ error: 'Job is processing. Please retry after completion.' });
+    }
+
+    if (job.reserved_units && job.reserved_units > 0) {
+        const releaseKey = `release:${jobId}:delete`;
+        await (supabaseAdmin as any).rpc('credit_release', {
+            p_user_id: userId,
+            p_job_id: jobId,
+            p_units: job.reserved_units,
+            p_idempotency_key: releaseKey,
+            p_note: 'Release credits on delete'
+        });
+    }
+
+    const rawPrefix = `u/${userId}/jobs/${jobId}/raw/`;
+    const legacyPrefix = `u/${userId}/jobs/${jobId}/`;
+    await deletePrefix(RAW_BUCKET, rawPrefix);
+    await deletePrefix(HDR_BUCKET, `jobs/${jobId}/`);
+    await deletePrefix(OUTPUT_BUCKET, `jobs/${jobId}/`);
+    await deletePrefix(BUCKET_NAME, legacyPrefix);
+
+    await (supabaseAdmin.from('job_files') as any).delete().eq('job_id', jobId);
+    await (supabaseAdmin.from('job_groups') as any).delete().eq('job_id', jobId);
+    await (supabaseAdmin.from('job_assets') as any).delete().eq('job_id', jobId);
+    await (supabaseAdmin.from('jobs') as any).delete().eq('id', jobId).eq('user_id', userId);
+
+    res.json({ deleted: true });
+});
+
 // 8. 获取个人资料 (含积分)
 router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
@@ -387,7 +446,7 @@ router.post('/jobs/:jobId/presign-raw', authenticate, async (req: AuthRequest, r
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ error: 'files required' });
-    if (files.length > MAX_UPLOAD_FILES) return res.status(413).json({ error: `Too many files (max ${MAX_UPLOAD_FILES})` });
+    if (MAX_UPLOAD_FILES > 0 && files.length > MAX_UPLOAD_FILES) return res.status(413).json({ error: `Too many files (max ${MAX_UPLOAD_FILES})` });
 
     const sizes = files.map((file) => file.size).filter((size) => typeof size === 'number');
     if (sizes.length !== files.length) {
@@ -395,12 +454,14 @@ router.post('/jobs/:jobId/presign-raw', authenticate, async (req: AuthRequest, r
     }
 
     const totalBytes = sizes.reduce((sum, value) => sum + value, 0);
-    if (totalBytes > MAX_TOTAL_BYTES) {
+    if (MAX_TOTAL_BYTES > 0 && totalBytes > MAX_TOTAL_BYTES) {
         return res.status(413).json({ error: `Total upload too large (max ${MAX_TOTAL_BYTES} bytes)` });
     }
-    const oversized = files.find((file) => typeof file.size === 'number' && file.size > MAX_FILE_BYTES);
-    if (oversized) {
-        return res.status(413).json({ error: `File too large: ${oversized.name}` });
+    if (MAX_FILE_BYTES > 0) {
+        const oversized = files.find((file) => typeof file.size === 'number' && file.size > MAX_FILE_BYTES);
+        if (oversized) {
+            return res.status(413).json({ error: `File too large: ${oversized.name}` });
+        }
     }
 
     const { data: job } = await (supabaseAdmin

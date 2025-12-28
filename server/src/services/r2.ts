@@ -3,7 +3,9 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
-  DeleteObjectCommand
+  DeleteObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectsCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -66,4 +68,37 @@ export const headObject = async (bucket: string, key: string) => {
 
 export const deleteObject = async (bucket: string, key: string) => {
   await r2Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+};
+
+export const deleteObjects = async (bucket: string, keys: string[]) => {
+  if (!keys.length) return;
+  const chunkSize = 1000;
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const slice = keys.slice(i, i + chunkSize);
+    await r2Client.send(new DeleteObjectsCommand({
+      Bucket: bucket,
+      Delete: { Objects: slice.map((key) => ({ Key: key })) }
+    }));
+  }
+};
+
+export const deletePrefix = async (bucket: string, prefix: string) => {
+  let continuationToken: string | undefined;
+  const keys: string[] = [];
+
+  do {
+    const response = await r2Client.send(new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: prefix,
+      ContinuationToken: continuationToken
+    }));
+    const contents = response.Contents || [];
+    contents.forEach((item) => {
+      if (item.Key) keys.push(item.Key);
+    });
+    continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  await deleteObjects(bucket, keys);
+  return keys.length;
 };

@@ -325,20 +325,46 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
+  const deleteExistingJob = async (item: HistoryJob) => {
+    if (!window.confirm(`Delete project "${item.project_name || 'Untitled Project'}"? This will remove files and cannot be undone.`)) {
+      return;
+    }
+    try {
+      await jobService.deleteJob(item.id);
+      setHistory(prev => prev.filter(jobItem => jobItem.id !== item.id));
+      setHistoryCount(prev => Math.max(prev - 1, 0));
+      if (job?.id === item.id) {
+        setJob(null);
+        setImages([]);
+        setJobStatus('idle');
+        setProjectName('');
+        setZipUrl(null);
+        setPipelineItems([]);
+        setPipelineProgress(null);
+        localStorage.removeItem('mvai:last_job');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to delete project.';
+      alert(message);
+    }
+  };
+
   // Unified file handler for both click and drop
   const processFiles = (fileList: FileList | null) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
-    const maxFiles = 200;
-    const maxFileBytes = 200 * 1024 * 1024;
-    if (images.length + files.length > maxFiles) {
+    const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
+    const maxFileBytes = Number(import.meta.env.VITE_MAX_FILE_BYTES || (200 * 1024 * 1024));
+    if (maxFiles > 0 && images.length + files.length > maxFiles) {
       alert(`Too many files. Max ${maxFiles} per project.`);
       return;
     }
-    const oversized = files.find((file) => file.size > maxFileBytes);
-    if (oversized) {
-      alert(`File too large: ${oversized.name}`);
-      return;
+    if (maxFileBytes > 0) {
+      const oversized = files.find((file) => file.size > maxFileBytes);
+      if (oversized) {
+        alert(`File too large: ${oversized.name}`);
+        return;
+      }
     }
 
     const newItems: ImageItem[] = files.map(file => ({
@@ -625,22 +651,38 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                       </div>
                     </div>
                     {item.status === 'completed' || item.status === 'partial' ? (
-                      <button
-                        onClick={async () => {
-                        const { url } = await jobService.getPresignedDownloadUrl(item.id);
-                        if (url) window.location.href = url;
-                        }}
-                        className="px-4 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
-                      >
-                        Download ZIP
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={async () => {
+                          const { url } = await jobService.getPresignedDownloadUrl(item.id);
+                          if (url) window.location.href = url;
+                          }}
+                          className="px-4 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
+                        >
+                          Download ZIP
+                        </button>
+                        <button
+                          onClick={() => deleteExistingJob(item)}
+                          className="px-3 py-2 rounded-xl bg-red-500/20 text-red-200 text-[10px] font-black uppercase tracking-widest hover:bg-red-500/30 transition"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     ) : (
-                      <button
-                        onClick={() => openExistingJob(item)}
-                        className="px-4 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
-                      >
-                        Open Project
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => openExistingJob(item)}
+                          className="px-4 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                        >
+                          Open Project
+                        </button>
+                        <button
+                          onClick={() => deleteExistingJob(item)}
+                          className="px-3 py-2 rounded-xl bg-red-500/20 text-red-200 text-[10px] font-black uppercase tracking-widest hover:bg-red-500/30 transition"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}

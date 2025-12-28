@@ -15,6 +15,8 @@ const App: React.FC = () => {
   const [password, setPassword] = useState('');
   const [isRegister, setIsRegister] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [hasRestoredView, setHasRestoredView] = useState(false);
+  const viewStorageKey = 'mvai:view';
 
   useEffect(() => {
     const fetchUserAndSession = async () => {
@@ -60,6 +62,25 @@ const App: React.FC = () => {
     }
   }, [user]);
 
+  useEffect(() => {
+    if (loading || hasRestoredView) return;
+    if (!user) return;
+    const stored = localStorage.getItem(viewStorageKey);
+    if (stored === 'editor' || stored === 'admin') {
+      setView(stored);
+    } else {
+      setView('editor');
+    }
+    setHasRestoredView(true);
+  }, [loading, user, hasRestoredView, viewStorageKey]);
+
+  useEffect(() => {
+    if (!user) return;
+    if (view === 'editor' || view === 'admin') {
+      localStorage.setItem(viewStorageKey, view);
+    }
+  }, [view, user, viewStorageKey]);
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -88,6 +109,7 @@ const App: React.FC = () => {
     await supabase.auth.signOut();
     setUser(null);
     setView('home');
+    localStorage.removeItem(viewStorageKey);
   };
 
   if (loading) return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
