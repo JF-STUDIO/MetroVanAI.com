@@ -109,6 +109,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const editorStateKey = 'mvai:editor_state';
   const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
   const [notice, setNotice] = useState<{ type: 'error' | 'info' | 'success'; message: string } | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title?: string;
+    message: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    onConfirm: () => void;
+  } | null>(null);
   const pipelineStages = new Set([
     'reserved',
     'input_resolved',
@@ -339,6 +346,27 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setNotice({ type, message });
   };
 
+  const openConfirm = (payload: {
+    title?: string;
+    message: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    onConfirm: () => void;
+  }) => {
+    setConfirmDialog(payload);
+  };
+
+  useEffect(() => {
+    if (!confirmDialog) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setConfirmDialog(null);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [confirmDialog]);
+
   const formatDate = (value: string) => {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return value;
@@ -394,9 +422,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   const handleCancelJob = async () => {
     if (!job?.id) return;
-    if (!window.confirm('Cancel this job? This will stop remaining processing and release unused credits.')) {
-      return;
-    }
     try {
       await jobService.cancelJob(job.id);
       setJobStatus('canceled');
@@ -409,9 +434,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   };
 
   const deleteExistingJob = async (item: HistoryJob) => {
-    if (!window.confirm(`Delete project "${item.project_name || 'Untitled Project'}"? This will remove files and cannot be undone.`)) {
-      return;
-    }
     try {
       await jobService.deleteJob(item.id);
       setHistory(prev => prev.filter(jobItem => jobItem.id !== item.id));
@@ -430,6 +452,24 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       const message = err instanceof Error ? err.message : 'Failed to delete project.';
       pushNotice('error', message);
     }
+  };
+
+  const requestCancelJob = () => {
+    openConfirm({
+      title: 'Cancel processing?',
+      message: 'This will stop remaining processing and release unused credits.',
+      confirmLabel: 'Cancel Job',
+      onConfirm: handleCancelJob
+    });
+  };
+
+  const requestDeleteJob = (item: HistoryJob) => {
+    openConfirm({
+      title: 'Delete project?',
+      message: `Delete project "${item.project_name || 'Untitled Project'}"? This will remove files and cannot be undone.`,
+      confirmLabel: 'Delete',
+      onConfirm: () => deleteExistingJob(item)
+    });
   };
 
   // Unified file handler for both click and drop
@@ -882,7 +922,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                           Open
                         </button>
                         <button
-                          onClick={() => deleteExistingJob(item)}
+                          onClick={() => requestDeleteJob(item)}
                           className="px-3 py-2 rounded-xl bg-red-500/20 text-red-200 text-[10px] font-black uppercase tracking-widest hover:bg-red-500/30 transition"
                         >
                           Delete
@@ -971,7 +1011,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             </button>
           )}
           {canCancel && (
-            <button onClick={handleCancelJob} className="px-6 py-2.5 rounded-full bg-red-500/20 text-red-200 text-xs font-black uppercase tracking-widest flex items-center gap-2 hover:bg-red-500/30 transition">
+            <button onClick={requestCancelJob} className="px-6 py-2.5 rounded-full bg-red-500/20 text-red-200 text-xs font-black uppercase tracking-widest flex items-center gap-2 hover:bg-red-500/30 transition">
               Cancel Processing <i className="fa-solid fa-ban"></i>
             </button>
           )}
@@ -1125,6 +1165,42 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             >
               <i className="fa-solid fa-xmark"></i>
             </button>
+          </div>
+        </div>
+      )}
+      {confirmDialog && (
+        <div
+          className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6"
+          onClick={() => setConfirmDialog(null)}
+        >
+          <div
+            className="glass w-full max-w-lg rounded-[2rem] border border-white/10 p-8 text-white"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="text-xs uppercase tracking-widest text-gray-500 mb-2">
+              {confirmDialog.title || 'Confirm Action'}
+            </div>
+            <div className="text-lg font-semibold mb-4">{confirmDialog.message}</div>
+            <div className="flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirmDialog(null)}
+                className="px-5 py-2 rounded-full bg-white/10 text-white text-xs font-bold uppercase tracking-widest"
+              >
+                {confirmDialog.cancelLabel || 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const action = confirmDialog.onConfirm;
+                  setConfirmDialog(null);
+                  action();
+                }}
+                className="px-5 py-2 rounded-full bg-red-500 text-white text-xs font-bold uppercase tracking-widest"
+              >
+                {confirmDialog.confirmLabel || 'Confirm'}
+              </button>
+            </div>
           </div>
         </div>
       )}
