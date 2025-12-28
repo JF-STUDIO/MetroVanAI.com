@@ -199,6 +199,8 @@ const processPreviewJob = async (jobId: string) => {
       await (supabaseAdmin.from('job_files') as any)
         .update({ preview_bucket: HDR_BUCKET, preview_key: previewKey, preview_ready: true })
         .eq('id', file.id);
+    } catch (error) {
+      console.warn(`Preview generation failed for file ${file.id}:`, error);
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
@@ -658,7 +660,11 @@ const worker = new Worker('job-queue', async (job: Job) => {
 
   try {
     if (job.name === 'preview-job') {
-      await processPreviewJob(jobId);
+      try {
+        await processPreviewJob(jobId);
+      } catch (error) {
+        console.warn(`Preview job ${jobId} failed:`, error);
+      }
       return;
     }
     const { data: jobRecord } = await (supabaseAdmin

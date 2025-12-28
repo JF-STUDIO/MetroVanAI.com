@@ -18,9 +18,12 @@ const RAW_EXTENSIONS = new Set([
   'orf'
 ]);
 
-const runCommand = (command: string, args: string[]) =>
+const runCommand = (command: string, args: string[], options: { cwd?: string } = {}) =>
   new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: options.cwd
+    });
     let stderr = '';
     child.stderr.on('data', (data) => {
       stderr += data.toString();
@@ -144,14 +147,19 @@ const convertRawToTiff = async (inputPath: string, outputPath: string) => {
     throw new Error('RAW conversion tools not installed (rawtherapee-cli or dcraw)');
   }
 
-  await runCommand(dcraw, ['-6', '-T', '-W', '-o', '1', '-q', '3', inputPath]);
   const dir = path.dirname(inputPath);
   const base = path.basename(inputPath);
+  const stem = path.parse(inputPath).name;
+  await runCommand(dcraw, ['-6', '-T', '-W', '-o', '1', '-q', '3', inputPath], { cwd: dir });
   const candidates = [
-    `${inputPath}.tiff`,
-    `${inputPath}.tif`,
-    `${inputPath}.TIFF`,
-    `${inputPath}.TIF`
+    path.join(dir, `${base}.tiff`),
+    path.join(dir, `${base}.tif`),
+    path.join(dir, `${base}.TIFF`),
+    path.join(dir, `${base}.TIF`),
+    path.join(dir, `${stem}.tiff`),
+    path.join(dir, `${stem}.tif`),
+    path.join(dir, `${stem}.TIFF`),
+    path.join(dir, `${stem}.TIF`)
   ];
   let generatedPath: string | null = null;
 
@@ -165,9 +173,15 @@ const convertRawToTiff = async (inputPath: string, outputPath: string) => {
   if (!generatedPath) {
     const files = await fs.readdir(dir);
     const lowerBase = base.toLowerCase();
+    const lowerStem = stem.toLowerCase();
     const match = files.find((name) => {
       const lower = name.toLowerCase();
-      return lower === `${lowerBase}.tiff` || lower === `${lowerBase}.tif`;
+      return (
+        lower === `${lowerBase}.tiff` ||
+        lower === `${lowerBase}.tif` ||
+        lower === `${lowerStem}.tiff` ||
+        lower === `${lowerStem}.tif`
+      );
     });
     if (match) {
       generatedPath = path.join(dir, match);
@@ -178,7 +192,10 @@ const convertRawToTiff = async (inputPath: string, outputPath: string) => {
     throw new Error('RAW conversion output not found');
   }
 
-  await fs.rename(generatedPath, outputPath);
+  await fs.copyFile(generatedPath, outputPath);
+  if (generatedPath !== outputPath) {
+    await fs.rm(generatedPath, { force: true });
+  }
 };
 
 export const convertToJpeg = async (inputPath: string, outputPath: string) => {
@@ -201,18 +218,26 @@ export const createRawPreview = async (inputPath: string, outputPath: string) =>
   const dcraw = await resolveBinary('dcraw');
   if (dcraw) {
     try {
-      await runCommand(dcraw, ['-e', '-c', inputPath]);
       const dir = path.dirname(inputPath);
       const base = path.basename(inputPath);
+      const stem = path.parse(inputPath).name;
+      await runCommand(dcraw, ['-e', inputPath], { cwd: dir });
       const candidates = [
-        `${inputPath}.thumb.jpg`,
-        `${inputPath}.thumb.JPG`,
         path.join(dir, `${base}.thumb.jpg`),
-        path.join(dir, `${base}.thumb.JPG`)
+        path.join(dir, `${base}.thumb.JPG`),
+        path.join(dir, `${stem}.thumb.jpg`),
+        path.join(dir, `${stem}.thumb.JPG`),
+        path.join(dir, `${base}.thumb.tif`),
+        path.join(dir, `${base}.thumb.TIF`),
+        path.join(dir, `${stem}.thumb.tif`),
+        path.join(dir, `${stem}.thumb.TIF`)
       ];
       for (const candidate of candidates) {
         if (await fileExists(candidate)) {
-          await fs.rename(candidate, outputPath);
+          await fs.copyFile(candidate, outputPath);
+          if (candidate !== outputPath) {
+            await fs.rm(candidate, { force: true });
+          }
           return;
         }
       }
