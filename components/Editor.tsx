@@ -28,7 +28,7 @@ type GalleryItem = {
   preview?: string;
   status: 'pending' | 'uploading' | 'processing' | 'done' | 'failed';
   progress: number;
-  stage?: 'input' | 'hdr' | 'output';
+  stage?: 'input' | 'hdr' | 'ai' | 'output';
   error?: string | null;
 };
 
@@ -670,25 +670,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
-  const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
-    const outputReady = Boolean(item.output_url) || item.status === 'ai_ok';
-    const hdrReady = Boolean(item.hdr_url) || item.status === 'preprocess_ok' || item.status === 'hdr_ok';
-    const preview = item.output_url || item.hdr_url || '';
-    const status: GalleryItem['status'] =
-      item.status === 'failed' ? 'failed' : outputReady ? 'done' : 'processing';
-    const progress = status === 'done' ? 100 : status === 'failed' ? 100 : hdrReady ? 60 : 20;
-    const stage: GalleryItem['stage'] = outputReady ? 'output' : hdrReady ? 'hdr' : 'input';
-    return {
-      id: item.id,
-      label: item.output_filename || `Group ${item.group_index}`,
-      preview,
-      status,
-      progress,
-      stage,
-      error: item.last_error || null
-    };
-  };
-
   const mapUploadItem = (item: ImageItem): GalleryItem => ({
     id: item.id,
     label: item.file.name,
@@ -700,11 +681,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft' || jobStatus === 'uploaded';
   const showUploadOnly = jobStatus === 'uploading';
-  const galleryItems = pipelineItems.length > 0
-    ? pipelineItems.filter((item) => item.output_url || item.hdr_url || item.status === 'failed').map(mapPipelineItem)
-    : showRawPreviews
-      ? images.filter((img) => !img.isRaw).map(mapUploadItem)
-      : [];
 
   const uploadProgress = images.length
     ? Math.round(images.reduce((sum, img) => sum + img.progress, 0) / images.length)
@@ -715,6 +691,45 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     : typeof job?.progress === 'number'
       ? job.progress
       : null;
+
+  const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
+  const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
+  const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
+  const totalGroups = pipelineItems.length;
+  const hdrReadyCount = pipelineItems.filter((item) => isHdrReady(item) || item.status === 'failed').length;
+  const hdrProgressValue = totalGroups ? Math.round((hdrReadyCount / totalGroups) * 100) : 0;
+  const hdrProcessing = totalGroups > 0 && hdrReadyCount < totalGroups && pipelineStages.has(jobStatus);
+
+  const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
+    const outputReady = isOutputReady(item);
+    const hdrReady = isHdrReady(item);
+    const preview = item.output_url || item.hdr_url || '';
+    const status: GalleryItem['status'] =
+      item.status === 'failed' ? 'failed' : outputReady ? 'done' : 'processing';
+    const stage: GalleryItem['stage'] = outputReady ? 'output' : hdrReady ? 'ai' : 'hdr';
+    const progress = status === 'done'
+      ? 100
+      : status === 'failed'
+        ? 100
+        : stage === 'hdr'
+          ? Math.max(5, Math.min(90, hdrProgressValue || 35))
+          : Math.max(10, Math.min(95, pipelineProgressValue ?? 70));
+    return {
+      id: item.id,
+      label: item.output_filename || `Group ${item.group_index}`,
+      preview,
+      status,
+      progress,
+      stage,
+      error: item.last_error || null
+    };
+  };
+
+  const galleryItems = pipelineItems.length > 0
+    ? pipelineItems.filter((item) => item.output_url || item.hdr_url || item.status === 'failed').map(mapPipelineItem)
+    : showRawPreviews
+      ? images.filter((img) => !img.isRaw).map(mapUploadItem)
+      : [];
   const noticeTone = notice?.type === 'error'
     ? 'border-red-500/30 bg-red-500/10 text-red-200'
     : notice?.type === 'success'
@@ -978,6 +993,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const showWaitingForResults = !showUploadOnly && galleryItems.length === 0 && pipelineStages.has(jobStatus);
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !currentImage && images.length === 0;
   const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
+  const showAiProgress = !showUploadOnly && pipelineStages.has(jobStatus) && !hdrProcessing && pipelineProgressValue !== null;
+  const showHdrProgress = !showUploadOnly && hdrProcessing;
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
@@ -996,16 +1013,24 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               {uploadComplete && jobStatus !== 'uploading' && (
                 <span className="text-[9px] text-emerald-400 font-bold">| Upload Complete</span>
               )}
-              {jobStatus !== 'uploading' && pipelineStages.has(jobStatus) && pipelineProgressValue !== null && (
-                <span className="text-[9px] text-gray-400 font-bold">| Progress {pipelineProgressValue}%</span>
+              {showHdrProgress && (
+                <span className="text-[9px] text-gray-400 font-bold">| HDR {hdrProgressValue}%</span>
+              )}
+              {showAiProgress && (
+                <span className="text-[9px] text-gray-400 font-bold">| AI {pipelineProgressValue}%</span>
               )}
             </div>
-            {(jobStatus === 'uploading' || (pipelineStages.has(jobStatus) && pipelineProgressValue !== null)) && (
+            {(jobStatus === 'uploading' || showHdrProgress || showAiProgress) && (
               <div className="mt-2 h-1.5 w-48 rounded-full bg-white/10 overflow-hidden">
                 <div
                   className="h-full bg-indigo-500 transition-all"
-                  style={{ width: `${jobStatus === 'uploading' ? uploadProgress : pipelineProgressValue || 0}%` }}
+                  style={{ width: `${jobStatus === 'uploading' ? uploadProgress : showHdrProgress ? hdrProgressValue : pipelineProgressValue || 0}%` }}
                 ></div>
+              </div>
+            )}
+            {uploadComplete && jobStatus !== 'uploading' && (
+              <div className="mt-2 text-[10px] text-emerald-300 uppercase tracking-widest">
+                Upload complete. You can close this page while we finish processing.
               </div>
             )}
           </div>
@@ -1048,6 +1073,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               <div className="w-full max-w-md text-center space-y-4">
                 <div className="text-lg font-black uppercase tracking-widest text-white">Uploading</div>
                 <div className="text-xs text-gray-500">Uploading {images.length} files...</div>
+                <div className="text-[10px] text-gray-500 uppercase tracking-widest">
+                  Please keep this page open until upload finishes.
+                </div>
                 <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
                   <div className="h-full bg-indigo-500 transition-all" style={{ width: `${uploadProgress}%` }}></div>
                 </div>
@@ -1058,8 +1086,22 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             <div className="flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5">
               <div className="text-center space-y-3">
                 <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin mx-auto"></div>
-                <div className="text-sm text-gray-300 uppercase tracking-widest">Processing HDR & AI</div>
-                <div className="text-xs text-gray-500">Results will appear here as they complete.</div>
+                <div className="text-sm text-gray-300 uppercase tracking-widest">
+                  {showHdrProgress ? 'Processing HDR' : 'Processing AI'}
+                </div>
+                <div className="text-xs text-gray-500">
+                  {showHdrProgress ? 'HDR previews will appear here as they complete.' : 'AI results will appear here as they complete.'}
+                </div>
+                {showHdrProgress && (
+                  <div className="w-64 bg-white/10 h-2 rounded-full overflow-hidden mx-auto mt-2">
+                    <div className="h-full bg-indigo-500 transition-all" style={{ width: `${hdrProgressValue}%` }}></div>
+                  </div>
+                )}
+                {uploadComplete && (
+                  <div className="text-[10px] text-emerald-300 uppercase tracking-widest">
+                    Upload complete. You can close this page while we finish.
+                  </div>
+                )}
               </div>
             </div>
           ) : showEmptyDropzone ? (
@@ -1108,13 +1150,19 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                     <div className="h-full bg-indigo-500 transition-all" style={{ width: `${currentImage.progress}%` }}></div>
                   </div>
                   <p className="text-indigo-400 font-black text-[10px] uppercase tracking-widest">
-                    {currentImage.stage ? `${currentImage.stage} · ` : ''}{currentImage.status}
+                    {currentImage.stage === 'hdr'
+                      ? 'HDR Processing'
+                      : currentImage.stage === 'ai'
+                        ? 'AI Processing'
+                        : currentImage.stage === 'output'
+                          ? 'Processed'
+                          : currentImage.status}
                   </p>
                 </div>
               )}
               {currentImage?.stage && currentImage.status !== 'failed' && (
                 <div className="absolute bottom-4 left-4 px-3 py-1 rounded-full bg-black/70 text-[10px] text-white uppercase tracking-widest">
-                  {currentImage.stage === 'hdr' ? 'HDR Ready' : currentImage.stage === 'output' ? 'Processed' : 'Input'}
+                  {currentImage.stage === 'hdr' ? 'HDR' : currentImage.stage === 'ai' ? 'AI' : currentImage.stage === 'output' ? 'Done' : 'Input'}
                 </div>
               )}
               {currentImage?.status === 'failed' && currentImage.error && (
@@ -1154,7 +1202,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                 {img.status === 'uploading' && <div className="absolute inset-0 bg-black/50 flex items-center justify-center"><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div></div>}
                 {img.stage && (
                   <div className="absolute bottom-2 left-2 text-[9px] uppercase tracking-widest bg-black/60 text-white px-2 py-0.5 rounded-full">
-                    {img.stage === 'hdr' ? 'HDR' : img.stage === 'output' ? 'AI' : 'Input'}
+                    {img.stage === 'hdr' ? 'HDR' : img.stage === 'ai' ? 'AI' : img.stage === 'output' ? 'Done' : 'Input'}
                   </div>
                 )}
               </div>
