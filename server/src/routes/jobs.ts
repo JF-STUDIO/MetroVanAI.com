@@ -1390,10 +1390,53 @@ router.get('/jobs/:jobId/stream', authenticateSse, async (req: AuthRequest, res:
     let closed = false;
     let pending = false;
     const terminalStatuses = new Set(['completed', 'partial', 'failed', 'canceled']);
+    let lastPreviewReady = 0;
+    let lastPreviewTotal = 0;
+    const lastGroupState = new Map<string, { previewReady: number; hdrReady: boolean; aiReady: boolean }>();
 
     const sendEvent = (event: string, data: any) => {
         res.write(`event: ${event}\n`);
         res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const countPreviewReady = (item: any) => {
+        const frames = Array.isArray(item?.frames) ? item.frames : [];
+        const total = frames.length || 1;
+        const ready = frames.filter((frame: any) => frame?.preview_ready || frame?.preview_url).length;
+        return { ready, total };
+    };
+
+    const isHdrReady = (item: any) => Boolean(item?.hdr_url) || ['hdr_ok', 'ai_ok'].includes(item?.status);
+    const isAiReady = (item: any) => Boolean(item?.output_url) || item?.status === 'ai_ok';
+
+    const emitItemEvents = (payload: any) => {
+        const previews = payload?.previews;
+        if (previews && (previews.ready !== lastPreviewReady || previews.total !== lastPreviewTotal)) {
+            lastPreviewReady = previews.ready;
+            lastPreviewTotal = previews.total;
+            sendEvent('preview-ready', { previews });
+        }
+
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        items.forEach((item: any) => {
+            if (!item?.id) return;
+            const { ready, total } = countPreviewReady(item);
+            const hdrReady = isHdrReady(item);
+            const aiReady = isAiReady(item);
+            const prev = lastGroupState.get(item.id);
+
+            if (!prev || ready !== prev.previewReady) {
+                sendEvent('preview-ready', { group: item, ready, total, previews });
+            }
+            if (!prev?.hdrReady && hdrReady) {
+                sendEvent('hdr-ready', { group: item });
+            }
+            if (!prev?.aiReady && aiReady) {
+                sendEvent('ai-ready', { group: item });
+            }
+
+            lastGroupState.set(item.id, { previewReady: ready, hdrReady, aiReady });
+        });
     };
 
     const closeStream = () => {
@@ -1414,6 +1457,7 @@ router.get('/jobs/:jobId/stream', authenticateSse, async (req: AuthRequest, res:
                 closeStream();
                 return;
             }
+            emitItemEvents(payload);
             sendEvent('status', payload);
             if (terminalStatuses.has(payload.job.status)) {
                 sendEvent('done', { status: payload.job.status });

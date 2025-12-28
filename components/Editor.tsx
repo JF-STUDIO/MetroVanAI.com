@@ -294,6 +294,40 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       const streamUrl = `${API_BASE_URL}/jobs/${job.id}/stream?token=${encodeURIComponent(token)}`;
       eventSource = new EventSource(streamUrl);
 
+      const patchPipelineGroup = (group: PipelineGroupItem) => {
+        if (!group) return;
+        setPipelineItems(prev => {
+          if (!prev || prev.length === 0) {
+            return [group].sort((a, b) => a.group_index - b.group_index);
+          }
+          const idx = prev.findIndex(item => item.id === group.id);
+          if (idx === -1) {
+            const next = [...prev, group];
+            next.sort((a, b) => a.group_index - b.group_index);
+            return next;
+          }
+          const next = [...prev];
+          next[idx] = { ...next[idx], ...group };
+          return next;
+        });
+      };
+
+      const handleGroupEvent = (raw: string) => {
+        if (destroyed) return;
+        try {
+          lastEventAt = Date.now();
+          const payload = JSON.parse(raw);
+          if (payload?.previews) {
+            setPreviewSummary(payload.previews);
+          }
+          if (payload?.group) {
+            patchPipelineGroup(payload.group);
+          }
+        } catch (err) {
+          console.error('Stream group event error:', err);
+        }
+      };
+
       const handlePayload = async (raw: string) => {
         if (destroyed) return;
         try {
@@ -310,6 +344,18 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
       eventSource.addEventListener('status', (event) => {
         void handlePayload((event as MessageEvent).data);
+      });
+
+      eventSource.addEventListener('preview-ready', (event) => {
+        handleGroupEvent((event as MessageEvent).data);
+      });
+
+      eventSource.addEventListener('hdr-ready', (event) => {
+        handleGroupEvent((event as MessageEvent).data);
+      });
+
+      eventSource.addEventListener('ai-ready', (event) => {
+        handleGroupEvent((event as MessageEvent).data);
       });
 
       eventSource.onmessage = (event) => {
@@ -956,10 +1002,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
     const outputReady = isOutputReady(item);
     const hdrReady = isHdrReady(item);
-    const frameHasRaw = item.frames?.some((frame) => frame.input_kind === 'raw');
     const groupType = item.group_type ?? null;
-    const isRawGroup = groupType === 'hdr' || groupType === 'raw' || frameHasRaw;
     const preview = item.output_url || item.hdr_url || item.preview_url || '';
+    const frameTotal = item.frames?.length || 0;
+    const previewReadyCount = (item.frames || []).filter((frame) => frame.preview_ready || frame.preview_url).length;
+    const previewTotal = frameTotal || 1;
+    const previewPercent = previewTotal ? Math.round((previewReadyCount / previewTotal) * 100) : 0;
+    const previewPending = !processingActive && previewPercent < 100;
     const stage: GalleryItem['stage'] = outputReady
       ? 'output'
       : processingActive
@@ -970,14 +1019,21 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         ? 'failed'
         : outputReady
           ? 'done'
-          : processingActive
+          : (processingActive || previewPending)
             ? 'processing'
             : 'pending';
-    const progress = status === 'done' || status === 'failed'
-      ? 100
-      : stage === 'hdr'
-        ? Math.max(5, Math.min(90, hdrProgressValue || 35))
-        : 0;
+    let progress = 0;
+    if (status === 'done' || status === 'failed') {
+      progress = 100;
+    } else if (previewPending) {
+      progress = Math.max(5, previewPercent);
+    } else if (processingActive) {
+      if (stage === 'hdr') {
+        progress = hdrReady ? 65 : item.status === 'hdr_processing' ? 35 : 15;
+      } else if (stage === 'ai') {
+        progress = outputReady ? 100 : item.status === 'ai_processing' ? 75 : 55;
+      }
+    }
     return {
       id: item.id,
       label: item.output_filename || `Group ${item.group_index}`,
@@ -1500,19 +1556,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                     )}
                     {img.status === 'processing' && (
                       <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-3">
-                        {img.stage === 'hdr' ? (
-                          <>
-                            <div className="w-32 bg-white/10 h-1.5 rounded-full overflow-hidden">
-                              <div className="h-full bg-indigo-500 transition-all" style={{ width: `${img.progress}%` }}></div>
-                            </div>
-                            <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">HDR Processing</p>
-                          </>
-                        ) : (
-                          <>
-                            <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                            <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">AI Processing</p>
-                          </>
-                        )}
+                        <div className="w-32 bg-white/10 h-1.5 rounded-full overflow-hidden">
+                          <div className="h-full bg-indigo-500 transition-all" style={{ width: `${img.progress}%` }}></div>
+                        </div>
+                        <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
+                          {img.stage === 'hdr'
+                            ? 'HDR Processing'
+                            : img.stage === 'ai'
+                              ? 'AI Processing'
+                              : 'Generating Preview'}
+                        </p>
                       </div>
                     )}
                     {img.status === 'failed' && img.error && (
