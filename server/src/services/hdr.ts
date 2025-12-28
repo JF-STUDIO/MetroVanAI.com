@@ -198,6 +198,29 @@ export const createRawPreview = async (inputPath: string, outputPath: string) =>
   const extracted = await extractEmbeddedJpeg(inputPath, outputPath);
   if (extracted) return;
 
+  const dcraw = await resolveBinary('dcraw');
+  if (dcraw) {
+    try {
+      await runCommand(dcraw, ['-e', '-c', inputPath]);
+      const dir = path.dirname(inputPath);
+      const base = path.basename(inputPath);
+      const candidates = [
+        `${inputPath}.thumb.jpg`,
+        `${inputPath}.thumb.JPG`,
+        path.join(dir, `${base}.thumb.jpg`),
+        path.join(dir, `${base}.thumb.JPG`)
+      ];
+      for (const candidate of candidates) {
+        if (await fileExists(candidate)) {
+          await fs.rename(candidate, outputPath);
+          return;
+        }
+      }
+    } catch {
+      // ignore and fallback to full conversion
+    }
+  }
+
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-preview-'));
   try {
     const tiffPath = path.join(tempDir, 'preview.tif');
