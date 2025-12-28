@@ -1092,6 +1092,42 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       </button>
     </div>
   ) : null;
+  const confirmDialogNode = confirmDialog ? (
+    <div
+      className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6"
+      onClick={() => setConfirmDialog(null)}
+    >
+      <div
+        className="glass w-full max-w-lg rounded-[2rem] border border-white/10 p-8 text-white"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="text-xs uppercase tracking-widest text-gray-500 mb-2">
+          {confirmDialog.title || 'Confirm Action'}
+        </div>
+        <div className="text-lg font-semibold mb-4">{confirmDialog.message}</div>
+        <div className="flex flex-wrap justify-end gap-3">
+          <button
+            type="button"
+            onClick={() => setConfirmDialog(null)}
+            className="px-5 py-2 rounded-full bg-white/10 text-white text-xs font-bold uppercase tracking-widest"
+          >
+            {confirmDialog.cancelLabel || 'Cancel'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const action = confirmDialog.onConfirm;
+              setConfirmDialog(null);
+              action();
+            }}
+            className="px-5 py-2 rounded-full bg-red-500 text-white text-xs font-bold uppercase tracking-widest"
+          >
+            {confirmDialog.confirmLabel || 'Confirm'}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   useEffect(() => {
     if (galleryItems.length === 0) {
@@ -1159,6 +1195,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             </div>
           ))}
         </div>
+        {confirmDialogNode}
       </div>
     );
   }
@@ -1321,6 +1358,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             )}
           </div>
         </div>
+        {confirmDialogNode}
       </div>
     );
   }
@@ -1615,42 +1653,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           </div>
         </div>
       )}
-      {confirmDialog && (
-        <div
-          className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-6"
-          onClick={() => setConfirmDialog(null)}
-        >
-          <div
-            className="glass w-full max-w-lg rounded-[2rem] border border-white/10 p-8 text-white"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="text-xs uppercase tracking-widest text-gray-500 mb-2">
-              {confirmDialog.title || 'Confirm Action'}
-            </div>
-            <div className="text-lg font-semibold mb-4">{confirmDialog.message}</div>
-            <div className="flex flex-wrap justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setConfirmDialog(null)}
-                className="px-5 py-2 rounded-full bg-white/10 text-white text-xs font-bold uppercase tracking-widest"
-              >
-                {confirmDialog.cancelLabel || 'Cancel'}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const action = confirmDialog.onConfirm;
-                  setConfirmDialog(null);
-                  action();
-                }}
-                className="px-5 py-2 rounded-full bg-red-500 text-white text-xs font-bold uppercase tracking-widest"
-              >
-                {confirmDialog.confirmLabel || 'Confirm'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {confirmDialogNode}
       <input type="file" multiple className="hidden" ref={fileInputRef} accept="image/*,.raw,.arw,.cr2,.nef" onChange={handleFileChange} />
     </div>
   );
