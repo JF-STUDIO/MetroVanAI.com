@@ -37,7 +37,7 @@ export const jobService = {
     return response.data;
   },
 
-  getPresignedRawUploadUrls: async (jobId: string, files: { name: string; type: string }[]) => {
+  getPresignedRawUploadUrls: async (jobId: string, files: { name: string; type: string; size?: number }[]) => {
     const response = await api.post(`/jobs/${jobId}/presign-raw`, { files });
     return response.data;
   },
@@ -134,6 +134,11 @@ export const jobService = {
 
   adminGetCredits: async () => {
     const response = await api.get('/admin/credits');
+    return response.data;
+  },
+
+  adminGetJobs: async (limit = 20) => {
+    const response = await api.get(`/admin/jobs?limit=${limit}`);
     return response.data;
   },
 

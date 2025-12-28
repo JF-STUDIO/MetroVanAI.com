@@ -329,6 +329,17 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const processFiles = (fileList: FileList | null) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
+    const maxFiles = 200;
+    const maxFileBytes = 200 * 1024 * 1024;
+    if (images.length + files.length > maxFiles) {
+      alert(`Too many files. Max ${maxFiles} per project.`);
+      return;
+    }
+    const oversized = files.find((file) => file.size > maxFileBytes);
+    if (oversized) {
+      alert(`File too large: ${oversized.name}`);
+      return;
+    }
 
     const newItems: ImageItem[] = files.map(file => ({
       id: Math.random().toString(36).substring(2, 9),
@@ -393,7 +404,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPipelineProgress(null);
       const presignedData: { r2Key: string; putUrl: string; fileName: string }[] = await jobService.getPresignedRawUploadUrls(
         job.id,
-        images.map(img => ({ name: img.file.name, type: img.file.type }))
+        images.map(img => ({ name: img.file.name, type: img.file.type || 'application/octet-stream', size: img.file.size }))
       );
 
       const uploadedFiles: { r2_key: string; filename: string }[] = [];
@@ -403,7 +414,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
         img.status = 'uploading';
         await axios.put(presignInfo.putUrl, img.file, {
-          headers: { 'Content-Type': img.file.type },
+          headers: { 'Content-Type': img.file.type || 'application/octet-stream' },
           onUploadProgress: (progressEvent) => {
             const total = progressEvent.total || 1;
             img.progress = Math.round((progressEvent.loaded * 100) / total);

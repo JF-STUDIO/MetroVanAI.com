@@ -6,6 +6,7 @@ import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
 import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
 import { AuthRequest } from '../types/auth.js';
 import { createRedis } from '../services/redis.js';
 import { extractExifFromR2 } from '../services/exif.js';
@@ -59,6 +60,24 @@ const exposurePlan = (count: number) => {
 const RAW_EXTENSIONS = new Set(['cr2', 'cr3', 'nef', 'arw', 'dng', 'raf', 'rw2', 'orf']);
 const JPG_EXTENSIONS = new Set(['jpg', 'jpeg']);
 const PNG_EXTENSIONS = new Set(['png']);
+const MAX_UPLOAD_FILES = Number.parseInt(process.env.MAX_UPLOAD_FILES || '200', 10);
+const MAX_FILE_BYTES = Number.parseInt(process.env.MAX_FILE_BYTES || `${200 * 1024 * 1024}`, 10);
+const MAX_TOTAL_BYTES = Number.parseInt(process.env.MAX_UPLOAD_BYTES || `${2 * 1024 * 1024 * 1024}`, 10);
+
+const sanitizeFilename = (value: string | null | undefined, fallback = 'image') => {
+    const raw = value || fallback;
+    const base = path.basename(raw);
+    const safe = base.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return safe || fallback;
+};
+
+const isSafeKey = (key: string, prefix: string) => {
+    if (!key.startsWith(prefix)) return false;
+    if (key.includes('..') || key.includes('\\')) return false;
+    const rest = key.slice(prefix.length);
+    if (!rest || rest.includes('/')) return false;
+    return true;
+};
 
 const detectInputKind = (filename?: string | null, key?: string | null) => {
     const source = filename || key || '';
@@ -70,7 +89,8 @@ const detectInputKind = (filename?: string | null, key?: string | null) => {
 };
 
 const normalizeOutputFilename = (filename?: string | null, fallback = 'image') => {
-    const base = (filename || fallback).replace(/\.[^.]+$/, '');
+    const safeName = sanitizeFilename(filename || fallback, fallback);
+    const base = safeName.replace(/\.[^.]+$/, '');
     return `${base}.jpg`;
 };
 
@@ -175,6 +195,13 @@ router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest
   const { jobId } = req.params;
   const { files }: { files: {name: string, type: string}[] } = req.body;
   const userId = req.user?.id;
+
+  if (!Array.isArray(files) || files.length === 0) {
+    return res.status(400).json({ error: 'files required' });
+  }
+  if (files.length > MAX_UPLOAD_FILES) {
+    return res.status(413).json({ error: `Too many files (max ${MAX_UPLOAD_FILES})` });
+  }
 
   const results = await Promise.all(files.map(async (file) => {
     const assetId = uuidv4();
@@ -355,11 +382,26 @@ router.post('/recharge', authenticate, async (req: AuthRequest, res: Response) =
 // New pipeline: presign raw uploads (mvai-raw bucket)
 router.post('/jobs/:jobId/presign-raw', authenticate, async (req: AuthRequest, res: Response) => {
     const { jobId } = req.params;
-    const { files }: { files: { name: string; type: string }[] } = req.body || {};
+    const { files }: { files: { name: string; type: string; size?: number }[] } = req.body || {};
     const userId = req.user?.id;
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ error: 'files required' });
+    if (files.length > MAX_UPLOAD_FILES) return res.status(413).json({ error: `Too many files (max ${MAX_UPLOAD_FILES})` });
+
+    const sizes = files.map((file) => file.size).filter((size) => typeof size === 'number');
+    if (sizes.length !== files.length) {
+        return res.status(400).json({ error: 'file size is required' });
+    }
+
+    const totalBytes = sizes.reduce((sum, value) => sum + value, 0);
+    if (totalBytes > MAX_TOTAL_BYTES) {
+        return res.status(413).json({ error: `Total upload too large (max ${MAX_TOTAL_BYTES} bytes)` });
+    }
+    const oversized = files.find((file) => typeof file.size === 'number' && file.size > MAX_FILE_BYTES);
+    if (oversized) {
+        return res.status(413).json({ error: `File too large: ${oversized.name}` });
+    }
 
     const { data: job } = await (supabaseAdmin
         .from('jobs') as any).select('id').eq('id', jobId).eq('user_id', userId).single();
@@ -389,20 +431,24 @@ router.post('/jobs/:jobId/upload-complete', authenticate, async (req: AuthReques
         .from('jobs') as any).select('id, status').eq('id', jobId).eq('user_id', userId).single();
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
+    const keyPrefix = `u/${userId}/jobs/${jobId}/raw/`;
     const rows = files.map((file: any) => {
-        const filename = file.filename || file.name;
+        const filename = sanitizeFilename(file.filename || file.name, 'image');
+        const r2Key = file.r2_key || file.r2Key || file.key;
+        if (!r2Key || typeof r2Key !== 'string') return null;
+        if (!isSafeKey(r2Key, keyPrefix)) return null;
         return {
             job_id: jobId,
-            r2_bucket: file.r2_bucket || RAW_BUCKET,
-            r2_key: file.r2_key || file.r2Key || file.key,
+            r2_bucket: RAW_BUCKET,
+            r2_key: r2Key,
             filename,
-            input_kind: detectInputKind(filename, file.r2_key || file.r2Key || file.key),
+            input_kind: detectInputKind(filename, r2Key),
             exif_time: file.exif_time || null,
             size: file.size || null,
             camera_make: file.camera_make || null,
             camera_model: file.camera_model || null
         };
-    }).filter((row: any) => row.r2_key);
+    }).filter((row: any) => row && row.r2_key);
 
     if (rows.length === 0) return res.status(400).json({ error: 'No valid file keys provided' });
 
@@ -718,6 +764,19 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
         });
     } catch (error) {
         console.warn('Failed to enqueue pipeline job:', (error as Error).message);
+        const releaseKey = `release:${jobId}:enqueue_failed`;
+        await (supabaseAdmin as any).rpc('credit_release', {
+            p_user_id: userId,
+            p_job_id: jobId,
+            p_units: creditsToReserve,
+            p_idempotency_key: releaseKey,
+            p_note: 'Release credits after queue failure'
+        });
+        await (supabaseAdmin.from('jobs') as any)
+            .update({ status: 'input_resolved', reserved_units: 0 })
+            .eq('id', jobId)
+            .eq('user_id', userId);
+        return res.status(503).json({ error: 'Queue unavailable, please retry' });
     }
 
     res.json({ reserved_units: job.estimated_units, credits_reserved: creditsToReserve, balance });

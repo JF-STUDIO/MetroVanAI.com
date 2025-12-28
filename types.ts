@@ -92,3 +92,14 @@ export interface CreditRow {
   available_credits: number;
   reserved_credits: number;
 }
+
+export interface AdminJobRow {
+  id: string;
+  user_id: string;
+  project_name?: string | null;
+  status: string;
+  error_message?: string | null;
+  workflow_id?: string | null;
+  created_at?: string;
+  group_errors?: { group_index: number; last_error: string | null }[];
+}

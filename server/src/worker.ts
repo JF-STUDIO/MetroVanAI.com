@@ -232,6 +232,38 @@ const applyCreditAdjustments = async (
   return { settled_units: successCount, reserved_units: remainingReserved };
 };
 
+const releaseCreditsForFailure = async (jobId: string, errorMessage: string) => {
+  const { data: job } = await (supabaseAdmin
+    .from('jobs') as any)
+    .select('id, user_id, workflow_id, settled_units, reserved_units')
+    .eq('id', jobId)
+    .single();
+
+  if (!job) return;
+
+  const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
+    .select('status')
+    .eq('job_id', jobId);
+
+  const totalGroups = groups?.length || (job.reserved_units ?? 0) || 0;
+  const successCount = groups ? groups.filter((group: any) => group.status === 'ai_ok').length : 0;
+  const finalFailureCount = Math.max(totalGroups - successCount, 0);
+
+  if (groups && groups.length > 0) {
+    await (supabaseAdmin.from('job_groups') as any)
+      .update({ status: 'failed', last_error: errorMessage })
+      .eq('job_id', jobId)
+      .neq('status', 'ai_ok');
+  }
+
+  if (totalGroups > 0) {
+    const creditUpdate = await applyCreditAdjustments(job, totalGroups, successCount, finalFailureCount);
+    await (supabaseAdmin.from('jobs') as any)
+      .update({ ...creditUpdate })
+      .eq('id', jobId);
+  }
+};
+
 const finalizePipelineJob = async (
   job: { id: string; user_id: string; workflow_id: string; project_name?: string | null; settled_units?: number | null; reserved_units?: number | null },
   runtimeConfig: Record<string, unknown>
@@ -586,9 +618,11 @@ const worker = new Worker('job-queue', async (job: Job) => {
     }
   } catch (error) {
     console.error(`Job ${jobId} failed:`, error);
+    const message = (error as Error).message;
     await (supabaseAdmin.from('jobs') as any)
-      .update({ status: 'failed', error_message: (error as Error).message })
+      .update({ status: 'failed', error_message: message })
       .eq('id', jobId);
+    await releaseCreditsForFailure(jobId, message);
     throw error;
   }
 }, {

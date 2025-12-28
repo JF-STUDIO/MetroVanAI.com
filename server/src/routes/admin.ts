@@ -307,6 +307,36 @@ router.get('/admin/credits', async (_req: Request, res: Response) => {
   res.json(rows);
 });
 
+router.get('/admin/jobs', async (req: Request, res: Response) => {
+  const limit = Math.min(Number(req.query.limit || 20), 100);
+  const { data: jobs, error } = await (supabaseAdmin.from('jobs') as any)
+    .select('id, user_id, project_name, status, error_message, workflow_id, created_at')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!jobs || jobs.length === 0) return res.json([]);
+
+  const jobIds = jobs.map((job: any) => job.id);
+  const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
+    .select('job_id, group_index, last_error')
+    .in('job_id', jobIds)
+    .eq('status', 'failed');
+
+  const grouped = new Map<string, { group_index: number; last_error: string | null }[]>();
+  (groups || []).forEach((group: any) => {
+    const list = grouped.get(group.job_id) || [];
+    list.push({ group_index: group.group_index, last_error: group.last_error || null });
+    grouped.set(group.job_id, list);
+  });
+
+  const payload = jobs.map((job: any) => ({
+    ...job,
+    group_errors: grouped.get(job.id) || []
+  }));
+  res.json(payload);
+});
+
 router.post('/admin/credits/adjust', async (req: Request, res: Response) => {
   const { user_id, delta, note, idempotency_key } = req.body || {};
   if (!user_id || !Number.isInteger(delta)) {

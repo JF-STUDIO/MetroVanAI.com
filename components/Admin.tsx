@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AdminWorkflow, CreditRow, User, WorkflowVersion } from '../types';
+import { AdminJobRow, AdminWorkflow, CreditRow, User, WorkflowVersion } from '../types';
 import { jobService } from '../services/jobService';
 
 type NewWorkflowForm = {
@@ -40,7 +40,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
   const [workflows, setWorkflows] = useState<AdminWorkflow[]>([]);
   const [versionsByWorkflow, setVersionsByWorkflow] = useState<Record<string, WorkflowVersion[]>>({});
   const [credits, setCredits] = useState<CreditRow[]>([]);
-  const [loading, setLoading] = useState({ workflows: false, credits: false });
+  const [jobs, setJobs] = useState<AdminJobRow[]>([]);
+  const [loading, setLoading] = useState({ workflows: false, credits: false, jobs: false });
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [newWorkflow, setNewWorkflow] = useState<NewWorkflowForm>({
@@ -87,10 +88,24 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     }
   };
 
+  const loadJobs = async () => {
+    setLoading(prev => ({ ...prev, jobs: true }));
+    setError(null);
+    try {
+      const data = await jobService.adminGetJobs(50);
+      setJobs(Array.isArray(data) ? data : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load jobs.');
+    } finally {
+      setLoading(prev => ({ ...prev, jobs: false }));
+    }
+  };
+
   useEffect(() => {
     if (user.isAdmin) {
       loadWorkflows();
       loadCredits();
+      loadJobs();
     }
   }, [user.isAdmin]);
 
@@ -293,6 +308,7 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
           <div className="flex gap-3">
             <button onClick={loadWorkflows} className="px-4 py-2 rounded-full border border-white/10 text-xs uppercase tracking-widest">Refresh Workflows</button>
             <button onClick={loadCredits} className="px-4 py-2 rounded-full border border-white/10 text-xs uppercase tracking-widest">Refresh Credits</button>
+            <button onClick={loadJobs} className="px-4 py-2 rounded-full border border-white/10 text-xs uppercase tracking-widest">Refresh Jobs</button>
           </div>
         </div>
 
@@ -474,6 +490,36 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
               </div>
             );
           })}
+        </section>
+
+        <section className="glass rounded-[2.5rem] p-8 border border-white/10">
+          <h2 className="text-sm font-black uppercase tracking-widest text-gray-400 mb-6">Recent Jobs</h2>
+          {loading.jobs && <div className="text-xs text-gray-500 mb-4">Loading...</div>}
+          {!loading.jobs && jobs.length === 0 && (
+            <div className="text-xs text-gray-500">No jobs found.</div>
+          )}
+          <div className="space-y-3">
+            {jobs.map(job => (
+              <div key={job.id} className="border border-white/10 rounded-2xl px-4 py-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-gray-200">{job.project_name || job.id}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-gray-500">{job.status}</div>
+                </div>
+                {job.error_message && (
+                  <div className="text-[10px] text-red-300 mt-2">Job Error: {job.error_message}</div>
+                )}
+                {job.group_errors && job.group_errors.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {job.group_errors.map((group) => (
+                      <div key={`${job.id}-${group.group_index}`} className="text-[10px] text-orange-200">
+                        Group {group.group_index}: {group.last_error || 'Unknown error'}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </section>
 
         <section className="glass rounded-[2.5rem] p-8 border border-white/10">
