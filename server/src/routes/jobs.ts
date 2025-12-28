@@ -814,7 +814,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         return (a.filename || '').localeCompare(b.filename || '');
     });
 
-    const thresholdMs = Number.parseInt(process.env.HDR_GROUP_TIME_MS || '3000', 10);
+    const thresholdMs = Number.parseInt(process.env.HDR_GROUP_TIME_MS || '2000', 10);
     let timeGroups: any[][] = hasMissingExif && hasSequentialAll
         ? [sortBySequence(sortedRaw)]
         : buildTimeGroups(sortedRaw.filter((file: any) => file.exif_time), thresholdMs)

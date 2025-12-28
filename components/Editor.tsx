@@ -925,7 +925,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   const previewInProgress = previewTotal > 0 && previewReady < previewTotal && pipelineStages.has(jobStatus);
   const processingActive = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
-  const hideGalleryUntilPreviewsDone = previewInProgress && jobStatus === 'input_resolved';
+  const hideGalleryUntilPreviewsDone = previewInProgress && jobStatus === 'input_resolved' && pipelineItems.length === 0;
   const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
   const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
   const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
