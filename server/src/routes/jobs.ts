@@ -168,10 +168,11 @@ const hasSequentialFilenames = (files: any[]) => {
 
 const computeHdrConfidence = (files: any[]) => {
     if (files.length < 2) return 0;
+    const hasExposureData = files.some((file) => typeof file.ev === 'number' || typeof file.exposure_time === 'number');
     const timeScore = scoreTime(files);
     const score = timeScore + scoreExposureSteps(files) + scoreParams(files) + scoreCamera(files);
     const preferredSize = files.length === 3 || files.length === 5 || files.length === 7;
-    const fallback = preferredSize && (timeScore >= 0.3 || hasSequentialFilenames(files)) ? 0.7 : 0;
+    const fallback = preferredSize && hasExposureData && (timeScore >= 0.3 || hasSequentialFilenames(files)) ? 0.7 : 0;
     return Math.max(0, Math.min(1, Math.max(score, fallback)));
 };
 
@@ -233,6 +234,9 @@ const sameCaptureSetup = (a: any, b: any) => {
     if (a.camera_model && b.camera_model && a.camera_model !== b.camera_model) return false;
     if (typeof a.fnumber === 'number' && typeof b.fnumber === 'number') {
         if (Math.abs(a.fnumber - b.fnumber) > 0.2) return false;
+    }
+    if (typeof a.focal_length === 'number' && typeof b.focal_length === 'number') {
+        if (Math.abs(a.focal_length - b.focal_length) > 2) return false;
     }
     return true;
 };
@@ -743,7 +747,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         .eq('user_id', userId);
 
     const { data: files, error: filesError } = await (supabaseAdmin.from('job_files') as any)
-        .select('id, r2_bucket, r2_key, filename, input_kind, exif_time, camera_make, camera_model, size, exposure_time, fnumber, iso, ev')
+        .select('id, r2_bucket, r2_key, filename, input_kind, exif_time, camera_make, camera_model, size, exposure_time, fnumber, iso, ev, focal_length')
         .eq('job_id', jobId);
     if (filesError) return res.status(500).json({ error: filesError.message });
     if (!files || files.length === 0) return res.status(400).json({ error: 'No files to analyze' });
@@ -767,7 +771,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         });
     }
 
-    const needsExif = fileList.filter((file: any) => file.input_kind === 'raw' && (!file.exif_time || file.ev === null || file.exposure_time === null || file.fnumber === null || file.iso === null));
+    const needsExif = fileList.filter((file: any) => file.input_kind === 'raw' && (!file.exif_time || file.ev === null || file.exposure_time === null || file.fnumber === null || file.iso === null || file.focal_length === null));
     if (needsExif.length > 0) {
         await runWithConcurrency(needsExif, 2, async (file: any) => {
             try {
@@ -781,6 +785,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
                 if (meta.fnumber !== null) updates.fnumber = meta.fnumber;
                 if (meta.iso !== null) updates.iso = meta.iso;
                 if (meta.ev !== null) updates.ev = meta.ev;
+                if (meta.focal_length !== null) updates.focal_length = meta.focal_length;
 
                 if (Object.keys(updates).length > 0) {
                     await (supabaseAdmin.from('job_files') as any)

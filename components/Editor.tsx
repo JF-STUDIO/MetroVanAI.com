@@ -179,9 +179,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     if (!shouldStreamPipeline && !shouldPollLegacy) return;
 
     let timer: ReturnType<typeof setInterval> | null = null;
+    let safetyTimer: ReturnType<typeof setInterval> | null = null;
     let eventSource: EventSource | null = null;
     let destroyed = false;
     let fallbackStarted = false;
+    let lastEventAt = Date.now();
 
     const applyPipelineStatus = async (response: any) => {
       const pipelineJob = response.job;
@@ -295,6 +297,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       const handlePayload = async (raw: string) => {
         if (destroyed) return;
         try {
+          lastEventAt = Date.now();
           const payload = JSON.parse(raw);
           const done = await applyPipelineStatus(payload);
           if (done && eventSource) {
@@ -321,6 +324,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         }
         eventSource?.close();
       };
+
+      safetyTimer = setInterval(() => {
+        if (destroyed) return;
+        if (Date.now() - lastEventAt > 10000 && !fallbackStarted) {
+          fallbackStarted = true;
+          startPipelinePolling();
+        }
+      }, 5000);
     };
 
     if (shouldStreamPipeline) {
@@ -332,6 +343,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     return () => {
       destroyed = true;
       if (timer) clearInterval(timer);
+      if (safetyTimer) clearInterval(safetyTimer);
       eventSource?.close();
     };
   }, [job, jobStatus, onUpdateUser, user]);
@@ -378,7 +390,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       editorState = null;
     }
 
-    if (editorState?.mode === 'projects' && editorState.workflowId) {
+    const preferLastJob = Boolean(cached?.jobId && cached?.workflowId);
+    if (editorState?.mode === 'projects' && editorState.workflowId && !preferLastJob) {
       const workflow = workflows.find(tool => tool.id === editorState?.workflowId);
       if (workflow) {
         setActiveTool(workflow);
@@ -397,8 +410,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setResumeAttempted(true);
       return;
     }
-    const jobId = editorState?.jobId || cached?.jobId;
-    const workflowId = editorState?.workflowId || cached?.workflowId;
+    const jobId = cached?.jobId || editorState?.jobId;
+    const workflowId = cached?.workflowId || editorState?.workflowId;
     if (!jobId || !workflowId) {
       setResumeAttempted(true);
       return;
@@ -467,6 +480,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const clearEditorState = () => {
     localStorage.removeItem(editorStateKey);
   };
+
+  useEffect(() => {
+    if (!job || !activeTool) return;
+    saveEditorState({
+      mode: 'studio',
+      workflowId: activeTool.id,
+      jobId: job.id,
+      activeIndex
+    });
+  }, [job?.id, activeTool?.id, activeIndex]);
 
   const pushNotice = (type: 'error' | 'info' | 'success', message: string) => {
     setNotice({ type, message });
