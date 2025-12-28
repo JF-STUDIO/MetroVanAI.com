@@ -8,6 +8,8 @@ type NewWorkflowForm = {
   description: string;
   credit_per_unit: string;
   is_active: boolean;
+  is_hidden: boolean;
+  sort_order: string;
   preview_original: string;
   preview_processed: string;
   provider_name: string;
@@ -50,6 +52,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     description: '',
     credit_per_unit: '1',
     is_active: true,
+    is_hidden: false,
+    sort_order: '0',
     preview_original: '',
     preview_processed: '',
     provider_name: 'runninghub_ai',
@@ -116,6 +120,33 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     )));
   };
 
+  const handleQuickToggleHidden = async (workflow: AdminWorkflow) => {
+    setNotice(null);
+    setError(null);
+    try {
+      const nextHidden = !(workflow.is_hidden ?? false);
+      const updated = await jobService.adminUpdateWorkflow(workflow.id, { is_hidden: nextHidden });
+      setWorkflows(prev => prev.map(item => (item.id === workflow.id ? { ...item, ...updated } : item)));
+      setNotice(nextHidden ? 'Workflow hidden.' : 'Workflow visible.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update workflow.');
+    }
+  };
+
+  const handleSortBump = async (workflow: AdminWorkflow, delta: number) => {
+    setNotice(null);
+    setError(null);
+    try {
+      const current = Number(workflow.sort_order) || 0;
+      const nextOrder = current + delta;
+      const updated = await jobService.adminUpdateWorkflow(workflow.id, { sort_order: nextOrder });
+      setWorkflows(prev => prev.map(item => (item.id === workflow.id ? { ...item, ...updated } : item)));
+      setNotice('Sort order updated.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update sort order.');
+    }
+  };
+
   const handleCreateWorkflow = async (e: React.FormEvent) => {
     e.preventDefault();
     setNotice(null);
@@ -128,6 +159,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         description: newWorkflow.description.trim() || null,
         credit_per_unit: Number(newWorkflow.credit_per_unit) || 1,
         is_active: newWorkflow.is_active,
+        is_hidden: newWorkflow.is_hidden,
+        sort_order: Number(newWorkflow.sort_order) || 0,
         preview_original: newWorkflow.preview_original.trim() || null,
         preview_processed: newWorkflow.preview_processed.trim() || null,
         provider_name: newWorkflow.provider_name,
@@ -144,6 +177,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         description: '',
         credit_per_unit: '1',
         is_active: true,
+        is_hidden: false,
+        sort_order: '0',
         preview_original: '',
         preview_processed: '',
         provider_name: newWorkflow.provider_name,
@@ -170,6 +205,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         description: workflow.description || null,
         credit_per_unit: Number(workflow.credit_per_unit) || 1,
         is_active: workflow.is_active ?? true,
+        is_hidden: workflow.is_hidden ?? false,
+        sort_order: Number(workflow.sort_order) || 0,
         preview_original: workflow.preview_original || null,
         preview_processed: workflow.preview_processed || null,
         provider_name: workflow.provider_name || undefined
@@ -336,6 +373,10 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
               <input value={newWorkflow.credit_per_unit} onChange={(e) => setNewWorkflow(prev => ({ ...prev, credit_per_unit: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
             </div>
             <div>
+              <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Sort Order</label>
+              <input value={newWorkflow.sort_order} onChange={(e) => setNewWorkflow(prev => ({ ...prev, sort_order: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
+            </div>
+            <div>
               <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Provider</label>
               <select value={newWorkflow.provider_name} onChange={(e) => setNewWorkflow(prev => ({ ...prev, provider_name: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3">
                 <option value="runninghub_ai">runninghub_ai</option>
@@ -369,6 +410,10 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
             <div className="flex items-center gap-3">
               <input type="checkbox" checked={newWorkflow.is_active} onChange={(e) => setNewWorkflow(prev => ({ ...prev, is_active: e.target.checked }))} />
               <span className="text-xs text-gray-400 uppercase tracking-widest">Active</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <input type="checkbox" checked={newWorkflow.is_hidden} onChange={(e) => setNewWorkflow(prev => ({ ...prev, is_hidden: e.target.checked }))} />
+              <span className="text-xs text-gray-400 uppercase tracking-widest">Hidden</span>
             </div>
             <div className="flex justify-end">
               <button className="px-6 py-3 rounded-2xl gradient-btn text-white text-xs font-black uppercase tracking-widest">Create Workflow</button>
@@ -406,12 +451,34 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
                       <span>slug: {workflow.slug}</span>
                       <span>provider: {workflow.provider_name || 'runninghub_ai'}</span>
                       <span>credits: {workflow.credit_per_unit}</span>
+                      <span>order: {workflow.sort_order ?? 0}</span>
                       <span className={workflow.is_active === false ? 'text-red-300' : 'text-emerald-300'}>
                         {workflow.is_active === false ? 'inactive' : 'active'}
+                      </span>
+                      <span className={workflow.is_hidden ? 'text-amber-300' : 'text-gray-400'}>
+                        {workflow.is_hidden ? 'hidden' : 'visible'}
                       </span>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => handleQuickToggleHidden(workflow)}
+                      className="px-4 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                    >
+                      {workflow.is_hidden ? 'Show' : 'Hide'}
+                    </button>
+                    <button
+                      onClick={() => handleSortBump(workflow, -1)}
+                      className="px-3 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      onClick={() => handleSortBump(workflow, 1)}
+                      className="px-3 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                    >
+                      ↓
+                    </button>
                     <button
                       onClick={() => setExpandedWorkflowId(isExpanded ? null : workflow.id)}
                       className="px-4 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
@@ -446,6 +513,10 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
                         <input value={workflow.credit_per_unit} onChange={(e) => updateWorkflowField(workflow.id, 'credit_per_unit', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
                       </div>
                       <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Sort Order</label>
+                        <input value={workflow.sort_order ?? 0} onChange={(e) => updateWorkflowField(workflow.id, 'sort_order', Number(e.target.value))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
+                      </div>
+                      <div>
                         <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Provider</label>
                         <select value={workflow.provider_name || 'runninghub_ai'} onChange={(e) => updateWorkflowField(workflow.id, 'provider_name', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3">
                           <option value="runninghub_ai">runninghub_ai</option>
@@ -468,6 +539,10 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
                     <div className="flex items-center gap-3">
                       <input type="checkbox" checked={workflow.is_active ?? true} onChange={(e) => updateWorkflowField(workflow.id, 'is_active', e.target.checked)} />
                       <span className="text-xs text-gray-400 uppercase tracking-widest">Active</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <input type="checkbox" checked={workflow.is_hidden ?? false} onChange={(e) => updateWorkflowField(workflow.id, 'is_hidden', e.target.checked)} />
+                      <span className="text-xs text-gray-400 uppercase tracking-widest">Hidden</span>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

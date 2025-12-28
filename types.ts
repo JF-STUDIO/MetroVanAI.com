@@ -15,6 +15,8 @@ export interface Workflow {
   preview_original?: string;
   preview_processed?: string;
   is_active?: boolean;
+  is_hidden?: boolean;
+  sort_order?: number;
   version_id?: string | null;
   version?: number | null;
 }

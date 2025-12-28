@@ -44,10 +44,13 @@ router.get('/admin/workflows', async (_req: Request, res: Response) => {
       is_active,
       preview_original,
       preview_processed,
+      is_hidden,
+      sort_order,
       provider_id,
       workflow_providers(name),
       workflow_versions(id, version, is_published, workflow_remote_id)
     `)
+    .order('sort_order', { ascending: true })
     .order('created_at', { ascending: false });
 
   if (error) return res.status(500).json({ error: error.message });
@@ -71,6 +74,8 @@ router.post('/admin/workflows', async (req: Request, res: Response) => {
     description,
     credit_per_unit,
     is_active,
+    is_hidden,
+    sort_order,
     preview_original,
     preview_processed,
     provider_id,
@@ -92,6 +97,8 @@ router.post('/admin/workflows', async (req: Request, res: Response) => {
       description: description || null,
       credit_per_unit: credit_per_unit ?? 1,
       is_active: is_active ?? true,
+      is_hidden: is_hidden ?? false,
+      sort_order: typeof sort_order === 'number' ? sort_order : 0,
       preview_original: preview_original || null,
       preview_processed: preview_processed || null,
       provider_id: provider.id
@@ -131,6 +138,8 @@ router.patch('/admin/workflows/:id', async (req: Request, res: Response) => {
     description,
     credit_per_unit,
     is_active,
+    is_hidden,
+    sort_order,
     preview_original,
     preview_processed,
     provider_id,
@@ -142,6 +151,8 @@ router.patch('/admin/workflows/:id', async (req: Request, res: Response) => {
   if (description !== undefined) updates.description = description;
   if (credit_per_unit !== undefined) updates.credit_per_unit = credit_per_unit;
   if (is_active !== undefined) updates.is_active = is_active;
+  if (is_hidden !== undefined) updates.is_hidden = is_hidden;
+  if (sort_order !== undefined) updates.sort_order = sort_order;
   if (preview_original !== undefined) updates.preview_original = preview_original;
   if (preview_processed !== undefined) updates.preview_processed = preview_processed;
 
