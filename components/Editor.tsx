@@ -1,7 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Workflow, User, Job, JobAsset, PipelineGroupItem } from '../types';
 import { jobService } from '../services/jobService';
+import { supabase } from '../services/supabaseClient';
 import axios from 'axios';
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api';
 
 // Props for the main component
 interface EditorProps {
@@ -30,6 +33,16 @@ type GalleryItem = {
   progress: number;
   stage?: 'input' | 'hdr' | 'ai' | 'output';
   error?: string | null;
+  groupType?: string | null;
+  groupSize?: number | null;
+  representativeIndex?: number | null;
+  frames?: {
+    id: string;
+    filename: string;
+    order: number;
+    preview_url?: string | null;
+    input_kind?: string | null;
+  }[];
 };
 
 // The auto-playing, aspect-ratio-correct slider component
@@ -94,8 +107,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [projectName, setProjectName] = useState('');
   const [jobStatus, setJobStatus] = useState('idle');
   const [zipUrl, setZipUrl] = useState<string | null>(null);
+  const [downloadType, setDownloadType] = useState<'zip' | 'jpg' | null>(null);
   const [pipelineItems, setPipelineItems] = useState<PipelineGroupItem[]>([]);
   const [pipelineProgress, setPipelineProgress] = useState<number | null>(null);
+  const [previewSummary, setPreviewSummary] = useState<{ total: number; ready: number } | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -154,43 +169,72 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
-  // Poll for job status
+  // Poll or stream for job status
   useEffect(() => {
     if (!job) return;
-    if (job.workflow_id) {
-      if (!pipelineStages.has(jobStatus)) return;
-    } else if (!(jobStatus === 'processing' || jobStatus === 'queued')) {
-      return;
-    }
+    const isPipelineJob = Boolean(job.workflow_id);
+    const shouldStreamPipeline = isPipelineJob && pipelineStages.has(jobStatus);
+    const shouldPollLegacy = !isPipelineJob && (jobStatus === 'processing' || jobStatus === 'queued');
+    if (!shouldStreamPipeline && !shouldPollLegacy) return;
 
-    const timer = setInterval(async () => {
-      try {
-        if (job.workflow_id) {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    let eventSource: EventSource | null = null;
+    let destroyed = false;
+    let fallbackStarted = false;
+
+    const applyPipelineStatus = async (response: any) => {
+      const pipelineJob = response.job;
+      setJob(pipelineJob);
+      setJobStatus(pipelineJob.status);
+      if (Array.isArray(response.items)) {
+        setPipelineItems(response.items);
+      }
+      if (typeof response.progress === 'number') {
+        setPipelineProgress(response.progress);
+      }
+      if (response?.previews) {
+        setPreviewSummary(response.previews);
+      }
+
+      if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
+        const download = await jobService.getPresignedDownloadUrl(job.id);
+        setZipUrl(download?.url || null);
+        setDownloadType(download?.type || null);
+        const profile = await jobService.getProfile();
+        onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
+        setImages(prev => prev.map(img => ({ ...img, status: 'done', progress: 100 })));
+        return true;
+      }
+      if (pipelineJob.status === 'failed' || pipelineJob.status === 'canceled') {
+        return true;
+      }
+      return false;
+    };
+
+    const startPipelinePolling = () => {
+      if (timer) return;
+      timer = setInterval(async () => {
+        try {
           const response = await jobService.getPipelineStatus(job.id);
-          const pipelineJob = response.job;
-          setJob(pipelineJob);
-          setJobStatus(pipelineJob.status);
-          if (Array.isArray(response.items)) {
-            setPipelineItems(response.items);
+          const done = await applyPipelineStatus(response);
+          if (done && timer) {
+            clearInterval(timer);
+            timer = null;
           }
-          if (typeof response.progress === 'number') {
-            setPipelineProgress(response.progress);
-          }
+        } catch (err) {
+          console.error('Polling error:', err);
+        }
+      }, 3000);
+    };
 
-          if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
-            clearInterval(timer);
-            const { url } = await jobService.getPresignedDownloadUrl(job.id);
-            setZipUrl(url);
-            const profile = await jobService.getProfile();
-            onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
-            setImages(prev => prev.map(img => ({ ...img, status: 'done', progress: 100 })));
-          } else if (pipelineJob.status === 'failed') {
-            clearInterval(timer);
-          }
-        } else {
+    const startLegacyPolling = () => {
+      if (timer) return;
+      timer = setInterval(async () => {
+        try {
           if (pipelineItems.length > 0) {
             setPipelineItems([]);
             setPipelineProgress(null);
+            setPreviewSummary(null);
           }
           const jobData = await jobService.getJobStatus(job.id);
           setJobStatus(jobData.status);
@@ -209,19 +253,86 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           }));
 
           if (jobData.status === 'completed') {
-            clearInterval(timer);
-            const { url } = await jobService.getPresignedDownloadUrl(job.id);
-            setZipUrl(url);
+            if (timer) {
+              clearInterval(timer);
+              timer = null;
+            }
+            const download = await jobService.getPresignedDownloadUrl(job.id);
+            setZipUrl(download?.url || null);
+            setDownloadType(download?.type || null);
             const profile = await jobService.getProfile();
             onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
           } else if (jobData.status === 'failed') {
-            clearInterval(timer);
+            if (timer) {
+              clearInterval(timer);
+              timer = null;
+            }
           }
+        } catch (err) {
+          console.error('Polling error:', err);
         }
-      } catch (err) { console.error('Polling error:', err); }
-    }, 3000);
+      }, 3000);
+    };
 
-    return () => clearInterval(timer);
+    const startPipelineStream = async () => {
+      const hasEventSource = typeof window !== 'undefined' && 'EventSource' in window;
+      if (!hasEventSource) {
+        startPipelinePolling();
+        return;
+      }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        startPipelinePolling();
+        return;
+      }
+
+      const streamUrl = `${API_BASE_URL}/jobs/${job.id}/stream?token=${encodeURIComponent(token)}`;
+      eventSource = new EventSource(streamUrl);
+
+      const handlePayload = async (raw: string) => {
+        if (destroyed) return;
+        try {
+          const payload = JSON.parse(raw);
+          const done = await applyPipelineStatus(payload);
+          if (done && eventSource) {
+            eventSource.close();
+          }
+        } catch (err) {
+          console.error('Stream payload error:', err);
+        }
+      };
+
+      eventSource.addEventListener('status', (event) => {
+        void handlePayload((event as MessageEvent).data);
+      });
+
+      eventSource.onmessage = (event) => {
+        void handlePayload(event.data);
+      };
+
+      eventSource.onerror = () => {
+        if (destroyed) return;
+        if (!fallbackStarted) {
+          fallbackStarted = true;
+          startPipelinePolling();
+        }
+        eventSource?.close();
+      };
+    };
+
+    if (shouldStreamPipeline) {
+      void startPipelineStream();
+    } else if (shouldPollLegacy) {
+      startLegacyPolling();
+    }
+
+    return () => {
+      destroyed = true;
+      if (timer) clearInterval(timer);
+      eventSource?.close();
+    };
   }, [job, jobStatus, onUpdateUser, user]);
 
   const loadHistory = async (page = 1) => {
@@ -276,8 +387,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setImages([]);
         setActiveIndex(null);
         setZipUrl(null);
+        setDownloadType(null);
         setPipelineItems([]);
         setPipelineProgress(null);
+        setPreviewSummary(null);
         setUploadComplete(true);
       }
       setResumeAttempted(true);
@@ -299,8 +412,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setImages([]);
     setActiveIndex(null);
     setZipUrl(null);
+    setDownloadType(null);
     setPipelineItems([]);
     setPipelineProgress(null);
+    setPreviewSummary(null);
     setUploadComplete(true);
     setPendingActiveIndex(typeof editorState?.activeIndex === 'number' ? editorState.activeIndex : null);
     jobService.getPipelineStatus(jobId)
@@ -315,9 +430,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         if (typeof response.progress === 'number') {
           setPipelineProgress(response.progress);
         }
+        if (response?.previews) {
+          setPreviewSummary(response.previews);
+        }
         if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
-          const { url } = await jobService.getPresignedDownloadUrl(pipelineJob.id);
-          setZipUrl(url);
+          const download = await jobService.getPresignedDownloadUrl(pipelineJob.id);
+          setZipUrl(download?.url || null);
+          setDownloadType(download?.type || null);
         }
       })
       .catch(() => {
@@ -383,6 +502,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setImages([]);
     setActiveIndex(null);
     setZipUrl(null);
+    setDownloadType(null);
+    setPreviewSummary(null);
     setProjectName(item.project_name || '');
     setJobStatus(item.status);
     setJob(item as Job);
@@ -406,19 +527,25 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         if (typeof response.progress === 'number') {
           setPipelineProgress(response.progress);
         }
+        if (response?.previews) {
+          setPreviewSummary(response.previews);
+        }
         if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
-          const { url } = await jobService.getPresignedDownloadUrl(pipelineJob.id);
-          setZipUrl(url);
+          const download = await jobService.getPresignedDownloadUrl(pipelineJob.id);
+          setZipUrl(download?.url || null);
+          setDownloadType(download?.type || null);
         }
       } else {
         setPipelineItems([]);
         setPipelineProgress(null);
+        setPreviewSummary(null);
         const jobData = await jobService.getJobStatus(item.id);
         setJob(jobData);
         setJobStatus(jobData.status);
         if (jobData.status === 'completed') {
-          const { url } = await jobService.getPresignedDownloadUrl(jobData.id);
-          setZipUrl(url);
+          const download = await jobService.getPresignedDownloadUrl(jobData.id);
+          setZipUrl(download?.url || null);
+          setDownloadType(download?.type || null);
         }
       }
     } catch (err) {
@@ -450,8 +577,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setJobStatus('idle');
         setProjectName('');
         setZipUrl(null);
+        setDownloadType(null);
         setPipelineItems([]);
         setPipelineProgress(null);
+        setPreviewSummary(null);
         localStorage.removeItem('mvai:last_job');
       }
     } catch (err) {
@@ -511,6 +640,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     if (pipelineItems.length > 0) {
       setPipelineItems([]);
       setPipelineProgress(null);
+      setPreviewSummary(null);
     }
     setImages(prev => [...prev, ...newItems]);
     if (activeIndex === null) setActiveIndex(images.length - 1 + newItems.length);
@@ -567,6 +697,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setUploadComplete(false);
       setPipelineItems([]);
       setPipelineProgress(null);
+      setPreviewSummary(null);
       const presignedData: { r2Key: string; putUrl: string; fileName: string }[] = await jobService.getPresignedRawUploadUrls(
         job.id,
         images.map(img => ({ name: img.file.name, type: img.file.type || 'application/octet-stream', size: img.file.size }))
@@ -598,22 +729,17 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setUploadComplete(true);
       const analysis = await jobService.analyzeJob(job.id);
       const estimatedUnits = analysis?.estimated_units || 0;
-
-      const profile = await jobService.getProfile();
-      const availableCredits = profile.available_credits ?? profile.points ?? 0;
-      const totalCost = estimatedUnits * activeTool.credit_per_unit;
-      if (availableCredits < totalCost) {
-        onUpdateUser({ ...user, points: availableCredits });
-        setJobStatus('uploaded');
-        pushNotice('error', `Insufficient credits. Needed: ${totalCost}, You have: ${availableCredits}`);
-        return;
+      setJob(prev => (prev ? { ...prev, estimated_units: estimatedUnits } : prev));
+      setJobStatus('input_resolved');
+      setPreviewSummary({ total: uploadedFiles.length, ready: 0 });
+      await jobService.generatePreviews(job.id);
+      const previewResponse = await jobService.getPipelineStatus(job.id);
+      if (Array.isArray(previewResponse.items)) {
+        setPipelineItems(previewResponse.items);
       }
-
-      const startResponse = await jobService.startJob(job.id);
-      setJobStatus('reserved');
-      const balanceRow = Array.isArray(startResponse?.balance) ? startResponse.balance[0] : startResponse?.balance;
-      const nextAvailable = balanceRow?.available_credits ?? (availableCredits - totalCost);
-      onUpdateUser({ ...user, points: nextAvailable });
+      if (previewResponse?.previews) {
+        setPreviewSummary(previewResponse.previews);
+      }
     } catch (err) {
       if (err instanceof Error) {
         pushNotice('error', `Upload failed: ${err.message}`);
@@ -625,6 +751,27 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
+  const startEnhanceProcess = async () => {
+    if (!job || !activeTool) {
+      pushNotice('error', 'Missing job details. Select a project first.');
+      return;
+    }
+    try {
+      setNotice(null);
+      const startResponse = await jobService.startJob(job.id);
+      setJobStatus('reserved');
+      const profile = await jobService.getProfile();
+      onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
+      const balanceRow = Array.isArray(startResponse?.balance) ? startResponse.balance[0] : startResponse?.balance;
+      if (balanceRow?.available_credits !== undefined) {
+        onUpdateUser({ ...user, points: balanceRow.available_credits });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to start processing.';
+      pushNotice('error', message);
+    }
+  };
+
   // UI Flow Handlers
   const handleSelectTool = (tool: Workflow) => {
     setActiveTool(tool);
@@ -633,6 +780,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setProjectSearch('');
     setPipelineItems([]);
     setPipelineProgress(null);
+    setPreviewSummary(null);
     setLightboxUrl(null);
     setUploadComplete(false);
     localStorage.removeItem('mvai:last_job');
@@ -652,6 +800,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setUploadComplete(false);
       setPipelineItems([]);
       setPipelineProgress(null);
+      setPreviewSummary(null);
       setLightboxUrl(null);
       saveLastJob(newJob.id, activeTool.id);
       saveEditorState({ mode: 'studio', workflowId: activeTool.id, jobId: newJob.id, activeIndex: null });
@@ -679,7 +828,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     stage: 'input'
   });
 
-  const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft' || jobStatus === 'uploaded';
+  const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
   const showUploadOnly = jobStatus === 'uploading';
 
   const uploadProgress = images.length
@@ -692,28 +841,48 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       ? job.progress
       : null;
 
+  const previewTotal = previewSummary?.total ?? 0;
+  const previewReady = previewSummary?.ready ?? 0;
+  const previewProgress = previewTotal > 0
+    ? Math.round((previewReady / previewTotal) * 100)
+    : 0;
+
+  const previewInProgress = previewTotal > 0 && previewReady < previewTotal && pipelineStages.has(jobStatus);
+  const processingActive = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
+  const hideGalleryUntilPreviewsDone = previewInProgress && jobStatus === 'input_resolved';
   const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
   const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
   const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
   const totalGroups = pipelineItems.length;
   const hdrReadyCount = pipelineItems.filter((item) => isHdrReady(item) || item.status === 'failed').length;
   const hdrProgressValue = totalGroups ? Math.round((hdrReadyCount / totalGroups) * 100) : 0;
-  const hdrProcessing = totalGroups > 0 && hdrReadyCount < totalGroups && pipelineStages.has(jobStatus);
+  const hdrProcessing = totalGroups > 0 && hdrReadyCount < totalGroups && processingActive;
 
   const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
     const outputReady = isOutputReady(item);
     const hdrReady = isHdrReady(item);
-    const preview = item.output_url || item.hdr_url || '';
+    const frameHasRaw = item.frames?.some((frame) => frame.input_kind === 'raw');
+    const groupType = item.group_type ?? null;
+    const isRawGroup = groupType === 'hdr' || groupType === 'raw' || frameHasRaw;
+    const preview = item.output_url || item.hdr_url || (!isRawGroup ? item.preview_url : '') || '';
+    const stage: GalleryItem['stage'] = outputReady
+      ? 'output'
+      : processingActive
+        ? (hdrReady ? 'ai' : 'hdr')
+        : 'input';
     const status: GalleryItem['status'] =
-      item.status === 'failed' ? 'failed' : outputReady ? 'done' : 'processing';
-    const stage: GalleryItem['stage'] = outputReady ? 'output' : hdrReady ? 'ai' : 'hdr';
-    const progress = status === 'done'
+      item.status === 'failed'
+        ? 'failed'
+        : outputReady
+          ? 'done'
+          : processingActive
+            ? 'processing'
+            : 'pending';
+    const progress = status === 'done' || status === 'failed'
       ? 100
-      : status === 'failed'
-        ? 100
-        : stage === 'hdr'
-          ? Math.max(5, Math.min(90, hdrProgressValue || 35))
-          : Math.max(10, Math.min(95, pipelineProgressValue ?? 70));
+      : stage === 'hdr'
+        ? Math.max(5, Math.min(90, hdrProgressValue || 35))
+        : 0;
     return {
       id: item.id,
       label: item.output_filename || `Group ${item.group_index}`,
@@ -721,12 +890,37 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       status,
       progress,
       stage,
-      error: item.last_error || null
+      error: item.last_error || null,
+      groupType,
+      groupSize: item.group_size ?? null,
+      representativeIndex: item.representative_index ?? null,
+      frames: item.frames
     };
   };
 
-  const galleryItems = pipelineItems.length > 0
-    ? pipelineItems.filter((item) => item.output_url || item.hdr_url || item.status === 'failed').map(mapPipelineItem)
+  const cycleRepresentative = async (item: GalleryItem) => {
+    if (!job || !item.frames || item.frames.length < 2) return;
+    const currentIndex = Math.max(0, (item.representativeIndex ?? 1) - 1);
+    const nextIndex = (currentIndex + 1) % item.frames.length;
+    const nextFrame = item.frames[nextIndex];
+    try {
+      await jobService.setGroupRepresentative(job.id, item.id, nextFrame.id);
+      setPipelineItems(prev => prev.map(group => {
+        if (group.id !== item.id) return group;
+        return {
+          ...group,
+          preview_url: nextFrame.preview_url ?? group.preview_url ?? null,
+          representative_index: nextFrame.order
+        };
+      }));
+      setActiveIndex(prev => (prev !== null ? prev : null));
+    } catch (err) {
+      pushNotice('error', err instanceof Error ? err.message : 'Failed to update preview frame.');
+    }
+  };
+
+  const galleryItems = !hideGalleryUntilPreviewsDone && pipelineItems.length > 0
+    ? pipelineItems.map(mapPipelineItem)
     : showRawPreviews
       ? images.filter((img) => !img.isRaw).map(mapUploadItem)
       : [];
@@ -975,7 +1169,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   }
 
   // VIEW 3: Main Uploader & Editor
-  const currentImage = activeIndex !== null ? galleryItems[activeIndex] : null;
   const cancelableStatuses = new Set([
     'reserved',
     'input_resolved',
@@ -990,10 +1183,23 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     'queued'
   ]);
   const canCancel = job?.id && cancelableStatuses.has(jobStatus);
-  const showWaitingForResults = !showUploadOnly && galleryItems.length === 0 && pipelineStages.has(jobStatus);
-  const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !currentImage && images.length === 0;
+  const showGeneratingPreviews = !showUploadOnly && previewInProgress && hideGalleryUntilPreviewsDone;
+  const showWaitingForResults = !showUploadOnly && !showGeneratingPreviews && galleryItems.length === 0 && pipelineStages.has(jobStatus);
+  const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && images.length === 0;
   const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
+  const canEnhance = jobStatus === 'input_resolved';
+  const canUploadBatch = images.length > 0 && ['idle', 'draft', 'uploaded'].includes(jobStatus);
+  const canAddMore = ['idle', 'draft', 'uploaded', 'input_resolved'].includes(jobStatus);
+  const downloadLabel = downloadType === 'jpg' ? 'Download JPG' : 'Download ZIP';
+  const showReadyToEnhanceNotice = uploadComplete && jobStatus === 'input_resolved' && !processingActive;
+  const showProcessingNotice = uploadComplete && processingActive;
+  const handleGallerySelect = (item: GalleryItem, index: number) => {
+    setActiveIndex(index);
+    if (item.preview) {
+      setLightboxUrl(item.preview);
+    }
+  };
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
@@ -1012,6 +1218,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               {uploadComplete && jobStatus !== 'uploading' && (
                 <span className="text-[9px] text-emerald-400 font-bold">| Upload Complete</span>
               )}
+              {previewInProgress && (
+                <span className="text-[9px] text-rose-300 font-bold">| Previews {previewReady}/{previewTotal}</span>
+              )}
               {showHdrProgress && (
                 <span className="text-[9px] text-gray-400 font-bold">| HDR {hdrProgressValue}%</span>
               )}
@@ -1024,9 +1233,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                 ></div>
               </div>
             )}
-            {uploadComplete && jobStatus !== 'uploading' && (
+            {showProcessingNotice && (
               <div className="mt-2 text-[10px] text-emerald-300 uppercase tracking-widest">
                 Upload complete. You can close this page while we finish processing.
+              </div>
+            )}
+            {showReadyToEnhanceNotice && (
+              <div className="mt-2 text-[10px] text-gray-400 uppercase tracking-widest">
+                Upload complete. Review previews, then click Enhance to start processing.
               </div>
             )}
           </div>
@@ -1034,7 +1248,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         <div className="flex items-center gap-4">
           {(jobStatus === 'completed' || jobStatus === 'partial') && (
             <button onClick={() => { if(zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
-              Download ZIP <i className="fa-solid fa-file-zipper"></i>
+              {downloadLabel} <i className="fa-solid fa-file-zipper"></i>
             </button>
           )}
           {job?.workflow_id && (jobStatus === 'partial' || jobStatus === 'failed') && (
@@ -1048,11 +1262,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             </button>
           )}
           <button
-            onClick={startBatchProcess}
-            disabled={images.length === 0 || !['idle', 'draft', 'uploaded'].includes(jobStatus)}
+            onClick={canEnhance ? startEnhanceProcess : startBatchProcess}
+            disabled={!canEnhance && !canUploadBatch}
             className="px-8 py-2.5 rounded-full bg-indigo-500 text-white text-xs font-black uppercase tracking-widest disabled:opacity-30 flex items-center gap-2 transition"
           >
-            {['idle', 'draft', 'uploaded'].includes(jobStatus) ? 'Start Batch Process' : 'Processing...'}
+            {canEnhance ? 'Enhance Listing' : canUploadBatch ? 'Generate Previews' : 'Processing...'}
             <i className="fa-solid fa-bolt-lightning"></i>
           </button>
         </div>
@@ -1062,149 +1276,169 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           {noticeBanner}
         </div>
       )}
-      <div className="flex-1 flex overflow-hidden">
-        <div className="flex-1 p-8 flex flex-col overflow-hidden">
-          {showUploadOnly ? (
-            <div className="flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5">
-              <div className="w-full max-w-md text-center space-y-4">
-                <div className="text-lg font-black uppercase tracking-widest text-white">Uploading</div>
-                <div className="text-xs text-gray-500">Uploading {images.length} files...</div>
-                <div className="text-[10px] text-gray-500 uppercase tracking-widest">
-                  Please keep this page open until upload finishes.
-                </div>
-                <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
-                  <div className="h-full bg-indigo-500 transition-all" style={{ width: `${uploadProgress}%` }}></div>
-                </div>
-                <div className="text-xs text-gray-400">{uploadProgress}%</div>
+      <div className="flex-1 overflow-y-auto p-8">
+        {showUploadOnly ? (
+          <div className="flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5 min-h-[480px]">
+            <div className="w-full max-w-md text-center space-y-4">
+              <div className="text-lg font-black uppercase tracking-widest text-white">Uploading</div>
+              <div className="text-xs text-gray-500">Uploading {images.length} files...</div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-widest">
+                Please keep this page open until upload finishes.
+              </div>
+              <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
+                <div className="h-full bg-indigo-500 transition-all" style={{ width: `${uploadProgress}%` }}></div>
+              </div>
+              <div className="text-xs text-gray-400">{uploadProgress}%</div>
+            </div>
+          </div>
+        ) : showGeneratingPreviews ? (
+          <div className="flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5 min-h-[480px]">
+            <div className="text-center space-y-4">
+              <div className="w-10 h-10 rounded-full bg-rose-500/15 text-rose-300 flex items-center justify-center mx-auto">
+                <i className="fa-solid fa-image"></i>
+              </div>
+              <div className="text-2xl font-black tracking-tight text-white">Generating previews...</div>
+              <div className="text-sm text-gray-400">{previewReady} of {previewTotal} files processed</div>
+              <div className="w-64 bg-white/10 h-2 rounded-full overflow-hidden mx-auto">
+                <div className="h-full bg-rose-400 transition-all" style={{ width: `${previewProgress}%` }}></div>
               </div>
             </div>
-          ) : showWaitingForResults ? (
-            <div className="flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5">
-              <div className="text-center space-y-3">
-                <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin mx-auto"></div>
-                <div className="text-sm text-gray-300 uppercase tracking-widest">
-                  {showHdrProgress ? 'Processing HDR' : 'Processing AI'}
+          </div>
+        ) : showWaitingForResults ? (
+          <div className="flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5 min-h-[480px]">
+            <div className="text-center space-y-3">
+              <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin mx-auto"></div>
+              <div className="text-sm text-gray-300 uppercase tracking-widest">
+                {showHdrProgress ? 'Processing HDR' : 'Processing AI'}
+              </div>
+              <div className="text-xs text-gray-500">
+                {showHdrProgress ? 'HDR results will appear as they complete.' : 'AI results will appear as they complete.'}
+              </div>
+              {showHdrProgress && (
+                <div className="w-64 bg-white/10 h-2 rounded-full overflow-hidden mx-auto mt-2">
+                  <div className="h-full bg-indigo-500 transition-all" style={{ width: `${hdrProgressValue}%` }}></div>
                 </div>
-                <div className="text-xs text-gray-500">
-                  {showHdrProgress ? 'HDR previews will appear here as they complete.' : 'AI results will appear here as they complete.'}
+              )}
+              {showProcessingNotice && (
+                <div className="text-[10px] text-emerald-300 uppercase tracking-widest">
+                  Upload complete. You can close this page while we finish.
                 </div>
-                {showHdrProgress && (
-                  <div className="w-64 bg-white/10 h-2 rounded-full overflow-hidden mx-auto mt-2">
-                    <div className="h-full bg-indigo-500 transition-all" style={{ width: `${hdrProgressValue}%` }}></div>
+              )}
+            </div>
+          </div>
+        ) : showEmptyDropzone ? (
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`flex flex-col items-center justify-center glass rounded-[3rem] border-dashed border-2 transition-colors min-h-[520px] ${isDragging ? 'border-indigo-500 bg-indigo-500/10' : 'border-white/5'}`}
+          >
+            <div className="text-center">
+              <i className="fa-solid fa-cloud-arrow-up text-4xl text-indigo-500 mb-6"></i>
+              <h3 className="text-2xl font-black text-white uppercase tracking-tighter">Drop your photos here</h3>
+              <p className="text-gray-500 text-sm mt-2">or</p>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="mt-4 px-6 py-2 bg-white/10 text-white font-bold rounded-lg hover:bg-white/20 transition-colors"
+              >
+                Browse Files
+              </button>
+              <p className="text-xs text-gray-600 mt-6 font-mono">SUPPORTED: RAW, JPG, PNG</p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {hasHiddenUploads && (
+              <div className="text-xs text-gray-500 border border-white/10 rounded-2xl p-4">
+                RAW files uploaded. Generate previews to continue.
+              </div>
+            )}
+            {previewInProgress && galleryItems.length > 0 && (
+              <div className="text-xs text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
+                Generating previews… {previewReady} of {previewTotal} processed
+              </div>
+            )}
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
+              {galleryItems.map((img, idx) => {
+                const groupSize = img.groupSize ?? 0;
+                const repIndex = img.representativeIndex ?? 1;
+                const showBadge = groupSize > 1;
+                return (
+                  <div
+                    key={img.id || idx}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => handleGallerySelect(img, idx)}
+                    className={`relative overflow-hidden rounded-2xl border transition-all bg-black/40 ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-white/5 hover:border-white/15'}`}
+                  >
+                    {img.preview ? (
+                      <img src={img.preview} className="w-full h-48 object-cover" />
+                    ) : (
+                      <div className="w-full h-48 flex flex-col items-center justify-center text-[10px] text-gray-500 uppercase tracking-widest">
+                        <i className="fa-solid fa-image text-lg mb-2 text-gray-600"></i>
+                        Preview Pending
+                      </div>
+                    )}
+                    {showBadge && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          cycleRepresentative(img);
+                        }}
+                        className="absolute top-3 left-3 px-2.5 py-1 rounded-full bg-black/70 text-[10px] text-white font-bold tracking-widest border border-white/10"
+                        title="Click to change preview frame"
+                      >
+                        {repIndex}/{groupSize}
+                      </button>
+                    )}
+                    {img.status === 'processing' && (
+                      <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-3">
+                        {img.stage === 'hdr' ? (
+                          <>
+                            <div className="w-32 bg-white/10 h-1.5 rounded-full overflow-hidden">
+                              <div className="h-full bg-indigo-500 transition-all" style={{ width: `${img.progress}%` }}></div>
+                            </div>
+                            <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">HDR Processing</p>
+                          </>
+                        ) : (
+                          <>
+                            <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                            <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">AI Processing</p>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {img.status === 'failed' && img.error && (
+                      <div className="absolute inset-x-0 bottom-0 bg-red-500/30 text-red-100 text-[10px] px-3 py-2">
+                        {img.error}
+                      </div>
+                    )}
+                    <div className="absolute bottom-3 left-3 right-3 text-[10px] uppercase tracking-widest text-white drop-shadow-sm">
+                      {img.label}
+                    </div>
+                    {img.status === 'done' && (
+                      <div className="absolute top-3 right-3 w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] shadow">
+                        <i className="fa-solid fa-check"></i>
+                      </div>
+                    )}
                   </div>
-                )}
-                {uploadComplete && (
-                  <div className="text-[10px] text-emerald-300 uppercase tracking-widest">
-                    Upload complete. You can close this page while we finish.
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : showEmptyDropzone ? (
-            <div 
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-              className={`flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border-dashed border-2 transition-colors ${isDragging ? 'border-indigo-500 bg-indigo-500/10' : 'border-white/5'}`}
-            >
-              <div className="text-center">
-                <i className="fa-solid fa-cloud-arrow-up text-4xl text-indigo-500 mb-6"></i>
-                <h3 className="text-2xl font-black text-white uppercase tracking-tighter">Drop your photos here</h3>
-                <p className="text-gray-500 text-sm mt-2">or</p>
-                <button 
-                  onClick={() => fileInputRef.current?.click()}
-                  className="mt-4 px-6 py-2 bg-white/10 text-white font-bold rounded-lg hover:bg-white/20 transition-colors"
-                >
-                  Browse Files
-                </button>
-                <p className="text-xs text-gray-600 mt-6 font-mono">SUPPORTED: RAW, JPG, PNG</p>
-              </div>
-            </div>
-          ) : (
-            <div className="flex-1 relative glass rounded-[3rem] overflow-hidden bg-black border border-white/5">
-              {currentImage?.preview ? (
+                );
+              })}
+              {canAddMore && (
                 <button
                   type="button"
-                  onClick={() => setLightboxUrl(currentImage.preview || null)}
-                  className="w-full h-full"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="h-48 rounded-2xl border-2 border-dashed border-white/10 text-xs uppercase tracking-widest text-gray-500 flex flex-col items-center justify-center hover:border-indigo-500 hover:text-indigo-300 transition"
                 >
-                  <img src={currentImage.preview} className="w-full h-full object-contain p-6" />
+                  <i className="fa-solid fa-plus mb-2"></i>
+                  Add Photos
                 </button>
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-xs text-gray-500 uppercase tracking-widest text-center px-6">
-                  {hasHiddenUploads ? 'RAW files uploaded. Start processing to generate HDR previews.' : 'Waiting for preview'}
-                </div>
-              )}
-              {currentImage?.label && (
-                <div className="absolute top-4 left-4 px-3 py-1 rounded-full bg-black/60 text-[10px] text-white uppercase tracking-widest">
-                  {currentImage.label}
-                </div>
-              )}
-              {currentImage?.status && currentImage.status !== 'pending' && currentImage.status !== 'done' && (
-                <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center">
-                  <div className="w-64 bg-white/10 h-1.5 rounded-full overflow-hidden mb-4">
-                    <div className="h-full bg-indigo-500 transition-all" style={{ width: `${currentImage.progress}%` }}></div>
-                  </div>
-                  <p className="text-indigo-400 font-black text-[10px] uppercase tracking-widest">
-                    {currentImage.stage === 'hdr'
-                      ? 'HDR Processing'
-                      : currentImage.stage === 'ai'
-                        ? 'AI Processing'
-                        : currentImage.stage === 'output'
-                          ? 'Processed'
-                          : currentImage.status}
-                  </p>
-                </div>
-              )}
-              {currentImage?.stage && currentImage.status !== 'failed' && (
-                <div className="absolute bottom-4 left-4 px-3 py-1 rounded-full bg-black/70 text-[10px] text-white uppercase tracking-widest">
-                  {currentImage.stage === 'hdr' ? 'HDR' : currentImage.stage === 'ai' ? 'AI' : currentImage.stage === 'output' ? 'Done' : 'Input'}
-                </div>
-              )}
-              {currentImage?.status === 'failed' && currentImage.error && (
-                <div className="absolute bottom-4 left-4 right-4 text-[10px] text-red-300 bg-black/60 px-3 py-2 rounded-xl">
-                  {currentImage.error}
-                </div>
               )}
             </div>
-          )}
-        </div>
-        <aside className="w-80 glass border-l border-white/5 p-6 overflow-y-auto">
-          <div className="flex items-center justify-between mb-8">
-            <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Project Assets</h3>
-            <button onClick={() => fileInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300 transition-colors"><i className="fa-solid fa-plus-circle text-lg"></i></button>
           </div>
-          <div className="space-y-4">
-            {showUploadOnly && (
-              <div className="text-xs text-gray-500 border border-white/10 rounded-2xl p-4">
-                Uploading {images.length} files...
-              </div>
-            )}
-            {!showUploadOnly && galleryItems.length === 0 && (
-              <div className="text-xs text-gray-500 border border-white/10 rounded-2xl p-4">
-                {hasHiddenUploads ? 'RAW files uploaded. Start processing to see previews.' : 'Waiting for results...'}
-              </div>
-            )}
-            {!showUploadOnly && galleryItems.map((img, idx) => (
-              <div key={img.id || idx} onClick={() => setActiveIndex(idx)} className={`relative h-24 rounded-2xl overflow-hidden cursor-pointer border-2 transition-all ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-transparent hover:border-white/10'}`}>
-                {img.preview ? (
-                  <img src={img.preview} className="w-full h-full object-cover" />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-600 uppercase tracking-widest bg-black/40">
-                    Pending
-                  </div>
-                )}
-                {img.status === 'done' && <div className="absolute top-2 right-2 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center text-[10px] text-white shadow-sm"><i className="fa-solid fa-check"></i></div>}
-                {img.status === 'uploading' && <div className="absolute inset-0 bg-black/50 flex items-center justify-center"><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div></div>}
-                {img.stage && (
-                  <div className="absolute bottom-2 left-2 text-[9px] uppercase tracking-widest bg-black/60 text-white px-2 py-0.5 rounded-full">
-                    {img.stage === 'hdr' ? 'HDR' : img.stage === 'ai' ? 'AI' : img.stage === 'output' ? 'Done' : 'Input'}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </aside>
+        )}
       </div>
       {lightboxUrl && (
         <div

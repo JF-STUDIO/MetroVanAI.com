@@ -18,7 +18,7 @@ import {
   headObject
 } from './services/r2.js';
 import { createRedis } from './services/redis.js';
-import { createHdrForGroup, cleanupHdrTemp, convertToJpeg } from './services/hdr.js';
+import { createHdrForGroup, cleanupHdrTemp, convertToJpeg, createRawPreview } from './services/hdr.js';
 import { createRunningHubTask, pollRunningHub } from './services/runninghub.js';
 
 const HDR_CONCURRENCY = Number.parseInt(process.env.HDR_CONCURRENCY || '2', 10);
@@ -175,6 +175,34 @@ const sanitizeZipName = (value: string | null | undefined) => {
   const base = (value || 'project').trim().replace(/\s+/g, '_');
   const safe = base.replace(/[^a-zA-Z0-9_-]/g, '');
   return safe || 'project';
+};
+
+const processPreviewJob = async (jobId: string) => {
+  const { data: files } = await (supabaseAdmin.from('job_files') as any)
+    .select('id, r2_bucket, r2_key, input_kind, preview_key')
+    .eq('job_id', jobId);
+
+  if (!files || files.length === 0) return;
+
+  const rawFiles = files.filter((file: any) => file.input_kind === 'raw' && !file.preview_key);
+  if (rawFiles.length === 0) return;
+
+  await runWithConcurrency(rawFiles, 2, async (file: any) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-preview-'));
+    try {
+      const sourcePath = path.join(tempDir, path.basename(file.r2_key));
+      const previewPath = path.join(tempDir, `${file.id}.jpg`);
+      await downloadR2ObjectToFile(file.r2_bucket || RAW_BUCKET, file.r2_key, sourcePath);
+      await createRawPreview(sourcePath, previewPath);
+      const previewKey = `jobs/${jobId}/previews/${file.id}.jpg`;
+      await uploadFileToR2(HDR_BUCKET, previewKey, previewPath, 'image/jpeg');
+      await (supabaseAdmin.from('job_files') as any)
+        .update({ preview_bucket: HDR_BUCKET, preview_key: previewKey, preview_ready: true })
+        .eq('id', file.id);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 };
 
 const dedupeNames = (names: string[]) => {
@@ -392,6 +420,10 @@ const finalizePipelineJob = async (
 };
 
 const processHdrGroup = async (jobId: string, group: any) => {
+  await (supabaseAdmin.from('job_groups') as any)
+    .update({ status: 'hdr_processing' })
+    .eq('id', group.id);
+
   const { data: files } = await (supabaseAdmin.from('job_files') as any)
     .select('id, r2_bucket, r2_key')
     .eq('job_id', jobId)
@@ -418,7 +450,7 @@ const processHdrGroup = async (jobId: string, group: any) => {
     .update({
       hdr_bucket: HDR_BUCKET,
       hdr_key: hdrKey,
-      status: 'preprocess_ok',
+      status: 'hdr_ok',
       attempts,
       last_error: null
     })
@@ -447,7 +479,11 @@ const processRunningHubGroup = async (
 
   while (attempts < maxAttempts) {
     attempts += 1;
+    if (await isJobCanceled(jobId)) return;
     try {
+      await (supabaseAdmin.from('job_groups') as any)
+        .update({ status: 'ai_processing' })
+        .eq('id', group.id);
       const inputUrl = await getPresignedGetUrl(HDR_BUCKET, group.hdr_key, 3600);
       const { taskId } = await createRunningHubTask(
         context.provider,
@@ -461,6 +497,7 @@ const processRunningHubGroup = async (
       if (result.status !== 'SUCCESS') {
         throw new Error('RunningHub processing failed');
       }
+      if (await isJobCanceled(jobId)) return;
 
       const outputUrl = result.outputUrls[0];
       if (!outputUrl) {
@@ -491,7 +528,7 @@ const processRunningHubGroup = async (
       }
 
       await (supabaseAdmin.from('job_groups') as any)
-        .update({ attempts, last_error: message })
+        .update({ status: 'ai_processing', attempts, last_error: message })
         .eq('id', group.id);
       await new Promise((resolve) => setTimeout(resolve, backoff * 1000));
       backoff = Math.min(backoff * 2, retryCap);
@@ -516,7 +553,7 @@ const processPipelineJob = async (jobId: string) => {
 
   if (await isJobCanceled(jobId)) return;
   await (supabaseAdmin.from('jobs') as any)
-    .update({ status: 'preprocessing', error_message: null })
+    .update({ status: 'hdr_processing', error_message: null })
     .eq('id', jobId);
 
   const { data: hdrGroups } = await (supabaseAdmin.from('job_groups') as any)
@@ -544,7 +581,7 @@ const processPipelineJob = async (jobId: string) => {
 
   if (await isJobCanceled(jobId)) return;
   await (supabaseAdmin.from('jobs') as any)
-    .update({ status: 'workflow_running' })
+    .update({ status: 'ai_processing' })
     .eq('id', jobId);
 
   const { data: aiGroups } = await (supabaseAdmin.from('job_groups') as any)
@@ -620,6 +657,10 @@ const worker = new Worker('job-queue', async (job: Job) => {
   console.log(`Worker processing job ${jobId}...`);
 
   try {
+    if (job.name === 'preview-job') {
+      await processPreviewJob(jobId);
+      return;
+    }
     const { data: jobRecord } = await (supabaseAdmin
       .from('jobs') as any)
       .select('id, workflow_id')

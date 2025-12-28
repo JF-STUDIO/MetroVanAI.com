@@ -157,6 +157,25 @@ export const convertToJpeg = async (inputPath: string, outputPath: string) => {
   await runCommand(magick, [inputPath, '-quality', '92', outputPath]);
 };
 
+export const createRawPreview = async (inputPath: string, outputPath: string) => {
+  if (!isRawFile(inputPath)) {
+    await convertToJpeg(inputPath, outputPath);
+    return;
+  }
+
+  const extracted = await extractEmbeddedJpeg(inputPath, outputPath);
+  if (extracted) return;
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-preview-'));
+  try {
+    const tiffPath = path.join(tempDir, 'preview.tif');
+    await convertRawToTiff(inputPath, tiffPath);
+    await convertToJpeg(tiffPath, outputPath);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+};
+
 const alignAndFuse = async (inputPaths: string[], outputPath: string, workDir: string) => {
   const align = await resolveBinary('align_image_stack');
   const enfuse = await resolveBinary('enfuse');

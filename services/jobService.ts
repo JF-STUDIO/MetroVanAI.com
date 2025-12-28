@@ -57,6 +57,11 @@ export const jobService = {
     return response.data;
   },
 
+  generatePreviews: async (jobId: string) => {
+    const response = await api.post(`/jobs/${jobId}/previews`);
+    return response.data;
+  },
+
   startJob: async (jobId: string) => {
     const response = await api.post(`/jobs/${jobId}/start`);
     return response.data;
@@ -74,6 +79,11 @@ export const jobService = {
 
   getPipelineStatus: async (jobId: string) => {
     const response = await api.get(`/jobs/${jobId}/status`);
+    return response.data;
+  },
+
+  setGroupRepresentative: async (jobId: string, groupId: string, fileId: string) => {
+    const response = await api.post(`/jobs/${jobId}/groups/${groupId}/representative`, { fileId });
     return response.data;
   },
 

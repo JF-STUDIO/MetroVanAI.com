@@ -75,9 +75,21 @@ export interface PipelineGroupItem {
   id: string;
   group_index: number;
   status: string;
+  group_type?: string | null;
   output_filename?: string | null;
   hdr_url?: string | null;
   output_url?: string | null;
+  preview_url?: string | null;
+  group_size?: number | null;
+  representative_index?: number | null;
+  frames?: {
+    id: string;
+    filename: string;
+    order: number;
+    preview_url?: string | null;
+    input_kind?: string | null;
+    preview_ready?: boolean;
+  }[];
   last_error?: string | null;
 }
 
@@ -86,6 +98,7 @@ export interface PipelineStatusResponse {
   groups: { total: number; success: number; failed: number };
   items?: PipelineGroupItem[];
   progress?: number;
+  previews?: { total: number; ready: number };
 }
 
 export interface CreditRow {

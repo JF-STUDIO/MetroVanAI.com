@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, authenticateSse } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
 import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl, deletePrefix } from '../services/r2.js';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
@@ -63,6 +63,7 @@ const PNG_EXTENSIONS = new Set(['png']);
 const MAX_UPLOAD_FILES = Number.parseInt(process.env.MAX_UPLOAD_FILES || '0', 10);
 const MAX_FILE_BYTES = Number.parseInt(process.env.MAX_FILE_BYTES || `${200 * 1024 * 1024}`, 10);
 const MAX_TOTAL_BYTES = Number.parseInt(process.env.MAX_UPLOAD_BYTES || '0', 10);
+const SSE_POLL_MS = Number.parseInt(process.env.SSE_POLL_MS || '2000', 10);
 
 const sanitizeFilename = (value: string | null | undefined, fallback = 'image') => {
     const raw = value || fallback;
@@ -102,9 +103,9 @@ const scoreTime = (files: any[]) => {
     const min = Math.min(...timestamps);
     const max = Math.max(...timestamps);
     const delta = max - min;
-    if (delta <= 2000) return 0.4;
-    if (delta >= 6000) return 0;
-    const factor = 1 - (delta - 2000) / 4000;
+    if (delta <= 3000) return 0.4;
+    if (delta >= 9000) return 0;
+    const factor = 1 - (delta - 3000) / 6000;
     return 0.4 * Math.max(0, Math.min(1, factor));
 };
 
@@ -172,6 +173,130 @@ const computeHdrConfidence = (files: any[]) => {
     const preferredSize = files.length === 3 || files.length === 5 || files.length === 7;
     const fallback = preferredSize && (timeScore >= 0.3 || hasSequentialFilenames(files)) ? 0.7 : 0;
     return Math.max(0, Math.min(1, Math.max(score, fallback)));
+};
+
+const orderGroupFiles = (files: any[]) => {
+    const withEv = files.some((file) => typeof file.ev === 'number');
+    if (withEv) {
+        return [...files].sort((a, b) => (a.ev ?? 0) - (b.ev ?? 0));
+    }
+    const withExposure = files.some((file) => typeof file.exposure_time === 'number');
+    if (withExposure) {
+        return [...files].sort((a, b) => (a.exposure_time ?? 0) - (b.exposure_time ?? 0));
+    }
+    const withTime = files.some((file) => file.exif_time);
+    if (withTime) {
+        return [...files].sort((a, b) => {
+            if (a.exif_time && b.exif_time) {
+                return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
+            }
+            if (!a.exif_time && b.exif_time) return 1;
+            if (a.exif_time && !b.exif_time) return -1;
+            return (a.filename || '').localeCompare(b.filename || '');
+        });
+    }
+    return [...files].sort((a, b) => (a.filename || '').localeCompare(b.filename || ''));
+};
+
+const sortBySequence = (files: any[]) => {
+    const withTokens = files.map((file: any) => ({
+        file,
+        token: extractSequenceToken(file.filename || file.r2_key || '')
+    }));
+    if (withTokens.some((item) => !item.token || Number.isNaN(item.token.num))) {
+        return [...files];
+    }
+    return withTokens
+        .sort((a, b) => (a.token!.num - b.token!.num))
+        .map((item) => item.file);
+};
+
+const pickOutputLead = (files: any[]) => {
+    if (!files.length) return null;
+    const withTime = files.filter((file) => file.exif_time);
+    if (withTime.length > 0) {
+        return [...files].sort((a, b) => {
+            if (a.exif_time && b.exif_time) {
+                return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
+            }
+            if (a.exif_time) return -1;
+            if (b.exif_time) return 1;
+            return 0;
+        })[0];
+    }
+    const sequential = sortBySequence(files);
+    return sequential[0] || files[0];
+};
+
+const sameCaptureSetup = (a: any, b: any) => {
+    if (a.camera_make && b.camera_make && a.camera_make !== b.camera_make) return false;
+    if (a.camera_model && b.camera_model && a.camera_model !== b.camera_model) return false;
+    if (typeof a.fnumber === 'number' && typeof b.fnumber === 'number') {
+        if (Math.abs(a.fnumber - b.fnumber) > 0.2) return false;
+    }
+    return true;
+};
+
+const buildTimeGroups = (files: any[], thresholdMs: number) => {
+    const groups: any[][] = [];
+    let current: any[] = [];
+    for (const file of files) {
+        if (!file.exif_time) {
+            if (current.length > 0) {
+                groups.push(current);
+                current = [];
+            }
+            groups.push([file]);
+            continue;
+        }
+        if (current.length === 0) {
+            current.push(file);
+            continue;
+        }
+        const last = current[current.length - 1];
+        if (!last.exif_time) {
+            groups.push(current);
+            current = [file];
+            continue;
+        }
+        const delta = Math.abs(new Date(file.exif_time).getTime() - new Date(last.exif_time).getTime());
+        if (delta <= thresholdMs && sameCaptureSetup(last, file)) {
+            current.push(file);
+        } else {
+            groups.push(current);
+            current = [file];
+        }
+    }
+    if (current.length > 0) groups.push(current);
+    return groups;
+};
+
+const buildSequenceGroups = (files: any[]) => {
+    if (!files.length) return [];
+    const ordered = sortBySequence(files);
+    const groups: any[][] = [];
+    let current: any[] = [];
+    let lastToken: ReturnType<typeof extractSequenceToken> | null = null;
+
+    for (const file of ordered) {
+        const token = extractSequenceToken(file.filename || file.r2_key || '');
+        if (!token || Number.isNaN(token.num)) {
+            if (current.length > 0) groups.push(current);
+            current = [];
+            lastToken = null;
+            groups.push([file]);
+            continue;
+        }
+        if (!lastToken || token.prefix !== lastToken.prefix || token.num !== lastToken.num + 1) {
+            if (current.length > 0) groups.push(current);
+            current = [file];
+        } else {
+            current.push(file);
+        }
+        lastToken = token;
+    }
+    if (current.length > 0) groups.push(current);
+    return groups;
 };
 
 // 1. 获取所有工具
@@ -356,7 +481,7 @@ router.delete('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Respon
     try {
         const { data: job, error: jobError } = await (supabaseAdmin
             .from('jobs') as any)
-            .select('id, user_id, status, reserved_units')
+            .select('id, user_id, status, reserved_units, workflow_id')
             .eq('id', jobId)
             .eq('user_id', userId)
             .single();
@@ -420,12 +545,15 @@ router.delete('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Respon
 
         const rawPrefix = `u/${userId}/jobs/${jobId}/raw/`;
         const legacyPrefix = `u/${userId}/jobs/${jobId}/`;
-        const deleteResults = await Promise.allSettled([
+        const deleteTasks = [
             deletePrefix(RAW_BUCKET, rawPrefix),
             deletePrefix(HDR_BUCKET, `jobs/${jobId}/`),
-            deletePrefix(OUTPUT_BUCKET, `jobs/${jobId}/`),
-            deletePrefix(BUCKET_NAME, legacyPrefix)
-        ]);
+            deletePrefix(OUTPUT_BUCKET, `jobs/${jobId}/`)
+        ];
+        if (!job.workflow_id && BUCKET_NAME && BUCKET_NAME !== RAW_BUCKET && BUCKET_NAME !== HDR_BUCKET && BUCKET_NAME !== OUTPUT_BUCKET) {
+            deleteTasks.push(deletePrefix(BUCKET_NAME, legacyPrefix));
+        }
+        const deleteResults = await Promise.allSettled(deleteTasks);
         const deleteErrors = deleteResults
             .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
             .map((result) => result.reason?.message || String(result.reason));
@@ -669,6 +797,9 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
     const rawFiles = fileList.filter((file: any) => file.input_kind === 'raw');
     const imageFiles = fileList.filter((file: any) => file.input_kind === 'jpg' || file.input_kind === 'png');
 
+    const hasMissingExif = rawFiles.some((file: any) => !file.exif_time);
+    const hasSequentialAll = rawFiles.length >= 3 && hasSequentialFilenames(rawFiles);
+
     const sortedRaw = [...rawFiles].sort((a: any, b: any) => {
         if (a.exif_time && b.exif_time) {
             return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
@@ -678,58 +809,32 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         return (a.filename || '').localeCompare(b.filename || '');
     });
 
-    const thresholdMs = 2000;
-    const timeGroups: any[][] = [];
-    let current: any[] = [];
+    const thresholdMs = Number.parseInt(process.env.HDR_GROUP_TIME_MS || '3000', 10);
+    let timeGroups: any[][] = hasMissingExif && hasSequentialAll
+        ? [sortBySequence(sortedRaw)]
+        : buildTimeGroups(sortedRaw.filter((file: any) => file.exif_time), thresholdMs)
+            .concat(buildSequenceGroups(sortedRaw.filter((file: any) => !file.exif_time)));
 
-    for (const file of sortedRaw) {
-        if (!file.exif_time) {
-            if (current.length > 0) {
-                timeGroups.push(current);
-                current = [];
-            }
-            timeGroups.push([file]);
-            continue;
-        }
-
-        if (current.length === 0) {
-            current.push(file);
-            continue;
-        }
-
-        const last = current[current.length - 1];
-        if (!last.exif_time) {
-            timeGroups.push(current);
-            current = [file];
-            continue;
-        }
-
-        const delta = Math.abs(new Date(file.exif_time).getTime() - new Date(last.exif_time).getTime());
-        if (delta <= thresholdMs) {
-            current.push(file);
-        } else {
-            timeGroups.push(current);
-            current = [file];
-        }
+    if (hasSequentialAll && timeGroups.length > 0 && !timeGroups.some((group) => group.length >= 3)) {
+        timeGroups = buildSequenceGroups(sortedRaw);
     }
-
-    if (current.length > 0) timeGroups.push(current);
 
     const groups: { files: any[]; group_type: string; hdr_confidence: number | null; output_filename: string }[] = [];
 
     for (const cluster of timeGroups) {
         if (cluster.length < 3) {
-            const confidence = computeHdrConfidence(cluster);
-            if (cluster.length >= 2 && confidence >= 0.7) {
-                const lead = cluster[0];
+            const orderedCluster = orderGroupFiles(cluster);
+            const confidence = computeHdrConfidence(orderedCluster);
+            if (orderedCluster.length >= 2 && confidence >= 0.7) {
+                const lead = pickOutputLead(orderedCluster) || orderedCluster[0];
                 groups.push({
-                    files: cluster,
+                    files: orderedCluster,
                     group_type: 'hdr',
                     hdr_confidence: confidence,
                     output_filename: normalizeOutputFilename(lead.filename, lead.r2_key.split('/').pop() || 'hdr')
                 });
             } else {
-                for (const file of cluster) {
+                for (const file of orderedCluster) {
                     groups.push({
                         files: [file],
                         group_type: 'raw',
@@ -744,11 +849,11 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         const { sizes } = exposurePlan(cluster.length);
         let offset = 0;
         for (const size of sizes) {
-            const subset = cluster.slice(offset, offset + size);
+            const subset = orderGroupFiles(cluster.slice(offset, offset + size));
             offset += size;
             const confidence = computeHdrConfidence(subset);
             if (confidence >= 0.7) {
-                const lead = subset[0];
+                const lead = pickOutputLead(subset) || subset[0];
                 groups.push({
                     files: subset,
                     group_type: 'hdr',
@@ -797,16 +902,21 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         .delete()
         .eq('job_id', jobId);
 
-    const groupRows = groups.map((group, index) => ({
-        id: uuidv4(),
-        job_id: jobId,
-        group_index: index + 1,
-        raw_count: group.files.filter(file => file.input_kind === 'raw').length,
-        status: 'queued',
-        group_type: group.group_type,
-        hdr_confidence: group.hdr_confidence,
-        output_filename: group.output_filename
-    }));
+    const groupRows = groups.map((group, index) => {
+        const repIndex = Math.floor((group.files.length - 1) / 2);
+        const representative = group.files[repIndex];
+        return {
+            id: uuidv4(),
+            job_id: jobId,
+            group_index: index + 1,
+            raw_count: group.files.filter(file => file.input_kind === 'raw').length,
+            status: 'queued',
+            group_type: group.group_type,
+            hdr_confidence: group.hdr_confidence,
+            output_filename: group.output_filename,
+            representative_file_id: representative?.id ?? null
+        };
+    });
 
     const { error: groupError } = await (supabaseAdmin.from('job_groups') as any)
         .insert(groupRows);
@@ -815,10 +925,16 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
     for (let index = 0; index < groups.length; index += 1) {
         const group = groups[index];
         const groupId = groupRows[index].id;
-        const ids = group.files.map((item: any) => item.id);
-        await (supabaseAdmin.from('job_files') as any)
-            .update({ group_id: groupId })
-            .in('id', ids);
+        const orderUpdates = group.files.map((item: any, orderIndex: number) => ({
+            id: item.id,
+            group_id: groupId,
+            group_order: orderIndex + 1
+        }));
+        await runWithConcurrency(orderUpdates, 4, async (update) => {
+            await (supabaseAdmin.from('job_files') as any)
+                .update({ group_id: update.group_id, group_order: update.group_order })
+                .eq('id', update.id);
+        });
     }
 
     await (supabaseAdmin.from('jobs') as any)
@@ -834,6 +950,72 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         .eq('user_id', userId);
 
     res.json({ estimated_units: groupRows.length });
+});
+
+// New pipeline: generate previews (RAW embedded JPGs)
+router.post('/jobs/:jobId/previews', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { data: job } = await (supabaseAdmin
+        .from('jobs') as any)
+        .select('id, status')
+        .eq('id', jobId)
+        .eq('user_id', userId)
+        .single();
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    try {
+        await jobQueue.add('preview-job', { jobId }, {
+            jobId: `preview:${jobId}`,
+            attempts: 1,
+            removeOnComplete: true,
+            removeOnFail: true
+        });
+    } catch (error) {
+        console.warn('Failed to enqueue preview job:', (error as Error).message);
+        return res.status(503).json({ error: 'Preview queue unavailable' });
+    }
+
+    res.json({ queued: true });
+});
+
+// New pipeline: update group representative frame
+router.post('/jobs/:jobId/groups/:groupId/representative', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId, groupId } = req.params;
+    const userId = req.user?.id;
+    const { fileId } = req.body || {};
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!fileId) return res.status(400).json({ error: 'fileId is required' });
+
+    const { data: group } = await (supabaseAdmin
+        .from('job_groups') as any)
+        .select('id, job_id')
+        .eq('id', groupId)
+        .eq('job_id', jobId)
+        .single();
+    if (!group) return res.status(404).json({ error: 'Group not found' });
+
+    const { data: file } = await (supabaseAdmin
+        .from('job_files') as any)
+        .select('id, job_id, group_id')
+        .eq('id', fileId)
+        .eq('job_id', jobId)
+        .eq('group_id', groupId)
+        .single();
+    if (!file) return res.status(404).json({ error: 'File not found in group' });
+
+    const { error: updateError } = await (supabaseAdmin
+        .from('job_groups') as any)
+        .update({ representative_file_id: fileId })
+        .eq('id', groupId)
+        .eq('job_id', jobId);
+    if (updateError) return res.status(500).json({ error: updateError.message });
+
+    res.json({ representative_file_id: fileId });
 });
 
 // New pipeline: reserve credits and enqueue job
@@ -1069,20 +1251,14 @@ router.post('/jobs/create', authenticate, async (req: AuthRequest, res: Response
     res.json(job);
 });
 
-// New pipeline: job status
-router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Response) => {
-    const { jobId } = req.params;
-    const userId = req.user?.id;
-
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
+const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
     const { data: job, error } = await (supabaseAdmin
         .from('jobs') as any)
         .select('id, status, estimated_units, reserved_units, settled_units, progress, zip_key, created_at, project_name')
         .eq('id', jobId)
         .eq('user_id', userId)
         .single();
-    if (error || !job) return res.status(404).json({ error: 'Job not found' });
+    if (error || !job) return null;
 
     const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
         .select('status')
@@ -1096,9 +1272,37 @@ router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Re
     }, { total: 0, success: 0, failed: 0 });
 
     const { data: groupRows } = await (supabaseAdmin.from('job_groups') as any)
-        .select('id, group_index, status, hdr_bucket, hdr_key, output_bucket, output_key, output_filename, last_error')
+        .select('id, group_index, status, hdr_bucket, hdr_key, output_bucket, output_key, output_filename, last_error, representative_file_id, group_type')
         .eq('job_id', jobId)
         .order('group_index', { ascending: true });
+
+    const { data: fileRows } = await (supabaseAdmin.from('job_files') as any)
+        .select('id, group_id, r2_bucket, r2_key, filename, input_kind, preview_bucket, preview_key, preview_ready, group_order')
+        .eq('job_id', jobId);
+
+    const filesByGroup = new Map<string, any[]>();
+    (fileRows || []).forEach((file: any) => {
+        if (!file.group_id) return;
+        const list = filesByGroup.get(file.group_id) || [];
+        list.push(file);
+        filesByGroup.set(file.group_id, list);
+    });
+
+    const previewTotal = (fileRows || []).length;
+    const previewReady = (fileRows || []).filter((file: any) => (
+        file.input_kind !== 'raw' || Boolean(file.preview_key)
+    )).length;
+
+    const buildPreviewUrl = async (file: any) => {
+        if (!file) return null;
+        if (file.preview_key) {
+            return getPresignedGetUrl(file.preview_bucket || HDR_BUCKET, file.preview_key, 900);
+        }
+        if (file.input_kind && file.input_kind !== 'raw') {
+            return getPresignedGetUrl(file.r2_bucket || RAW_BUCKET, file.r2_key, 900);
+        }
+        return null;
+    };
 
     const items = await Promise.all((groupRows || []).map(async (group: any) => {
         const hdrUrl = group.hdr_key
@@ -1107,13 +1311,38 @@ router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Re
         const outputUrl = group.output_key
             ? await getPresignedGetUrl(group.output_bucket || OUTPUT_BUCKET, group.output_key, 900)
             : null;
+        const framesRaw = (filesByGroup.get(group.id) || []).sort((a, b) => {
+            if (typeof a.group_order === 'number' && typeof b.group_order === 'number') {
+                return a.group_order - b.group_order;
+            }
+            return (a.filename || '').localeCompare(b.filename || '');
+        });
+        const groupSize = framesRaw.length || 1;
+        const representativeIndex = Math.max(0, framesRaw.findIndex((file: any) => file.id === group.representative_file_id));
+        const repIndex = representativeIndex >= 0 ? representativeIndex : Math.floor((groupSize - 1) / 2);
+        const frames = await Promise.all(framesRaw.map(async (file: any, index: number) => ({
+            id: file.id,
+            filename: file.filename || path.basename(file.r2_key),
+            order: index + 1,
+            preview_url: await buildPreviewUrl(file),
+            input_kind: file.input_kind || null,
+            preview_ready: Boolean(file.preview_key)
+        })));
+        const representativeFrame = frames[repIndex] || frames[0] || null;
+        const previewUrl = representativeFrame?.preview_url || null;
+
         return {
             id: group.id,
             group_index: group.group_index,
             status: group.status,
+            group_type: group.group_type || null,
             output_filename: group.output_filename,
             hdr_url: hdrUrl,
             output_url: outputUrl,
+            preview_url: previewUrl,
+            group_size: groupSize,
+            representative_index: representativeFrame?.order || 1,
+            frames,
             last_error: group.last_error || null
         };
     }));
@@ -1124,7 +1353,93 @@ router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Re
             ? Math.round(((summary.success + summary.failed) / summary.total) * 100)
             : 0;
 
-    res.json({ job, groups: summary, items, progress });
+    return { job, groups: summary, items, progress, previews: { total: previewTotal, ready: previewReady } };
+};
+
+// New pipeline: job status
+router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const payload = await buildPipelineStatusPayload(jobId, userId);
+    if (!payload) return res.status(404).json({ error: 'Job not found' });
+
+    res.json(payload);
+});
+
+router.get('/jobs/:jobId/stream', authenticateSse, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    let closed = false;
+    let lastPayload = '';
+    let pending = false;
+    const terminalStatuses = new Set(['completed', 'partial', 'failed', 'canceled']);
+
+    const sendEvent = (event: string, data: any) => {
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const closeStream = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(pollTimer);
+        clearInterval(pingTimer);
+        res.end();
+    };
+
+    const pushStatus = async () => {
+        if (closed || pending) return;
+        pending = true;
+        try {
+            const payload = await buildPipelineStatusPayload(jobId, userId);
+            if (!payload) {
+                sendEvent('error', { error: 'Job not found' });
+                closeStream();
+                return;
+            }
+            const serialized = JSON.stringify(payload);
+            if (serialized !== lastPayload) {
+                lastPayload = serialized;
+                sendEvent('status', payload);
+            }
+            if (terminalStatuses.has(payload.job.status)) {
+                sendEvent('done', { status: payload.job.status });
+                closeStream();
+            }
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Stream error';
+            sendEvent('error', { error: message });
+            closeStream();
+        } finally {
+            pending = false;
+        }
+    };
+
+    const pollTimer = setInterval(() => {
+        void pushStatus();
+    }, Math.max(SSE_POLL_MS, 1000));
+
+    const pingTimer = setInterval(() => {
+        if (closed) return;
+        res.write(': ping\n\n');
+    }, 15000);
+
+    req.on('close', () => {
+        closeStream();
+    });
+
+    await pushStatus();
 });
 
 export default router;

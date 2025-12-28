@@ -13,19 +13,28 @@ const app = express();
 const port = process.env.PORT || 4000;
 
 
-const allowedOrigins = (process.env.CORS_ORIGIN || 'https://metro-van-ai-com.vercel.app,https://metrovanai.com,https://www.metrovanai.com')
+const defaultOrigins = [
+  'https://metro-van-ai-com.vercel.app',
+  'https://metrovanai.com',
+  'https://www.metrovanai.com'
+];
+const normalizeOrigin = (value: string) => value.trim().replace(/\/+$/, '');
+const rawOrigins = process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || '';
+const envOrigins = rawOrigins
   .split(',')
-  .map(origin => origin.trim())
+  .map(normalizeOrigin)
   .filter(Boolean);
 const localOrigins = ['http://localhost:5173', 'http://localhost:3000'];
-const finalAllowedOrigins = Array.from(new Set([...allowedOrigins, ...localOrigins]));
+const finalAllowedOrigins = Array.from(new Set([...defaultOrigins, ...envOrigins, ...localOrigins].map(normalizeOrigin)));
+const allowAllOrigins = finalAllowedOrigins.includes('*');
 
 app.use(helmet());
 app.use(cors({
   origin: function(origin, callback) {
     // allow requests with no origin (like mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
-    if (finalAllowedOrigins.includes(origin)) {
+    const normalized = normalizeOrigin(origin);
+    if (allowAllOrigins || finalAllowedOrigins.includes(normalized)) {
       return callback(null, true);
     } else {
       return callback(new Error('Not allowed by CORS'));
