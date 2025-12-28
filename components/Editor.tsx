@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Workflow, User, Job, JobAsset } from '../types';
+import { Workflow, User, Job, JobAsset, PipelineGroupItem } from '../types';
 import { jobService } from '../services/jobService';
 import axios from 'axios';
 
@@ -21,6 +21,15 @@ interface ImageItem {
 }
 
 type HistoryJob = Job & { photo_tools?: { name?: string } | null; workflows?: { display_name?: string } | null };
+type GalleryItem = {
+  id: string;
+  label: string;
+  preview?: string;
+  status: 'pending' | 'uploading' | 'processing' | 'done' | 'failed';
+  progress: number;
+  stage?: 'input' | 'hdr' | 'output';
+  error?: string | null;
+};
 
 // The auto-playing, aspect-ratio-correct slider component
 const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ original, processed }) => {
@@ -84,6 +93,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [projectName, setProjectName] = useState('');
   const [jobStatus, setJobStatus] = useState('idle');
   const [zipUrl, setZipUrl] = useState<string | null>(null);
+  const [pipelineItems, setPipelineItems] = useState<PipelineGroupItem[]>([]);
+  const [pipelineProgress, setPipelineProgress] = useState<number | null>(null);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [history, setHistory] = useState<HistoryJob[]>([]);
@@ -91,23 +103,43 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [historyPage, setHistoryPage] = useState(1);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const pipelineStages = new Set([
+    'reserved',
+    'input_resolved',
+    'preprocessing',
+    'hdr_processing',
+    'workflow_running',
+    'ai_processing',
+    'postprocess',
+    'packaging',
+    'zipping'
+  ]);
+  const [resumeAttempted, setResumeAttempted] = useState(false);
+
+  useEffect(() => {
+    if (!lightboxUrl) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setLightboxUrl(null);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [lightboxUrl]);
+
+  const saveLastJob = (jobId: string, workflowId: string) => {
+    try {
+      localStorage.setItem('mvai:last_job', JSON.stringify({ jobId, workflowId, ts: Date.now() }));
+    } catch (error) {
+      console.warn('Failed to store last job', error);
+    }
+  };
 
   // Poll for job status
   useEffect(() => {
-    const pipelineStatuses = new Set([
-      'reserved',
-      'input_resolved',
-      'preprocessing',
-      'hdr_processing',
-      'workflow_running',
-      'ai_processing',
-      'postprocess',
-      'packaging',
-      'zipping'
-    ]);
     if (!job) return;
     if (job.workflow_id) {
-      if (!pipelineStatuses.has(jobStatus)) return;
+      if (!pipelineStages.has(jobStatus)) return;
     } else if (!(jobStatus === 'processing' || jobStatus === 'queued')) {
       return;
     }
@@ -115,9 +147,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const timer = setInterval(async () => {
       try {
         if (job.workflow_id) {
-          const { job: pipelineJob } = await jobService.getPipelineStatus(job.id);
+          const response = await jobService.getPipelineStatus(job.id);
+          const pipelineJob = response.job;
           setJob(pipelineJob);
           setJobStatus(pipelineJob.status);
+          if (Array.isArray(response.items)) {
+            setPipelineItems(response.items);
+          }
+          if (typeof response.progress === 'number') {
+            setPipelineProgress(response.progress);
+          }
 
           if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
             clearInterval(timer);
@@ -130,6 +169,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             clearInterval(timer);
           }
         } else {
+          if (pipelineItems.length > 0) {
+            setPipelineItems([]);
+            setPipelineProgress(null);
+          }
           const jobData = await jobService.getJobStatus(job.id);
           setJobStatus(jobData.status);
 
@@ -183,6 +226,55 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     loadHistory(1);
   }, [user.id]);
 
+  useEffect(() => {
+    if (resumeAttempted || activeTool || workflows.length === 0) return;
+    let cached: { jobId?: string; workflowId?: string } | null = null;
+    try {
+      cached = JSON.parse(localStorage.getItem('mvai:last_job') || 'null');
+    } catch (error) {
+      cached = null;
+    }
+    if (!cached?.jobId || !cached?.workflowId) {
+      setResumeAttempted(true);
+      return;
+    }
+    const workflow = workflows.find(tool => tool.id === cached?.workflowId);
+    if (!workflow) {
+      setResumeAttempted(true);
+      return;
+    }
+    setActiveTool(workflow);
+    setShowProjectInput(false);
+    setImages([]);
+    setActiveIndex(null);
+    setZipUrl(null);
+    setPipelineItems([]);
+    setPipelineProgress(null);
+    jobService.getPipelineStatus(cached.jobId)
+      .then(async (response) => {
+        const pipelineJob = response.job;
+        setJob(pipelineJob);
+        setProjectName(pipelineJob.project_name || '');
+        setJobStatus(pipelineJob.status);
+        if (Array.isArray(response.items)) {
+          setPipelineItems(response.items);
+        }
+        if (typeof response.progress === 'number') {
+          setPipelineProgress(response.progress);
+        }
+        if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
+          const { url } = await jobService.getPresignedDownloadUrl(pipelineJob.id);
+          setZipUrl(url);
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem('mvai:last_job');
+      })
+      .finally(() => {
+        setResumeAttempted(true);
+      });
+  }, [workflows, activeTool, resumeAttempted]);
+
   const formatDate = (value: string) => {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return value;
@@ -197,17 +289,29 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setJobStatus(item.status);
     setJob(item as Job);
     setShowProjectInput(false);
+    if (item.workflow_id) {
+      saveLastJob(item.id, item.workflow_id);
+    }
 
     try {
       if (item.workflow_id) {
-        const { job: pipelineJob } = await jobService.getPipelineStatus(item.id);
+        const response = await jobService.getPipelineStatus(item.id);
+        const pipelineJob = response.job;
         setJob(pipelineJob);
         setJobStatus(pipelineJob.status);
+        if (Array.isArray(response.items)) {
+          setPipelineItems(response.items);
+        }
+        if (typeof response.progress === 'number') {
+          setPipelineProgress(response.progress);
+        }
         if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
           const { url } = await jobService.getPresignedDownloadUrl(pipelineJob.id);
           setZipUrl(url);
         }
       } else {
+        setPipelineItems([]);
+        setPipelineProgress(null);
         const jobData = await jobService.getJobStatus(item.id);
         setJob(jobData);
         setJobStatus(jobData.status);
@@ -234,6 +338,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       progress: 0,
       statusText: 'Ready',
     }));
+    if (pipelineItems.length > 0) {
+      setPipelineItems([]);
+      setPipelineProgress(null);
+    }
     setImages(prev => [...prev, ...newItems]);
     if (activeIndex === null) setActiveIndex(images.length - 1 + newItems.length);
   };
@@ -281,6 +389,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     try {
       setJobStatus('uploading');
+      setPipelineItems([]);
+      setPipelineProgress(null);
       const presignedData: { r2Key: string; putUrl: string; fileName: string }[] = await jobService.getPresignedRawUploadUrls(
         job.id,
         images.map(img => ({ name: img.file.name, type: img.file.type }))
@@ -340,6 +450,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const handleSelectTool = (tool: Workflow) => {
     setActiveTool(tool);
     setShowProjectInput(true);
+    setPipelineItems([]);
+    setPipelineProgress(null);
+    setLightboxUrl(null);
   };
   
   const handleProjectCreate = async (e: React.FormEvent) => {
@@ -350,6 +463,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setJob(newJob);
       setJobStatus(newJob.status)
       setShowProjectInput(false);
+      setPipelineItems([]);
+      setPipelineProgress(null);
+      setLightboxUrl(null);
+      saveLastJob(newJob.id, activeTool.id);
       setHistory(prev => [{
         ...(newJob as Job),
         workflows: { display_name: activeTool.display_name },
@@ -364,6 +481,58 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       }
     }
   };
+
+  const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
+    const outputReady = Boolean(item.output_url) || item.status === 'ai_ok';
+    const hdrReady = Boolean(item.hdr_url) || item.status === 'preprocess_ok' || item.status === 'hdr_ok';
+    const preview = item.output_url || item.hdr_url || '';
+    const status: GalleryItem['status'] =
+      item.status === 'failed' ? 'failed' : outputReady ? 'done' : 'processing';
+    const progress = status === 'done' ? 100 : status === 'failed' ? 100 : hdrReady ? 60 : 20;
+    const stage: GalleryItem['stage'] = outputReady ? 'output' : hdrReady ? 'hdr' : 'input';
+    return {
+      id: item.id,
+      label: item.output_filename || `Group ${item.group_index}`,
+      preview,
+      status,
+      progress,
+      stage,
+      error: item.last_error || null
+    };
+  };
+
+  const mapUploadItem = (item: ImageItem): GalleryItem => ({
+    id: item.id,
+    label: item.file.name,
+    preview: item.preview,
+    status: item.status,
+    progress: item.progress,
+    stage: 'input'
+  });
+
+  const galleryItems = pipelineItems.length > 0
+    ? pipelineItems.map(mapPipelineItem)
+    : images.map(mapUploadItem);
+
+  const uploadProgress = images.length
+    ? Math.round(images.reduce((sum, img) => sum + img.progress, 0) / images.length)
+    : 0;
+
+  const pipelineProgressValue = typeof pipelineProgress === 'number'
+    ? pipelineProgress
+    : typeof job?.progress === 'number'
+      ? job.progress
+      : null;
+
+  useEffect(() => {
+    if (galleryItems.length === 0) {
+      if (activeIndex !== null) setActiveIndex(null);
+      return;
+    }
+    if (activeIndex === null || activeIndex >= galleryItems.length) {
+      setActiveIndex(0);
+    }
+  }, [galleryItems.length, activeIndex]);
 
   // VIEW 1: Tool Selector
   if (!activeTool) {
@@ -483,12 +652,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   }
 
   // VIEW 3: Main Uploader & Editor
-  const currentImage = activeIndex !== null ? images[activeIndex] : null;
+  const currentImage = activeIndex !== null ? galleryItems[activeIndex] : null;
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button onClick={() => { setActiveTool(null); setImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+          <button onClick={() => { setActiveTool(null); setImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
             <i className="fa-solid fa-arrow-left"></i>
           </button>
           <div>
@@ -496,7 +665,21 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             <div className="flex items-center gap-2">
               <p className="text-[9px] text-indigo-400 font-black tracking-widest uppercase">{jobStatus}</p>
               <span className="text-[9px] text-gray-600 font-bold">| Balance: {user.points} Pts</span>
+              {jobStatus === 'uploading' && images.length > 0 && (
+                <span className="text-[9px] text-gray-400 font-bold">| Upload {uploadProgress}%</span>
+              )}
+              {jobStatus !== 'uploading' && pipelineStages.has(jobStatus) && pipelineProgressValue !== null && (
+                <span className="text-[9px] text-gray-400 font-bold">| Progress {pipelineProgressValue}%</span>
+              )}
             </div>
+            {(jobStatus === 'uploading' || (pipelineStages.has(jobStatus) && pipelineProgressValue !== null)) && (
+              <div className="mt-2 h-1.5 w-48 rounded-full bg-white/10 overflow-hidden">
+                <div
+                  className="h-full bg-indigo-500 transition-all"
+                  style={{ width: `${jobStatus === 'uploading' ? uploadProgress : pipelineProgressValue || 0}%` }}
+                ></div>
+              </div>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -544,13 +727,42 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             </div>
           ) : (
             <div className="flex-1 relative glass rounded-[3rem] overflow-hidden bg-black border border-white/5">
-              <img src={currentImage.preview} className="w-full h-full object-contain p-6" />
+              {currentImage.preview ? (
+                <button
+                  type="button"
+                  onClick={() => setLightboxUrl(currentImage.preview || null)}
+                  className="w-full h-full"
+                >
+                  <img src={currentImage.preview} className="w-full h-full object-contain p-6" />
+                </button>
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-xs text-gray-500 uppercase tracking-widest">
+                  Waiting for preview
+                </div>
+              )}
+              {currentImage.label && (
+                <div className="absolute top-4 left-4 px-3 py-1 rounded-full bg-black/60 text-[10px] text-white uppercase tracking-widest">
+                  {currentImage.label}
+                </div>
+              )}
               {currentImage.status !== 'pending' && currentImage.status !== 'done' && (
                 <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center">
                   <div className="w-64 bg-white/10 h-1.5 rounded-full overflow-hidden mb-4">
                     <div className="h-full bg-indigo-500 transition-all" style={{ width: `${currentImage.progress}%` }}></div>
                   </div>
-                  <p className="text-indigo-400 font-black text-[10px] uppercase tracking-widest">{currentImage.status}</p>
+                  <p className="text-indigo-400 font-black text-[10px] uppercase tracking-widest">
+                    {currentImage.stage ? `${currentImage.stage} · ` : ''}{currentImage.status}
+                  </p>
+                </div>
+              )}
+              {currentImage.stage && currentImage.status !== 'failed' && (
+                <div className="absolute bottom-4 left-4 px-3 py-1 rounded-full bg-black/70 text-[10px] text-white uppercase tracking-widest">
+                  {currentImage.stage === 'hdr' ? 'HDR Ready' : currentImage.stage === 'output' ? 'Processed' : 'Input'}
+                </div>
+              )}
+              {currentImage.status === 'failed' && currentImage.error && (
+                <div className="absolute bottom-4 left-4 right-4 text-[10px] text-red-300 bg-black/60 px-3 py-2 rounded-xl">
+                  {currentImage.error}
                 </div>
               )}
             </div>
@@ -562,16 +774,44 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             <button onClick={() => fileInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300 transition-colors"><i className="fa-solid fa-plus-circle text-lg"></i></button>
           </div>
           <div className="space-y-4">
-            {images.map((img, idx) => (
-              <div key={idx} onClick={() => setActiveIndex(idx)} className={`relative h-24 rounded-2xl overflow-hidden cursor-pointer border-2 transition-all ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-transparent hover:border-white/10'}`}>
-                <img src={img.preview} className="w-full h-full object-cover" />
+            {galleryItems.map((img, idx) => (
+              <div key={img.id || idx} onClick={() => setActiveIndex(idx)} className={`relative h-24 rounded-2xl overflow-hidden cursor-pointer border-2 transition-all ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-transparent hover:border-white/10'}`}>
+                {img.preview ? (
+                  <img src={img.preview} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-600 uppercase tracking-widest bg-black/40">
+                    Pending
+                  </div>
+                )}
                 {img.status === 'done' && <div className="absolute top-2 right-2 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center text-[10px] text-white shadow-sm"><i className="fa-solid fa-check"></i></div>}
                 {img.status === 'uploading' && <div className="absolute inset-0 bg-black/50 flex items-center justify-center"><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div></div>}
+                {img.stage && (
+                  <div className="absolute bottom-2 left-2 text-[9px] uppercase tracking-widest bg-black/60 text-white px-2 py-0.5 rounded-full">
+                    {img.stage === 'hdr' ? 'HDR' : img.stage === 'output' ? 'AI' : 'Input'}
+                  </div>
+                )}
               </div>
             ))}
           </div>
         </aside>
       </div>
+      {lightboxUrl && (
+        <div
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <div className="relative max-w-6xl w-full h-full flex items-center justify-center">
+            <img src={lightboxUrl} className="max-h-full max-w-full object-contain rounded-2xl shadow-2xl" />
+            <button
+              type="button"
+              onClick={() => setLightboxUrl(null)}
+              className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 text-white flex items-center justify-center"
+            >
+              <i className="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+      )}
       <input type="file" multiple className="hidden" ref={fileInputRef} accept="image/*,.raw,.arw,.cr2,.nef" onChange={handleFileChange} />
     </div>
   );

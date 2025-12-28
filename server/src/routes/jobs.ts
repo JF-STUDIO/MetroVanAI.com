@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
-import { r2Client, BUCKET_NAME, RAW_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl } from '../services/r2.js';
+import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl } from '../services/r2.js';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
@@ -861,7 +861,36 @@ router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Re
         return acc;
     }, { total: 0, success: 0, failed: 0 });
 
-    res.json({ job, groups: summary });
+    const { data: groupRows } = await (supabaseAdmin.from('job_groups') as any)
+        .select('id, group_index, status, hdr_bucket, hdr_key, output_bucket, output_key, output_filename, last_error')
+        .eq('job_id', jobId)
+        .order('group_index', { ascending: true });
+
+    const items = await Promise.all((groupRows || []).map(async (group: any) => {
+        const hdrUrl = group.hdr_key
+            ? await getPresignedGetUrl(group.hdr_bucket || HDR_BUCKET, group.hdr_key, 900)
+            : null;
+        const outputUrl = group.output_key
+            ? await getPresignedGetUrl(group.output_bucket || OUTPUT_BUCKET, group.output_key, 900)
+            : null;
+        return {
+            id: group.id,
+            group_index: group.group_index,
+            status: group.status,
+            output_filename: group.output_filename,
+            hdr_url: hdrUrl,
+            output_url: outputUrl,
+            last_error: group.last_error || null
+        };
+    }));
+
+    const progress = typeof job.progress === 'number'
+        ? job.progress
+        : summary.total > 0
+            ? Math.round(((summary.success + summary.failed) / summary.total) * 100)
+            : 0;
+
+    res.json({ job, groups: summary, items, progress });
 });
 
 export default router;

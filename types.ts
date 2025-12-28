@@ -53,6 +53,7 @@ export interface Job {
   output_zip_key?: string | null;
   output_file_key?: string | null;
   output_file_name?: string | null;
+  progress?: number | null;
   expires_at?: string;
   created_at: string;
   photo_tools?: { name?: string } | null;
@@ -65,6 +66,23 @@ export interface JobAsset {
   r2_key: string;
   r2_output_key?: string;
   status: 'pending' | 'processing' | 'processed' | 'failed';
+}
+
+export interface PipelineGroupItem {
+  id: string;
+  group_index: number;
+  status: string;
+  output_filename?: string | null;
+  hdr_url?: string | null;
+  output_url?: string | null;
+  last_error?: string | null;
+}
+
+export interface PipelineStatusResponse {
+  job: Job;
+  groups: { total: number; success: number; failed: number };
+  items?: PipelineGroupItem[];
+  progress?: number;
 }
 
 export interface CreditRow {
