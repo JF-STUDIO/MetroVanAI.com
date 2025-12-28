@@ -613,6 +613,24 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const processFiles = (fileList: FileList | null) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
+    if (!job) {
+      pushNotice('error', 'Please create or select a project first.');
+      return;
+    }
+    const uploadAllowedStatuses = new Set([
+      'idle',
+      'draft',
+      'uploaded',
+      'input_resolved',
+      'failed',
+      'partial',
+      'completed',
+      'canceled'
+    ]);
+    if (!uploadAllowedStatuses.has(jobStatus)) {
+      pushNotice('info', 'Processing is in progress. Create a new project to upload more files.');
+      return;
+    }
     const isProcessing = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
     if (job && isProcessing) {
       pushNotice('error', 'Processing is already running. Please wait or cancel before adding more files.');
@@ -651,7 +669,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
     setImages(prev => [...prev, ...newItems]);
     if (activeIndex === null) setActiveIndex(images.length - 1 + newItems.length);
-    if (job && ['idle', 'draft', 'uploaded', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus)) {
+    if (uploadAllowedStatuses.has(jobStatus)) {
       setAutoUploadQueued(true);
     }
   };

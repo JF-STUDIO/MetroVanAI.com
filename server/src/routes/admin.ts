@@ -82,6 +82,9 @@ router.post('/admin/workflows', async (req: Request, res: Response) => {
     provider_name,
     workflow_remote_id,
     input_node_key,
+    input_node_id,
+    output_node_id,
+    api_mode,
     runtime_config
   } = req.body || {};
 
@@ -109,6 +112,10 @@ router.post('/admin/workflows', async (req: Request, res: Response) => {
   if (error || !workflow) return res.status(500).json({ error: error?.message || 'Failed to create workflow' });
 
   if (workflow_remote_id) {
+    const baseRuntimeConfig = runtime_config || {};
+    if (api_mode) baseRuntimeConfig.api_mode = api_mode;
+    if (input_node_id) baseRuntimeConfig.input_node_id = input_node_id;
+    if (output_node_id) baseRuntimeConfig.output_node_id = output_node_id;
     const versionPayload = {
       id: uuidv4(),
       workflow_id: workflow.id,
@@ -117,7 +124,7 @@ router.post('/admin/workflows', async (req: Request, res: Response) => {
       input_schema: {},
       output_schema: {},
       runtime_config: {
-        ...(runtime_config || {}),
+        ...baseRuntimeConfig,
         input_node_key: input_node_key || (runtime_config?.input_node_key ?? 'main_input')
       },
       notes: 'Initial version',
@@ -185,7 +192,18 @@ router.get('/admin/workflows/:id/versions', async (req: Request, res: Response) 
 
 router.post('/admin/workflows/:id/versions', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { workflow_remote_id, input_schema, output_schema, runtime_config, notes, is_published } = req.body || {};
+  const {
+    workflow_remote_id,
+    input_schema,
+    output_schema,
+    runtime_config,
+    notes,
+    is_published,
+    input_node_key,
+    input_node_id,
+    output_node_id,
+    api_mode
+  } = req.body || {};
   if (!workflow_remote_id) return res.status(400).json({ error: 'workflow_remote_id is required' });
 
   const { data: latest } = await (supabaseAdmin.from('workflow_versions') as any)
@@ -196,6 +214,12 @@ router.post('/admin/workflows/:id/versions', async (req: Request, res: Response)
     .maybeSingle();
 
   const nextVersion = (latest?.version || 0) + 1;
+  const mergedRuntime = runtime_config || {};
+  if (api_mode) mergedRuntime.api_mode = api_mode;
+  if (input_node_key) mergedRuntime.input_node_key = input_node_key;
+  if (input_node_id) mergedRuntime.input_node_id = input_node_id;
+  if (output_node_id) mergedRuntime.output_node_id = output_node_id;
+
   const payload = {
     id: uuidv4(),
     workflow_id: id,
@@ -203,7 +227,7 @@ router.post('/admin/workflows/:id/versions', async (req: Request, res: Response)
     workflow_remote_id,
     input_schema: input_schema || {},
     output_schema: output_schema || {},
-    runtime_config: runtime_config || {},
+    runtime_config: mergedRuntime,
     notes: notes || null,
     is_published: Boolean(is_published)
   };

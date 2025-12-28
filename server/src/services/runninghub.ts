@@ -51,6 +51,15 @@ const normalizeUrl = (baseUrl: string, path: string) => {
   return `${base}${suffix}`;
 };
 
+const normalizeTaskOpenApiBaseUrl = (baseUrl: string) => {
+  if (!baseUrl) return baseUrl;
+  const trimmed = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  if (trimmed.includes('api.runninghub.ai')) {
+    return 'https://www.runninghub.ai';
+  }
+  return trimmed;
+};
+
 let lastCreateAt = 0;
 let createLock = Promise.resolve();
 const waitForCreateSlot = async (minIntervalMs: number) => {
@@ -257,7 +266,7 @@ const downloadInputToFile = async (inputUrl: string) => {
 const uploadTaskOpenApi = async (baseUrl: string, filePath: string, runtimeConfig?: Record<string, unknown> | null) => {
   const apiKey = ensureApiKey();
   const uploadPath = (runtimeConfig?.upload_path as string | undefined) || '/task/openapi/upload';
-  const url = normalizeUrl(baseUrl, uploadPath);
+  const url = normalizeUrl(normalizeTaskOpenApiBaseUrl(baseUrl), uploadPath);
 
   const form = new FormData();
   form.append('apiKey', apiKey);
@@ -292,7 +301,7 @@ const createTaskOpenApi = async (
 ) => {
   const apiKey = ensureApiKey();
   const createPath = (runtimeConfig?.create_path as string | undefined) || '/task/openapi/create';
-  const url = normalizeUrl(baseUrl, createPath);
+  const url = normalizeUrl(normalizeTaskOpenApiBaseUrl(baseUrl), createPath);
   const payload = {
     apiKey,
     workflowId: workflowRemoteId,
@@ -421,7 +430,10 @@ export const fetchRunningHubStatus = async (
   const statusPath = apiMode === 'task_openapi'
     ? (runtimeConfig?.status_path as string | undefined) || '/task/openapi/status'
     : provider.status_path;
-  const url = normalizeUrl(provider.base_url, statusPath);
+  const url = normalizeUrl(
+    apiMode === 'task_openapi' ? normalizeTaskOpenApiBaseUrl(provider.base_url) : provider.base_url,
+    statusPath
+  );
 
   if (apiMode === 'task_openapi') {
     const apiKey = ensureApiKey();
@@ -458,7 +470,7 @@ const fetchTaskOpenApiOutputs = async (
 ) => {
   const apiKey = ensureApiKey();
   const outputsPath = (runtimeConfig?.outputs_path as string | undefined) || '/task/openapi/outputs';
-  const url = normalizeUrl(provider.base_url, outputsPath);
+  const url = normalizeUrl(normalizeTaskOpenApiBaseUrl(provider.base_url), outputsPath);
   const payload = { apiKey, taskId };
   const { data } = await axios.post(url, payload, {
     headers: buildHeaders(),

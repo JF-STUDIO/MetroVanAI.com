@@ -15,12 +15,18 @@ type NewWorkflowForm = {
   provider_name: string;
   workflow_remote_id: string;
   input_node_key: string;
+  input_node_id: string;
+  output_node_id: string;
+  api_mode: string;
   runtime_config: string;
 };
 
 type VersionDraft = {
   workflow_remote_id: string;
   input_node_key: string;
+  input_node_id: string;
+  output_node_id: string;
+  api_mode: string;
   runtime_config: string;
   notes: string;
   is_published: boolean;
@@ -31,11 +37,38 @@ type CreditDraft = {
   note: string;
 };
 
-const DEFAULT_INPUT_NODE = 'main_input';
+const DEFAULT_INPUT_NODE = 'image';
+const DEFAULT_API_MODE = 'task_openapi';
 
 const parseRuntimeConfig = (value: string) => {
   if (!value || value.trim().length === 0) return undefined;
   return JSON.parse(value);
+};
+
+const buildRuntimeConfigText = (runtimeConfig?: Record<string, unknown> | null) => {
+  if (!runtimeConfig) return '';
+  const cleaned = { ...runtimeConfig } as Record<string, unknown>;
+  delete cleaned.input_node_key;
+  delete cleaned.input_node_id;
+  delete cleaned.output_node_id;
+  delete cleaned.api_mode;
+  const keys = Object.keys(cleaned);
+  if (keys.length === 0) return '';
+  return JSON.stringify(cleaned, null, 2);
+};
+
+const buildDraftFromWorkflow = (workflow?: AdminWorkflow | null): VersionDraft => {
+  const runtimeConfig = workflow?.published_version?.runtime_config as Record<string, unknown> | undefined;
+  return {
+    workflow_remote_id: workflow?.published_version?.workflow_remote_id || '',
+    input_node_key: (runtimeConfig?.input_node_key as string | undefined) || DEFAULT_INPUT_NODE,
+    input_node_id: runtimeConfig?.input_node_id ? String(runtimeConfig.input_node_id) : '',
+    output_node_id: runtimeConfig?.output_node_id ? String(runtimeConfig.output_node_id) : '',
+    api_mode: (runtimeConfig?.api_mode as string | undefined) || DEFAULT_API_MODE,
+    runtime_config: buildRuntimeConfigText(runtimeConfig),
+    notes: '',
+    is_published: false
+  };
 };
 
 const Admin: React.FC<{ user: User }> = ({ user }) => {
@@ -59,6 +92,9 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     provider_name: 'runninghub_ai',
     workflow_remote_id: '',
     input_node_key: DEFAULT_INPUT_NODE,
+    input_node_id: '',
+    output_node_id: '',
+    api_mode: DEFAULT_API_MODE,
     runtime_config: ''
   });
   const [versionDrafts, setVersionDrafts] = useState<Record<string, VersionDraft>>({});
@@ -152,7 +188,11 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     setNotice(null);
     setError(null);
     try {
-      const runtimeConfig = parseRuntimeConfig(newWorkflow.runtime_config);
+      const runtimeConfig = parseRuntimeConfig(newWorkflow.runtime_config) || {};
+      if (newWorkflow.api_mode) runtimeConfig.api_mode = newWorkflow.api_mode;
+      if (newWorkflow.input_node_key) runtimeConfig.input_node_key = newWorkflow.input_node_key.trim();
+      if (newWorkflow.input_node_id) runtimeConfig.input_node_id = newWorkflow.input_node_id.trim();
+      if (newWorkflow.output_node_id) runtimeConfig.output_node_id = newWorkflow.output_node_id.trim();
       const payload: Record<string, unknown> = {
         slug: newWorkflow.slug.trim(),
         display_name: newWorkflow.display_name.trim(),
@@ -184,6 +224,9 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         provider_name: newWorkflow.provider_name,
         workflow_remote_id: '',
         input_node_key: DEFAULT_INPUT_NODE,
+        input_node_id: '',
+        output_node_id: '',
+        api_mode: DEFAULT_API_MODE,
         runtime_config: ''
       });
       setNotice('Workflow created.');
@@ -240,9 +283,10 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     }
     try {
       const runtimeConfig = parseRuntimeConfig(draft.runtime_config) || {};
-      if (draft.input_node_key) {
-        runtimeConfig.input_node_key = draft.input_node_key;
-      }
+      if (draft.api_mode) runtimeConfig.api_mode = draft.api_mode;
+      if (draft.input_node_key) runtimeConfig.input_node_key = draft.input_node_key;
+      if (draft.input_node_id) runtimeConfig.input_node_id = draft.input_node_id;
+      if (draft.output_node_id) runtimeConfig.output_node_id = draft.output_node_id;
       const payload = {
         workflow_remote_id: draft.workflow_remote_id.trim(),
         runtime_config: runtimeConfig,
@@ -256,6 +300,9 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         [workflowId]: {
           workflow_remote_id: '',
           input_node_key: DEFAULT_INPUT_NODE,
+          input_node_id: '',
+          output_node_id: '',
+          api_mode: DEFAULT_API_MODE,
           runtime_config: '',
           notes: '',
           is_published: false
@@ -399,6 +446,21 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
               <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Input Node Key</label>
               <input value={newWorkflow.input_node_key} onChange={(e) => setNewWorkflow(prev => ({ ...prev, input_node_key: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
             </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Input Node ID</label>
+              <input value={newWorkflow.input_node_id} onChange={(e) => setNewWorkflow(prev => ({ ...prev, input_node_id: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="31" />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Output Node ID</label>
+              <input value={newWorkflow.output_node_id} onChange={(e) => setNewWorkflow(prev => ({ ...prev, output_node_id: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="57" />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">API Mode</label>
+              <select value={newWorkflow.api_mode} onChange={(e) => setNewWorkflow(prev => ({ ...prev, api_mode: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3">
+                <option value="task_openapi">task_openapi</option>
+                <option value="workflow">workflow</option>
+              </select>
+            </div>
             <div className="lg:col-span-2">
               <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Description</label>
               <textarea value={newWorkflow.description} onChange={(e) => setNewWorkflow(prev => ({ ...prev, description: e.target.value }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 h-24" />
@@ -431,13 +493,7 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
           )}
           {workflows.map(workflow => {
             const versions = versionsByWorkflow[workflow.id] || [];
-            const draft = versionDrafts[workflow.id] || {
-              workflow_remote_id: '',
-              input_node_key: DEFAULT_INPUT_NODE,
-              runtime_config: '',
-              notes: '',
-              is_published: false
-            };
+            const draft = versionDrafts[workflow.id] || buildDraftFromWorkflow(workflow);
             const testInput = testInputs[workflow.id] || '';
             const testResult = testResults[workflow.id];
             const isExpanded = expandedWorkflowId === workflow.id;
@@ -550,6 +606,12 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
                         <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Create Version</h3>
                         <input value={draft.workflow_remote_id} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, workflow_remote_id: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="workflow_remote_id" />
                         <input value={draft.input_node_key} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, input_node_key: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="input_node_key" />
+                        <input value={draft.input_node_id} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, input_node_id: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="input_node_id (e.g. 31)" />
+                        <input value={draft.output_node_id} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, output_node_id: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="output_node_id (e.g. 57)" />
+                        <select value={draft.api_mode} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, api_mode: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3">
+                          <option value="task_openapi">api_mode: task_openapi</option>
+                          <option value="workflow">api_mode: workflow</option>
+                        </select>
                         <textarea value={draft.runtime_config} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, runtime_config: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 h-20" placeholder='{"poll_interval": 4000}' />
                         <div className="flex items-center gap-3">
                           <input type="checkbox" checked={draft.is_published} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, is_published: e.target.checked } }))} />
