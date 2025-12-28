@@ -189,16 +189,11 @@ const dedupeNames = (names: string[]) => {
   });
 };
 
-const getGroupUnits = (group: { raw_count?: number | null }) => {
-  const count = Number(group.raw_count) || 0;
-  return count > 0 ? count : 1;
-};
-
 const applyCreditAdjustments = async (
   job: { id: string; user_id: string; workflow_id: string; settled_units?: number | null; reserved_units?: number | null },
-  totalUnits: number,
-  successUnits: number,
-  finalFailureUnits: number
+  totalGroups: number,
+  successCount: number,
+  finalFailureCount: number
 ) => {
   const { data: workflow } = await (supabaseAdmin.from('workflows') as any)
     .select('credit_per_unit')
@@ -207,18 +202,18 @@ const applyCreditAdjustments = async (
 
   const creditPerUnit = workflow?.credit_per_unit || 1;
   const prevSettled = job.settled_units || 0;
-  const prevReserved = job.reserved_units ?? totalUnits;
-  const releasedAlready = Math.max(totalUnits - prevReserved - prevSettled, 0);
+  const prevReserved = job.reserved_units ?? totalGroups;
+  const releasedAlready = Math.max(totalGroups - prevReserved - prevSettled, 0);
 
-  const settleDelta = Math.max(successUnits - prevSettled, 0);
-  const releaseDelta = Math.max(finalFailureUnits - releasedAlready, 0);
+  const settleDelta = Math.max(successCount - prevSettled, 0);
+  const releaseDelta = Math.max(finalFailureCount - releasedAlready, 0);
 
   if (settleDelta > 0) {
     await (supabaseAdmin as any).rpc('credit_settle', {
       p_user_id: job.user_id,
       p_job_id: job.id,
       p_units: settleDelta * creditPerUnit,
-      p_idempotency_key: `settle:${job.id}:${prevSettled}->${successUnits}`,
+      p_idempotency_key: `settle:${job.id}:${prevSettled}->${successCount}`,
       p_note: 'Settle credits for completed groups'
     });
   }
@@ -228,13 +223,13 @@ const applyCreditAdjustments = async (
       p_user_id: job.user_id,
       p_job_id: job.id,
       p_units: releaseDelta * creditPerUnit,
-      p_idempotency_key: `release:${job.id}:${releasedAlready}->${finalFailureUnits}`,
+      p_idempotency_key: `release:${job.id}:${releasedAlready}->${finalFailureCount}`,
       p_note: 'Release credits for failed groups'
     });
   }
 
-  const remainingReserved = Math.max(totalUnits - successUnits - finalFailureUnits, 0);
-  return { settled_units: successUnits, reserved_units: remainingReserved };
+  const remainingReserved = Math.max(totalGroups - successCount - finalFailureCount, 0);
+  return { settled_units: successCount, reserved_units: remainingReserved };
 };
 
 const releaseCreditsForFailure = async (jobId: string, errorMessage: string) => {
@@ -247,16 +242,12 @@ const releaseCreditsForFailure = async (jobId: string, errorMessage: string) => 
   if (!job) return;
 
   const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
-    .select('status, raw_count')
+    .select('status')
     .eq('job_id', jobId);
 
-  const totalUnits = groups
-    ? groups.reduce((sum: number, group: any) => sum + getGroupUnits(group), 0)
-    : (job.reserved_units ?? 0) || 0;
-  const successUnits = groups
-    ? groups.filter((group: any) => group.status === 'ai_ok').reduce((sum: number, group: any) => sum + getGroupUnits(group), 0)
-    : 0;
-  const finalFailureUnits = Math.max(totalUnits - successUnits, 0);
+  const totalGroups = groups?.length || (job.reserved_units ?? 0) || 0;
+  const successCount = groups ? groups.filter((group: any) => group.status === 'ai_ok').length : 0;
+  const finalFailureCount = Math.max(totalGroups - successCount, 0);
 
   if (groups && groups.length > 0) {
     await (supabaseAdmin.from('job_groups') as any)
@@ -265,8 +256,8 @@ const releaseCreditsForFailure = async (jobId: string, errorMessage: string) => 
       .neq('status', 'ai_ok');
   }
 
-  if (totalUnits > 0) {
-    const creditUpdate = await applyCreditAdjustments(job, totalUnits, successUnits, finalFailureUnits);
+  if (totalGroups > 0) {
+    const creditUpdate = await applyCreditAdjustments(job, totalGroups, successCount, finalFailureCount);
     await (supabaseAdmin.from('jobs') as any)
       .update({ ...creditUpdate })
       .eq('id', jobId);
@@ -287,7 +278,7 @@ const finalizePipelineJob = async (
   runtimeConfig: Record<string, unknown>
 ) => {
   const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
-    .select('id, group_index, status, output_bucket, output_key, output_filename, attempts, raw_count')
+    .select('id, group_index, status, output_bucket, output_key, output_filename, attempts')
     .eq('job_id', job.id)
     .order('group_index', { ascending: true });
 
@@ -302,8 +293,7 @@ const finalizePipelineJob = async (
   const maxAttempts = Number(runtimeConfig.max_attempts ?? 3);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-zip-'));
   const zipEntries: { path: string; name: string }[] = [];
-  const totalUnits = groups.reduce((sum: number, group: any) => sum + getGroupUnits(group), 0);
-  const successful: { output_key: string; output_filename: string; units: number }[] = [];
+  const successful: { output_key: string; output_filename: string }[] = [];
 
   try {
     for (const group of groups) {
@@ -326,23 +316,19 @@ const finalizePipelineJob = async (
       }
 
       const outputName = group.output_filename || path.basename(group.output_key);
-      successful.push({ output_key: group.output_key, output_filename: outputName, units: getGroupUnits(group) });
+      successful.push({ output_key: group.output_key, output_filename: outputName });
     }
 
     const { data: refreshedGroups } = await (supabaseAdmin.from('job_groups') as any)
-      .select('status, attempts, raw_count')
+      .select('status, attempts')
       .eq('job_id', job.id);
 
     const successCount = successful.length;
-    const successUnits = successful.reduce((sum, item) => sum + item.units, 0);
-    const failedFinalUnits = (refreshedGroups || []).reduce((sum: number, group: any) => {
-      if (group.status === 'failed' && (group.attempts || 0) >= maxAttempts) {
-        return sum + getGroupUnits(group);
-      }
-      return sum;
-    }, 0);
+    const failedFinalCount = (refreshedGroups || []).filter((group: any) => (
+      group.status === 'failed' && (group.attempts || 0) >= maxAttempts
+    )).length;
 
-    const creditUpdate = await applyCreditAdjustments(job, totalUnits, successUnits, failedFinalUnits);
+    const creditUpdate = await applyCreditAdjustments(job, totalGroups, successCount, failedFinalCount);
 
     if (successCount === 0) {
       await (supabaseAdmin.from('jobs') as any)
