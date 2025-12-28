@@ -621,17 +621,18 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       'idle',
       'draft',
       'uploaded',
+      'analyzing',
       'input_resolved',
       'failed',
       'partial',
       'completed',
       'canceled'
     ]);
-    if (!uploadAllowedStatuses.has(jobStatus)) {
+    const isProcessing = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
+    if (!uploadAllowedStatuses.has(jobStatus) || isProcessing) {
       pushNotice('info', 'Processing is in progress. Create a new project to upload more files.');
       return;
     }
-    const isProcessing = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
     if (job && isProcessing) {
       pushNotice('error', 'Processing is already running. Please wait or cancel before adding more files.');
       return;
@@ -785,6 +786,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     'idle',
     'draft',
     'uploaded',
+    'analyzing',
     'input_resolved',
     'failed',
     'partial',
@@ -1246,8 +1248,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
   const canEnhance = jobStatus === 'input_resolved' && !hasPendingUploads;
-  const canUploadBatch = hasPendingUploads && ['idle', 'draft', 'uploaded', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
-  const canAddMore = ['idle', 'draft', 'uploaded', 'input_resolved'].includes(jobStatus);
+  const canUploadBatch = hasPendingUploads && ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
+  const canAddMore = ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved'].includes(jobStatus);
   const downloadLabel = downloadType === 'jpg' ? 'Download JPG' : 'Download ZIP';
   const showReadyToEnhanceNotice = uploadComplete && jobStatus === 'input_resolved' && !processingActive;
   const showProcessingNotice = uploadComplete && processingActive;
