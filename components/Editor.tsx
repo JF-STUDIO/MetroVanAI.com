@@ -107,6 +107,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [showNewProjectForm, setShowNewProjectForm] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const editorStateKey = 'mvai:editor_state';
+  const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
   const pipelineStages = new Set([
     'reserved',
     'input_resolved',
@@ -233,7 +234,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   useEffect(() => {
     if (resumeAttempted || activeTool || workflows.length === 0) return;
     let cached: { jobId?: string; workflowId?: string } | null = null;
-    let editorState: { mode?: 'projects' | 'studio'; workflowId?: string; jobId?: string } | null = null;
+    let editorState: {
+      mode?: 'projects' | 'studio';
+      workflowId?: string;
+      jobId?: string;
+      search?: string;
+      activeIndex?: number | null;
+    } | null = null;
     try {
       cached = JSON.parse(localStorage.getItem('mvai:last_job') || 'null');
     } catch (error) {
@@ -251,7 +258,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setActiveTool(workflow);
         setShowProjectInput(true);
         setShowNewProjectForm(false);
-        setProjectSearch('');
+        setProjectSearch(editorState.search || '');
         setImages([]);
         setActiveIndex(null);
         setZipUrl(null);
@@ -281,6 +288,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setPipelineItems([]);
     setPipelineProgress(null);
     setUploadComplete(true);
+    setPendingActiveIndex(typeof editorState?.activeIndex === 'number' ? editorState.activeIndex : null);
     jobService.getPipelineStatus(jobId)
       .then(async (response) => {
         const pipelineJob = response.job;
@@ -306,13 +314,20 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       });
   }, [workflows, activeTool, resumeAttempted]);
 
-  const saveEditorState = (mode: 'projects' | 'studio', workflowId?: string | null, jobId?: string | null) => {
-    const payload = {
-      mode,
-      workflowId: workflowId || undefined,
-      jobId: jobId || undefined
-    };
-    localStorage.setItem(editorStateKey, JSON.stringify(payload));
+  const saveEditorState = (payload: {
+    mode: 'projects' | 'studio';
+    workflowId?: string | null;
+    jobId?: string | null;
+    search?: string;
+    activeIndex?: number | null;
+  }) => {
+    localStorage.setItem(editorStateKey, JSON.stringify({
+      mode: payload.mode,
+      workflowId: payload.workflowId || undefined,
+      jobId: payload.jobId || undefined,
+      search: payload.search ?? undefined,
+      activeIndex: typeof payload.activeIndex === 'number' ? payload.activeIndex : undefined
+    }));
   };
 
   const clearEditorState = () => {
@@ -337,7 +352,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setShowNewProjectForm(false);
     if (item.workflow_id) {
       saveLastJob(item.id, item.workflow_id);
-      saveEditorState('studio', item.workflow_id, item.id);
+      saveEditorState({ mode: 'studio', workflowId: item.workflow_id, jobId: item.id, activeIndex });
     }
 
     try {
@@ -560,7 +575,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setLightboxUrl(null);
     setUploadComplete(false);
     localStorage.removeItem('mvai:last_job');
-    saveEditorState('projects', tool.id, null);
+    saveEditorState({ mode: 'projects', workflowId: tool.id, jobId: null, search: '' });
   };
   
   const handleProjectCreate = async (e: React.FormEvent) => {
@@ -577,7 +592,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPipelineProgress(null);
       setLightboxUrl(null);
       saveLastJob(newJob.id, activeTool.id);
-      saveEditorState('studio', activeTool.id, newJob.id);
+      saveEditorState({ mode: 'studio', workflowId: activeTool.id, jobId: newJob.id, activeIndex: null });
       setHistory(prev => [{
         ...(newJob as Job),
         workflows: { display_name: activeTool.display_name },
@@ -644,10 +659,36 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       if (activeIndex !== null) setActiveIndex(null);
       return;
     }
+    if (pendingActiveIndex !== null) {
+      const nextIndex = Math.min(Math.max(pendingActiveIndex, 0), galleryItems.length - 1);
+      setActiveIndex(nextIndex);
+      setPendingActiveIndex(null);
+      return;
+    }
     if (activeIndex === null || activeIndex >= galleryItems.length) {
       setActiveIndex(0);
     }
-  }, [galleryItems.length, activeIndex]);
+  }, [galleryItems.length, activeIndex, pendingActiveIndex]);
+
+  useEffect(() => {
+    if (!showProjectInput || !activeTool) return;
+    saveEditorState({
+      mode: 'projects',
+      workflowId: activeTool.id,
+      jobId: null,
+      search: projectSearch
+    });
+  }, [projectSearch, showProjectInput, activeTool]);
+
+  useEffect(() => {
+    if (!job?.id || showProjectInput) return;
+    saveEditorState({
+      mode: 'studio',
+      workflowId: activeTool?.id || job.workflow_id || undefined,
+      jobId: job.id,
+      activeIndex
+    });
+  }, [activeIndex, job?.id, showProjectInput, activeTool?.id, job?.workflow_id]);
 
   // VIEW 1: Tool Selector
   if (!activeTool) {
