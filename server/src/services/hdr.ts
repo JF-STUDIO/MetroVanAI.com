@@ -145,7 +145,39 @@ const convertRawToTiff = async (inputPath: string, outputPath: string) => {
   }
 
   await runCommand(dcraw, ['-6', '-T', '-W', '-o', '1', '-q', '3', inputPath]);
-  const generatedPath = `${inputPath}.tiff`;
+  const dir = path.dirname(inputPath);
+  const base = path.basename(inputPath);
+  const candidates = [
+    `${inputPath}.tiff`,
+    `${inputPath}.tif`,
+    `${inputPath}.TIFF`,
+    `${inputPath}.TIF`
+  ];
+  let generatedPath: string | null = null;
+
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) {
+      generatedPath = candidate;
+      break;
+    }
+  }
+
+  if (!generatedPath) {
+    const files = await fs.readdir(dir);
+    const lowerBase = base.toLowerCase();
+    const match = files.find((name) => {
+      const lower = name.toLowerCase();
+      return lower === `${lowerBase}.tiff` || lower === `${lowerBase}.tif`;
+    });
+    if (match) {
+      generatedPath = path.join(dir, match);
+    }
+  }
+
+  if (!generatedPath) {
+    throw new Error('RAW conversion output not found');
+  }
+
   await fs.rename(generatedPath, outputPath);
 };
 
