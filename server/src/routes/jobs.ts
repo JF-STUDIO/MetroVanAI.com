@@ -34,7 +34,7 @@ const runWithConcurrency = async <T>(
 };
 
 const exposurePlan = (count: number) => {
-    const sizes = [7, 5, 3];
+    const sizes = [5, 3, 7];
     const memo = new Map<number, number[]>();
     const best = (remaining: number): number[] => {
         if (memo.has(remaining)) return memo.get(remaining)!;
@@ -142,10 +142,36 @@ const scoreCamera = (files: any[]) => {
     return same ? 0.1 : 0;
 };
 
+const extractSequenceToken = (value: string) => {
+    const base = path.basename(value || '');
+    const match = base.match(/^(.*?)(\d+)(\.[^.]+)?$/);
+    if (!match) return null;
+    return {
+        prefix: match[1],
+        num: Number(match[2]),
+        pad: match[2].length
+    };
+};
+
+const hasSequentialFilenames = (files: any[]) => {
+    const tokens = files.map((file) => extractSequenceToken(file.filename || file.r2_key || ''));
+    if (tokens.some((token) => !token || Number.isNaN(token.num))) return false;
+    const prefix = tokens[0]!.prefix;
+    if (!tokens.every((token) => token!.prefix === prefix)) return false;
+    const numbers = tokens.map((token) => token!.num).sort((a, b) => a - b);
+    for (let index = 1; index < numbers.length; index += 1) {
+        if (numbers[index] - numbers[index - 1] !== 1) return false;
+    }
+    return true;
+};
+
 const computeHdrConfidence = (files: any[]) => {
     if (files.length < 2) return 0;
-    const score = scoreTime(files) + scoreExposureSteps(files) + scoreParams(files) + scoreCamera(files);
-    return Math.max(0, Math.min(1, score));
+    const timeScore = scoreTime(files);
+    const score = timeScore + scoreExposureSteps(files) + scoreParams(files) + scoreCamera(files);
+    const preferredSize = files.length === 3 || files.length === 5 || files.length === 7;
+    const fallback = preferredSize && (timeScore >= 0.3 || hasSequentialFilenames(files)) ? 0.7 : 0;
+    return Math.max(0, Math.min(1, Math.max(score, fallback)));
 };
 
 // 1. 获取所有工具

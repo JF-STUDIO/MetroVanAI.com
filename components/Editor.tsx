@@ -993,7 +993,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const showWaitingForResults = !showUploadOnly && galleryItems.length === 0 && pipelineStages.has(jobStatus);
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !currentImage && images.length === 0;
   const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
-  const showAiProgress = !showUploadOnly && pipelineStages.has(jobStatus) && !hdrProcessing && pipelineProgressValue !== null;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
@@ -1016,15 +1015,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               {showHdrProgress && (
                 <span className="text-[9px] text-gray-400 font-bold">| HDR {hdrProgressValue}%</span>
               )}
-              {showAiProgress && (
-                <span className="text-[9px] text-gray-400 font-bold">| AI {pipelineProgressValue}%</span>
-              )}
             </div>
-            {(jobStatus === 'uploading' || showHdrProgress || showAiProgress) && (
+            {(jobStatus === 'uploading' || showHdrProgress) && (
               <div className="mt-2 h-1.5 w-48 rounded-full bg-white/10 overflow-hidden">
                 <div
                   className="h-full bg-indigo-500 transition-all"
-                  style={{ width: `${jobStatus === 'uploading' ? uploadProgress : showHdrProgress ? hdrProgressValue : pipelineProgressValue || 0}%` }}
+                  style={{ width: `${jobStatus === 'uploading' ? uploadProgress : hdrProgressValue}%` }}
                 ></div>
               </div>
             )}
