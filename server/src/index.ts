@@ -13,7 +13,7 @@ const app = express();
 const port = process.env.PORT || 4000;
 
 
-const allowedOrigins = (process.env.CORS_ORIGIN || 'https://metro-van-ai-com.vercel.app')
+const allowedOrigins = (process.env.CORS_ORIGIN || 'https://metro-van-ai-com.vercel.app,https://metrovanai.com,https://www.metrovanai.com')
   .split(',')
   .map(origin => origin.trim())
   .filter(Boolean);

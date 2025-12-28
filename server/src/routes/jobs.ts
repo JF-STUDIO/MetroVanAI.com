@@ -327,57 +327,77 @@ router.delete('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Respon
     const { jobId } = req.params;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    const { data: job, error: jobError } = await (supabaseAdmin
-        .from('jobs') as any)
-        .select('id, user_id, status, reserved_units')
-        .eq('id', jobId)
-        .eq('user_id', userId)
-        .single();
+    try {
+        const { data: job, error: jobError } = await (supabaseAdmin
+            .from('jobs') as any)
+            .select('id, user_id, status, reserved_units')
+            .eq('id', jobId)
+            .eq('user_id', userId)
+            .single();
 
-    if (jobError || !job) return res.status(404).json({ error: 'Job not found' });
+        if (jobError || !job) return res.status(404).json({ error: 'Job not found' });
 
-    const busyStatuses = new Set([
-        'analyzing',
-        'reserved',
-        'preprocessing',
-        'hdr_processing',
-        'workflow_running',
-        'ai_processing',
-        'postprocess',
-        'packaging',
-        'zipping',
-        'processing',
-        'queued'
-    ]);
+        const busyStatuses = new Set([
+            'analyzing',
+            'reserved',
+            'preprocessing',
+            'hdr_processing',
+            'workflow_running',
+            'ai_processing',
+            'postprocess',
+            'packaging',
+            'zipping',
+            'processing',
+            'queued'
+        ]);
 
-    if (busyStatuses.has(job.status)) {
-        return res.status(409).json({ error: 'Job is processing. Please retry after completion.' });
+        if (busyStatuses.has(job.status)) {
+            return res.status(409).json({ error: 'Job is processing. Please retry after completion.' });
+        }
+
+        if (job.reserved_units && job.reserved_units > 0) {
+            const releaseKey = `release:${jobId}:delete`;
+            const { error: releaseError } = await (supabaseAdmin as any).rpc('credit_release', {
+                p_user_id: userId,
+                p_job_id: jobId,
+                p_units: job.reserved_units,
+                p_idempotency_key: releaseKey,
+                p_note: 'Release credits on delete'
+            });
+            if (releaseError) {
+                throw releaseError;
+            }
+        }
+
+        const rawPrefix = `u/${userId}/jobs/${jobId}/raw/`;
+        const legacyPrefix = `u/${userId}/jobs/${jobId}/`;
+        const deleteResults = await Promise.allSettled([
+            deletePrefix(RAW_BUCKET, rawPrefix),
+            deletePrefix(HDR_BUCKET, `jobs/${jobId}/`),
+            deletePrefix(OUTPUT_BUCKET, `jobs/${jobId}/`),
+            deletePrefix(BUCKET_NAME, legacyPrefix)
+        ]);
+        const deleteErrors = deleteResults
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map((result) => result.reason?.message || String(result.reason));
+        if (deleteErrors.length) {
+            throw new Error(`R2 delete failed: ${deleteErrors.join(' | ')}`);
+        }
+
+        const { error: filesError } = await (supabaseAdmin.from('job_files') as any).delete().eq('job_id', jobId);
+        const { error: groupsError } = await (supabaseAdmin.from('job_groups') as any).delete().eq('job_id', jobId);
+        const { error: assetsError } = await (supabaseAdmin.from('job_assets') as any).delete().eq('job_id', jobId);
+        const { error: jobsError } = await (supabaseAdmin.from('jobs') as any).delete().eq('id', jobId).eq('user_id', userId);
+        if (filesError || groupsError || assetsError || jobsError) {
+            throw new Error(filesError?.message || groupsError?.message || assetsError?.message || jobsError?.message || 'Delete failed');
+        }
+
+        res.json({ deleted: true });
+    } catch (error) {
+        console.error('Delete job failed:', { jobId, userId, error });
+        const detail = error instanceof Error ? error.message : 'Unknown error';
+        res.status(500).json({ error: 'Delete failed', detail });
     }
-
-    if (job.reserved_units && job.reserved_units > 0) {
-        const releaseKey = `release:${jobId}:delete`;
-        await (supabaseAdmin as any).rpc('credit_release', {
-            p_user_id: userId,
-            p_job_id: jobId,
-            p_units: job.reserved_units,
-            p_idempotency_key: releaseKey,
-            p_note: 'Release credits on delete'
-        });
-    }
-
-    const rawPrefix = `u/${userId}/jobs/${jobId}/raw/`;
-    const legacyPrefix = `u/${userId}/jobs/${jobId}/`;
-    await deletePrefix(RAW_BUCKET, rawPrefix);
-    await deletePrefix(HDR_BUCKET, `jobs/${jobId}/`);
-    await deletePrefix(OUTPUT_BUCKET, `jobs/${jobId}/`);
-    await deletePrefix(BUCKET_NAME, legacyPrefix);
-
-    await (supabaseAdmin.from('job_files') as any).delete().eq('job_id', jobId);
-    await (supabaseAdmin.from('job_groups') as any).delete().eq('job_id', jobId);
-    await (supabaseAdmin.from('job_assets') as any).delete().eq('job_id', jobId);
-    await (supabaseAdmin.from('jobs') as any).delete().eq('id', jobId).eq('user_id', userId);
-
-    res.json({ deleted: true });
 });
 
 // 8. 获取个人资料 (含积分)
