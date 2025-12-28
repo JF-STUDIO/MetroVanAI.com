@@ -351,16 +351,39 @@ router.delete('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Respon
             'queued'
         ]);
 
+        let reservedUnits = job.reserved_units || 0;
         if (busyStatuses.has(job.status)) {
-            return res.status(409).json({ error: 'Job is processing. Please retry after completion.' });
+            if (reservedUnits > 0) {
+                const releaseKey = `release:${jobId}:cancel_for_delete`;
+                const { error: releaseError } = await (supabaseAdmin as any).rpc('credit_release', {
+                    p_user_id: userId,
+                    p_job_id: jobId,
+                    p_units: reservedUnits,
+                    p_idempotency_key: releaseKey,
+                    p_note: 'Release credits on delete'
+                });
+                if (releaseError) {
+                    throw releaseError;
+                }
+                reservedUnits = 0;
+            }
+            await (supabaseAdmin.from('jobs') as any)
+                .update({ status: 'canceled', error_message: 'Canceled by delete', reserved_units: 0 })
+                .eq('id', jobId)
+                .eq('user_id', userId);
+            try {
+                await jobQueue.remove(`pipeline:${jobId}`);
+            } catch (error) {
+                console.warn('Failed to remove queued job:', (error as Error).message);
+            }
         }
 
-        if (job.reserved_units && job.reserved_units > 0) {
+        if (reservedUnits > 0) {
             const releaseKey = `release:${jobId}:delete`;
             const { error: releaseError } = await (supabaseAdmin as any).rpc('credit_release', {
                 p_user_id: userId,
                 p_job_id: jobId,
-                p_units: job.reserved_units,
+                p_units: reservedUnits,
                 p_idempotency_key: releaseKey,
                 p_note: 'Release credits on delete'
             });
