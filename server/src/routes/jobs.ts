@@ -63,7 +63,7 @@ const PNG_EXTENSIONS = new Set(['png']);
 const MAX_UPLOAD_FILES = Number.parseInt(process.env.MAX_UPLOAD_FILES || '0', 10);
 const MAX_FILE_BYTES = Number.parseInt(process.env.MAX_FILE_BYTES || `${200 * 1024 * 1024}`, 10);
 const MAX_TOTAL_BYTES = Number.parseInt(process.env.MAX_UPLOAD_BYTES || '0', 10);
-const SSE_POLL_MS = Number.parseInt(process.env.SSE_POLL_MS || '2000', 10);
+const SSE_POLL_MS = Number.parseInt(process.env.SSE_POLL_MS || '1000', 10);
 
 const sanitizeFilename = (value: string | null | undefined, fallback = 'image') => {
     const raw = value || fallback;
@@ -1370,6 +1370,7 @@ router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Re
     const payload = await buildPipelineStatusPayload(jobId, userId);
     if (!payload) return res.status(404).json({ error: 'Job not found' });
 
+    res.setHeader('Cache-Control', 'no-store');
     res.json(payload);
 });
 
@@ -1383,10 +1384,10 @@ router.get('/jobs/:jobId/stream', authenticateSse, async (req: AuthRequest, res:
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.write('retry: 3000\n\n');
     res.flushHeaders?.();
 
     let closed = false;
-    let lastPayload = '';
     let pending = false;
     const terminalStatuses = new Set(['completed', 'partial', 'failed', 'canceled']);
 
@@ -1413,11 +1414,7 @@ router.get('/jobs/:jobId/stream', authenticateSse, async (req: AuthRequest, res:
                 closeStream();
                 return;
             }
-            const serialized = JSON.stringify(payload);
-            if (serialized !== lastPayload) {
-                lastPayload = serialized;
-                sendEvent('status', payload);
-            }
+            sendEvent('status', payload);
             if (terminalStatuses.has(payload.job.status)) {
                 sendEvent('done', { status: payload.job.status });
                 closeStream();

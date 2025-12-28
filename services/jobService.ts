@@ -78,7 +78,9 @@ export const jobService = {
   },
 
   getPipelineStatus: async (jobId: string) => {
-    const response = await api.get(`/jobs/${jobId}/status`);
+    const response = await api.get(`/jobs/${jobId}/status`, {
+      params: { t: Date.now() }
+    });
     return response.data;
   },
 
@@ -93,7 +95,9 @@ export const jobService = {
   },
 
   getJobStatus: async (jobId: string) => {
-    const response = await api.get(`/jobs/${jobId}`);
+    const response = await api.get(`/jobs/${jobId}`, {
+      params: { t: Date.now() }
+    });
     return response.data;
   },
 

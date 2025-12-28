@@ -12,6 +12,8 @@ import { createRedis } from './services/redis.js';
 const app = express();
 const port = process.env.PORT || 4000;
 
+// Avoid 304 caching for polling endpoints (keep status updates fresh).
+app.set('etag', false);
 
 const defaultOrigins = [
   'https://metro-van-ai-com.vercel.app',
@@ -28,7 +30,9 @@ const localOrigins = ['http://localhost:5173', 'http://localhost:3000'];
 const finalAllowedOrigins = Array.from(new Set([...defaultOrigins, ...envOrigins, ...localOrigins].map(normalizeOrigin)));
 const allowAllOrigins = finalAllowedOrigins.includes('*');
 
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 app.use(cors({
   origin: function(origin, callback) {
     // allow requests with no origin (like mobile apps, curl, etc.)
