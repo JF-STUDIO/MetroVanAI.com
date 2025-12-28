@@ -325,6 +325,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         eventSource?.close();
       };
 
+      if (!fallbackStarted) {
+        fallbackStarted = true;
+        startPipelinePolling();
+      }
+
       safetyTimer = setInterval(() => {
         if (destroyed) return;
         if (Date.now() - lastEventAt > 10000 && !fallbackStarted) {
@@ -780,19 +785,31 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
       await jobService.uploadComplete(job.id, uploadedFiles);
       setUploadComplete(true);
+      setJobStatus('analyzing');
       const analysis = await jobService.analyzeJob(job.id);
       const estimatedUnits = analysis?.estimated_units || 0;
       setJob(prev => (prev ? { ...prev, estimated_units: estimatedUnits } : prev));
       setJobStatus('input_resolved');
       setPreviewSummary({ total: uploadedFiles.length, ready: 0 });
-      await jobService.generatePreviews(job.id);
-      const previewResponse = await jobService.getPipelineStatus(job.id);
-      if (Array.isArray(previewResponse.items)) {
-        setPipelineItems(previewResponse.items);
-      }
-      if (previewResponse?.previews) {
-        setPreviewSummary(previewResponse.previews);
-      }
+      const hydratePipeline = async () => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const previewResponse = await jobService.getPipelineStatus(job.id);
+          if (Array.isArray(previewResponse.items)) {
+            setPipelineItems(previewResponse.items);
+          }
+          if (previewResponse?.previews) {
+            setPreviewSummary(previewResponse.previews);
+          }
+          if (Array.isArray(previewResponse.items) && previewResponse.items.length > 0) {
+            break;
+          }
+          await new Promise(resolve => setTimeout(resolve, 600));
+        }
+      };
+      await hydratePipeline();
+      jobService.generatePreviews(job.id).catch((error) => {
+        console.warn('Failed to enqueue previews', error);
+      });
       setImages([]);
     } catch (err) {
       if (err instanceof Error) {
@@ -910,6 +927,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const uploadProgress = images.length
     ? Math.round(images.reduce((sum, img) => sum + img.progress, 0) / images.length)
     : 0;
+  const isFinalizingUpload = jobStatus === 'uploading' && images.length > 0 && uploadProgress >= 100 && !uploadComplete;
+  const displayUploadProgress = isFinalizingUpload ? 99 : uploadProgress;
 
   const pipelineProgressValue = typeof pipelineProgress === 'number'
     ? pipelineProgress
@@ -1295,7 +1314,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               <p className="text-[9px] text-indigo-400 font-black tracking-widest uppercase">{jobStatus}</p>
               <span className="text-[9px] text-gray-600 font-bold">| Balance: {user.points} Pts</span>
               {jobStatus === 'uploading' && images.length > 0 && (
-                <span className="text-[9px] text-gray-400 font-bold">| Upload {uploadProgress}%</span>
+                <span className="text-[9px] text-gray-400 font-bold">
+                  | {isFinalizingUpload ? 'Finalizing upload' : `Upload ${displayUploadProgress}%`}
+                </span>
               )}
               {uploadComplete && jobStatus !== 'uploading' && (
                 <span className="text-[9px] text-emerald-400 font-bold">| Upload Complete</span>
@@ -1311,7 +1332,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               <div className="mt-2 h-1.5 w-48 rounded-full bg-white/10 overflow-hidden">
                 <div
                   className="h-full bg-indigo-500 transition-all"
-                  style={{ width: `${jobStatus === 'uploading' ? uploadProgress : hdrProgressValue}%` }}
+                  style={{ width: `${jobStatus === 'uploading' ? displayUploadProgress : hdrProgressValue}%` }}
                 ></div>
               </div>
             )}
@@ -1363,14 +1384,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           <div className="flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5 min-h-[480px]">
             <div className="w-full max-w-md text-center space-y-4">
               <div className="text-lg font-black uppercase tracking-widest text-white">Uploading</div>
-              <div className="text-xs text-gray-500">Uploading {images.length} files...</div>
+              <div className="text-xs text-gray-500">
+                {isFinalizingUpload ? 'Finalizing upload…' : `Uploading ${images.length} files...`}
+              </div>
               <div className="text-[10px] text-gray-500 uppercase tracking-widest">
                 Please keep this page open until upload finishes.
               </div>
               <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
-                <div className="h-full bg-indigo-500 transition-all" style={{ width: `${uploadProgress}%` }}></div>
+                <div className="h-full bg-indigo-500 transition-all" style={{ width: `${displayUploadProgress}%` }}></div>
               </div>
-              <div className="text-xs text-gray-400">{uploadProgress}%</div>
+              <div className="text-xs text-gray-400">{displayUploadProgress}%</div>
             </div>
           </div>
         ) : showGeneratingPreviews ? (
