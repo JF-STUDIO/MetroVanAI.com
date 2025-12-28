@@ -47,6 +47,9 @@ export interface Job {
   input_type?: 'single' | 'hdr' | 'batch' | null;
   hdr_confidence?: number | null;
   original_filenames?: string[] | null;
+  estimated_units?: number | null;
+  reserved_units?: number | null;
+  settled_units?: number | null;
   status: 'draft' | 'uploaded' | 'analyzing' | 'input_resolved' | 'reserved' | 'preprocessing' | 'hdr_processing' | 'workflow_running' | 'ai_processing' | 'postprocess' | 'packaging' | 'zipping' | 'completed' | 'failed' | 'canceled' | 'partial' | 'pending' | 'queued' | 'processing';
   error_message?: string;
   zip_key?: string;
