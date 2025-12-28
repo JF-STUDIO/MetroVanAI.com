@@ -499,6 +499,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   };
 
   const openExistingJob = async (item: HistoryJob) => {
+    setConfirmDialog(null);
     setImages([]);
     setActiveIndex(null);
     setZipUrl(null);
@@ -1135,13 +1136,19 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                           </button>
                         )}
                         <button
-                          onClick={() => openExistingJob(item)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openExistingJob(item);
+                          }}
                           className="px-3 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
                         >
                           Open
                         </button>
                         <button
-                          onClick={() => requestDeleteJob(item)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            requestDeleteJob(item);
+                          }}
                           className="px-3 py-2 rounded-xl bg-red-500/20 text-red-200 text-[10px] font-black uppercase tracking-widest hover:bg-red-500/30 transition"
                         >
                           Delete
