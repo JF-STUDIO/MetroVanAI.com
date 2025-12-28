@@ -763,10 +763,21 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
+  const autoUploadStatuses = new Set([
+    'idle',
+    'draft',
+    'uploaded',
+    'input_resolved',
+    'failed',
+    'partial',
+    'completed',
+    'canceled'
+  ]);
+
   useEffect(() => {
     if (!autoUploadQueued) return;
     if (!job) return;
-    if (!['idle', 'draft', 'uploaded'].includes(jobStatus)) return;
+    if (!autoUploadStatuses.has(jobStatus)) return;
     if (images.length === 0) return;
     setAutoUploadQueued(false);
     void startBatchProcess();
