@@ -108,6 +108,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [uploadComplete, setUploadComplete] = useState(false);
   const editorStateKey = 'mvai:editor_state';
   const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
+  const [notice, setNotice] = useState<{ type: 'error' | 'info' | 'success'; message: string } | null>(null);
   const pipelineStages = new Set([
     'reserved',
     'input_resolved',
@@ -334,6 +335,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     localStorage.removeItem(editorStateKey);
   };
 
+  const pushNotice = (type: 'error' | 'info' | 'success', message: string) => {
+    setNotice({ type, message });
+  };
+
   const formatDate = (value: string) => {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return value;
@@ -399,7 +404,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to cancel job.';
-      alert(message);
+      pushNotice('error', message);
     }
   };
 
@@ -423,7 +428,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to delete project.';
-      alert(message);
+      pushNotice('error', message);
     }
   };
 
@@ -434,13 +439,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
     const maxFileBytes = Number(import.meta.env.VITE_MAX_FILE_BYTES || (200 * 1024 * 1024));
     if (maxFiles > 0 && images.length + files.length > maxFiles) {
-      alert(`Too many files. Max ${maxFiles} per project.`);
+      pushNotice('error', `Too many files. Max ${maxFiles} per project.`);
       return;
     }
     if (maxFileBytes > 0) {
       const oversized = files.find((file) => file.size > maxFileBytes);
       if (oversized) {
-        alert(`File too large: ${oversized.name}`);
+        pushNotice('error', `File too large: ${oversized.name}`);
         return;
       }
     }
@@ -490,19 +495,24 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       if (result?.retried > 0) {
         setJob(prev => (prev ? { ...prev, status: 'reserved' } : prev));
         setJobStatus('reserved');
+        pushNotice('success', 'Retry queued. Processing will resume.');
       } else {
-        alert('No retryable groups.');
+        pushNotice('info', 'No retryable groups.');
       }
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Retry failed.');
+      pushNotice('error', err instanceof Error ? err.message : 'Retry failed.');
     }
   };
 
   // Main batch processing logic
   const startBatchProcess = async () => {
-    if (!activeTool || images.length === 0 || !job) return alert('Error: Missing job details.');
+    if (!activeTool || images.length === 0 || !job) {
+      pushNotice('error', 'Missing job details. Select a project and upload files first.');
+      return;
+    }
 
     try {
+      setNotice(null);
       setJobStatus('uploading');
       setUploadComplete(false);
       setPipelineItems([]);
@@ -545,7 +555,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       if (availableCredits < totalCost) {
         onUpdateUser({ ...user, points: availableCredits });
         setJobStatus('uploaded');
-        return alert(`Insufficient credits. Needed: ${totalCost}, You have: ${availableCredits}`);
+        pushNotice('error', `Insufficient credits. Needed: ${totalCost}, You have: ${availableCredits}`);
+        return;
       }
 
       const startResponse = await jobService.startJob(job.id);
@@ -555,9 +566,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       onUpdateUser({ ...user, points: nextAvailable });
     } catch (err) {
       if (err instanceof Error) {
-        alert('Upload failed: ' + err.message);
+        pushNotice('error', `Upload failed: ${err.message}`);
       } else {
-        alert('An unknown upload error occurred.');
+        pushNotice('error', 'An unknown upload error occurred.');
       }
       setJobStatus('idle');
       setUploadComplete(false);
@@ -582,6 +593,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     e.preventDefault();
     if (!projectName || !activeTool) return;
     try {
+      setNotice(null);
       const newJob = await jobService.createWorkflowJob(activeTool.id, projectName);
       setJob(newJob);
       setJobStatus(newJob.status)
@@ -601,9 +613,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setHistoryCount(prev => prev + 1);
     } catch (error) {
       if (error instanceof Error) {
-        alert("Failed to create project: " + error.message);
+        pushNotice('error', `Failed to create project: ${error.message}`);
       } else {
-        alert('An unknown error occurred while creating the project.');
+        pushNotice('error', 'An unknown error occurred while creating the project.');
       }
     }
   };
@@ -653,6 +665,23 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     : typeof job?.progress === 'number'
       ? job.progress
       : null;
+  const noticeTone = notice?.type === 'error'
+    ? 'border-red-500/30 bg-red-500/10 text-red-200'
+    : notice?.type === 'success'
+      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+      : 'border-sky-500/30 bg-sky-500/10 text-sky-200';
+  const noticeBanner = notice ? (
+    <div className={`glass border ${noticeTone} px-4 py-3 rounded-2xl flex items-start justify-between gap-4`}>
+      <div className="text-sm leading-snug">{notice.message}</div>
+      <button
+        type="button"
+        onClick={() => setNotice(null)}
+        className="text-[10px] uppercase tracking-widest text-white/70 hover:text-white"
+      >
+        Close
+      </button>
+    </div>
+  ) : null;
 
   useEffect(() => {
     if (galleryItems.length === 0) {
@@ -768,6 +797,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               </button>
             </div>
           </div>
+          {noticeBanner}
 
           {showNewProjectForm && (
             <div className="glass w-full p-8 rounded-[2.5rem] border border-white/10 shadow-2xl">
@@ -955,6 +985,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           </button>
         </div>
       </div>
+      {noticeBanner && (
+        <div className="px-6 pt-4">
+          {noticeBanner}
+        </div>
+      )}
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 p-8 flex flex-col overflow-hidden">
           {showUploadOnly ? (

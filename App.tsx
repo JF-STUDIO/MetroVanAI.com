@@ -17,6 +17,8 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [hasRestoredView, setHasRestoredView] = useState(false);
   const viewStorageKey = 'mvai:view';
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchUserAndSession = async () => {
@@ -84,11 +86,13 @@ const App: React.FC = () => {
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setAuthError(null);
+    setAuthNotice(null);
     try {
       if (isRegister) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        alert('Check your email for confirmation!');
+        setAuthNotice('Check your email for confirmation.');
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -96,9 +100,9 @@ const App: React.FC = () => {
       }
     } catch (error) {
       if (error instanceof Error) {
-        alert(error.message);
+        setAuthError(error.message);
       } else {
-        alert('An unknown error occurred.');
+        setAuthError('An unknown error occurred.');
       }
     } finally {
       setLoading(false);
@@ -110,6 +114,8 @@ const App: React.FC = () => {
     setUser(null);
     setView('home');
     localStorage.removeItem(viewStorageKey);
+    setAuthError(null);
+    setAuthNotice(null);
   };
 
   if (loading) return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
@@ -126,6 +132,12 @@ const App: React.FC = () => {
                 <h2 className="text-3xl font-black mb-2 uppercase tracking-tighter">{isRegister ? 'Join Metrovan AI' : 'Welcome Back'}</h2>
                 <p className="text-gray-500">Professional architectural AI studio.</p>
               </div>
+              {(authError || authNotice) && (
+                <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs">
+                  {authError && <div className="text-red-400">{authError}</div>}
+                  {authNotice && <div className="text-emerald-300">{authNotice}</div>}
+                </div>
+              )}
               <form onSubmit={handleAuth} className="space-y-6">
                 <div>
                   <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Email Address</label>
@@ -141,7 +153,7 @@ const App: React.FC = () => {
               </form>
               <div className="mt-8 text-center text-sm text-gray-500">
                 {isRegister ? 'Already have an account?' : "Don't have an account?"}
-                <button onClick={() => setIsRegister(!isRegister)} className="ml-1 text-indigo-400 font-bold hover:underline">
+                <button onClick={() => { setIsRegister(!isRegister); setAuthError(null); setAuthNotice(null); }} className="ml-1 text-indigo-400 font-bold hover:underline">
                   {isRegister ? 'Sign In' : 'Create one'}
                 </button>
               </div>
