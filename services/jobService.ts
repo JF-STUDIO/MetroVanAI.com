@@ -142,6 +142,11 @@ export const jobService = {
     return response.data;
   },
 
+  adminUpdateVersion: async (workflowId: string, versionId: string, payload: Record<string, unknown>) => {
+    const response = await api.patch(`/admin/workflows/${workflowId}/versions/${versionId}`, payload);
+    return response.data;
+  },
+
   adminPublishVersion: async (workflowId: string, versionId: string) => {
     const response = await api.post(`/admin/workflows/${workflowId}/publish/${versionId}`);
     return response.data;

@@ -38,6 +38,8 @@ type CreditDraft = {
 };
 
 const DEFAULT_INPUT_NODE = 'image';
+const DEFAULT_INPUT_NODE_ID = '31';
+const DEFAULT_OUTPUT_NODE_ID = '57';
 const DEFAULT_API_MODE = 'task_openapi';
 
 const parseRuntimeConfig = (value: string) => {
@@ -62,8 +64,8 @@ const buildDraftFromWorkflow = (workflow?: AdminWorkflow | null): VersionDraft =
   return {
     workflow_remote_id: workflow?.published_version?.workflow_remote_id || '',
     input_node_key: (runtimeConfig?.input_node_key as string | undefined) || DEFAULT_INPUT_NODE,
-    input_node_id: runtimeConfig?.input_node_id ? String(runtimeConfig.input_node_id) : '',
-    output_node_id: runtimeConfig?.output_node_id ? String(runtimeConfig.output_node_id) : '',
+    input_node_id: runtimeConfig?.input_node_id ? String(runtimeConfig.input_node_id) : DEFAULT_INPUT_NODE_ID,
+    output_node_id: runtimeConfig?.output_node_id ? String(runtimeConfig.output_node_id) : DEFAULT_OUTPUT_NODE_ID,
     api_mode: (runtimeConfig?.api_mode as string | undefined) || DEFAULT_API_MODE,
     runtime_config: buildRuntimeConfigText(runtimeConfig),
     notes: '',
@@ -92,8 +94,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     provider_name: 'runninghub_ai',
     workflow_remote_id: '',
     input_node_key: DEFAULT_INPUT_NODE,
-    input_node_id: '',
-    output_node_id: '',
+    input_node_id: DEFAULT_INPUT_NODE_ID,
+    output_node_id: DEFAULT_OUTPUT_NODE_ID,
     api_mode: DEFAULT_API_MODE,
     runtime_config: ''
   });
@@ -224,8 +226,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         provider_name: newWorkflow.provider_name,
         workflow_remote_id: '',
         input_node_key: DEFAULT_INPUT_NODE,
-        input_node_id: '',
-        output_node_id: '',
+        input_node_id: DEFAULT_INPUT_NODE_ID,
+        output_node_id: DEFAULT_OUTPUT_NODE_ID,
         api_mode: DEFAULT_API_MODE,
         runtime_config: ''
       });
@@ -300,8 +302,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         [workflowId]: {
           workflow_remote_id: '',
           input_node_key: DEFAULT_INPUT_NODE,
-          input_node_id: '',
-          output_node_id: '',
+          input_node_id: DEFAULT_INPUT_NODE_ID,
+          output_node_id: DEFAULT_OUTPUT_NODE_ID,
           api_mode: DEFAULT_API_MODE,
           runtime_config: '',
           notes: '',
@@ -314,6 +316,42 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         setError('runtime_config must be valid JSON.');
       } else {
         setError(err instanceof Error ? err.message : 'Failed to create version.');
+      }
+    }
+  };
+
+  const handleUpdateVersion = async (workflowId: string, versionId?: string | null) => {
+    if (!versionId) {
+      setError('No published version to update.');
+      return;
+    }
+    setNotice(null);
+    setError(null);
+    const draft = versionDrafts[workflowId];
+    if (!draft?.workflow_remote_id) {
+      setError('workflow_remote_id is required.');
+      return;
+    }
+    try {
+      const runtimeConfig = parseRuntimeConfig(draft.runtime_config) || {};
+      if (draft.api_mode) runtimeConfig.api_mode = draft.api_mode;
+      if (draft.input_node_key) runtimeConfig.input_node_key = draft.input_node_key;
+      if (draft.input_node_id) runtimeConfig.input_node_id = draft.input_node_id;
+      if (draft.output_node_id) runtimeConfig.output_node_id = draft.output_node_id;
+      const payload = {
+        workflow_remote_id: draft.workflow_remote_id.trim(),
+        runtime_config: runtimeConfig,
+        notes: draft.notes || null
+      };
+      await jobService.adminUpdateVersion(workflowId, versionId, payload);
+      await handleLoadVersions(workflowId);
+      await loadWorkflows();
+      setNotice('Version updated.');
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        setError('runtime_config must be valid JSON.');
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to update version.');
       }
     }
   };
@@ -497,6 +535,11 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
             const testInput = testInputs[workflow.id] || '';
             const testResult = testResults[workflow.id];
             const isExpanded = expandedWorkflowId === workflow.id;
+            const publishedVersionId = workflow.published_version?.id || null;
+            const versionActionLabel = publishedVersionId ? 'Save Version' : 'Create Version';
+            const versionActionHandler = publishedVersionId
+              ? () => handleUpdateVersion(workflow.id, publishedVersionId)
+              : () => handleCreateVersion(workflow.id);
 
             return (
               <div key={workflow.id} className="glass rounded-[2.5rem] p-8 border border-white/10 space-y-6">
@@ -603,7 +646,9 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                       <div className="space-y-3">
-                        <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Create Version</h3>
+                        <h3 className="text-[10px] uppercase tracking-widest text-gray-500">
+                          {publishedVersionId ? 'Edit Published Version' : 'Create Version'}
+                        </h3>
                         <input value={draft.workflow_remote_id} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, workflow_remote_id: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="workflow_remote_id" />
                         <input value={draft.input_node_key} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, input_node_key: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="input_node_key" />
                         <input value={draft.input_node_id} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, input_node_id: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="input_node_id (e.g. 31)" />
@@ -617,7 +662,9 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
                           <input type="checkbox" checked={draft.is_published} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, is_published: e.target.checked } }))} />
                           <span className="text-xs text-gray-400 uppercase tracking-widest">Publish After Create</span>
                         </div>
-                        <button onClick={() => handleCreateVersion(workflow.id)} className="px-4 py-2 rounded-xl bg-indigo-500 text-white text-xs font-black uppercase tracking-widest">Create Version</button>
+                        <button onClick={versionActionHandler} className="px-4 py-2 rounded-xl bg-indigo-500 text-white text-xs font-black uppercase tracking-widest">
+                          {versionActionLabel}
+                        </button>
                       </div>
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">

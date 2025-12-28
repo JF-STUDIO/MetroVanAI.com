@@ -190,6 +190,49 @@ router.get('/admin/workflows/:id/versions', async (req: Request, res: Response) 
   res.json(data || []);
 });
 
+router.patch('/admin/workflows/:id/versions/:versionId', async (req: Request, res: Response) => {
+  const { id, versionId } = req.params;
+  const {
+    workflow_remote_id,
+    runtime_config,
+    notes,
+    input_node_key,
+    input_node_id,
+    output_node_id,
+    api_mode
+  } = req.body || {};
+
+  const { data: existing, error: existingError } = await (supabaseAdmin.from('workflow_versions') as any)
+    .select('id, runtime_config')
+    .eq('workflow_id', id)
+    .eq('id', versionId)
+    .single();
+
+  if (existingError || !existing) return res.status(404).json({ error: 'Version not found' });
+
+  const mergedRuntime = { ...(existing.runtime_config || {}), ...(runtime_config || {}) };
+  if (api_mode) mergedRuntime.api_mode = api_mode;
+  if (input_node_key) mergedRuntime.input_node_key = input_node_key;
+  if (input_node_id) mergedRuntime.input_node_id = input_node_id;
+  if (output_node_id) mergedRuntime.output_node_id = output_node_id;
+
+  const updates: Record<string, any> = {
+    runtime_config: mergedRuntime
+  };
+  if (workflow_remote_id !== undefined) updates.workflow_remote_id = workflow_remote_id;
+  if (notes !== undefined) updates.notes = notes;
+
+  const { data, error } = await (supabaseAdmin.from('workflow_versions') as any)
+    .update(updates)
+    .eq('workflow_id', id)
+    .eq('id', versionId)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 router.post('/admin/workflows/:id/versions', async (req: Request, res: Response) => {
   const { id } = req.params;
   const {
