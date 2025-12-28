@@ -103,6 +103,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [historyPage, setHistoryPage] = useState(1);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [projectSearch, setProjectSearch] = useState('');
+  const [showNewProjectForm, setShowNewProjectForm] = useState(false);
+  const [uploadComplete, setUploadComplete] = useState(false);
   const pipelineStages = new Set([
     'reserved',
     'input_resolved',
@@ -250,6 +253,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setZipUrl(null);
     setPipelineItems([]);
     setPipelineProgress(null);
+    setUploadComplete(true);
     jobService.getPipelineStatus(cached.jobId)
       .then(async (response) => {
         const pipelineJob = response.job;
@@ -289,6 +293,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setJobStatus(item.status);
     setJob(item as Job);
     setShowProjectInput(false);
+    setUploadComplete(true);
     if (item.workflow_id) {
       saveLastJob(item.id, item.workflow_id);
     }
@@ -442,6 +447,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     try {
       setJobStatus('uploading');
+      setUploadComplete(false);
       setPipelineItems([]);
       setPipelineProgress(null);
       const presignedData: { r2Key: string; putUrl: string; fileName: string }[] = await jobService.getPresignedRawUploadUrls(
@@ -472,6 +478,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       }));
 
       await jobService.uploadComplete(job.id, uploadedFiles);
+      setUploadComplete(true);
       const analysis = await jobService.analyzeJob(job.id);
       const estimatedUnits = analysis?.estimated_units || 0;
 
@@ -496,6 +503,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         alert('An unknown upload error occurred.');
       }
       setJobStatus('idle');
+      setUploadComplete(false);
     }
   };
 
@@ -503,9 +511,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const handleSelectTool = (tool: Workflow) => {
     setActiveTool(tool);
     setShowProjectInput(true);
+    setShowNewProjectForm(false);
+    setProjectSearch('');
     setPipelineItems([]);
     setPipelineProgress(null);
     setLightboxUrl(null);
+    setUploadComplete(false);
   };
   
   const handleProjectCreate = async (e: React.FormEvent) => {
@@ -516,6 +527,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setJob(newJob);
       setJobStatus(newJob.status)
       setShowProjectInput(false);
+      setShowNewProjectForm(false);
+      setUploadComplete(false);
       setPipelineItems([]);
       setPipelineProgress(null);
       setLightboxUrl(null);
@@ -563,9 +576,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     stage: 'input'
   });
 
+  const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft' || jobStatus === 'uploaded';
+  const showUploadOnly = jobStatus === 'uploading';
   const galleryItems = pipelineItems.length > 0
     ? pipelineItems.map(mapPipelineItem)
-    : images.map(mapUploadItem);
+    : showRawPreviews
+      ? images.map(mapUploadItem)
+      : [];
 
   const uploadProgress = images.length
     ? Math.round(images.reduce((sum, img) => sum + img.progress, 0) / images.length)
@@ -621,76 +638,132 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     );
   }
 
-  // VIEW 2: Project Creation Form
+  // VIEW 2: Project List
   if (showProjectInput) {
     const toolHistory = activeTool ? history.filter(item => item.workflow_id === activeTool.id || item.tool_id === activeTool.id) : [];
+    const filteredHistory = projectSearch.trim().length === 0
+      ? toolHistory
+      : toolHistory.filter(item => (item.project_name || '').toLowerCase().includes(projectSearch.toLowerCase()));
     const hasMoreHistory = history.length < historyCount;
+
+    const getStatusBadge = (status: string) => {
+      if (status === 'completed') return 'bg-green-500/20 text-green-200';
+      if (status === 'partial') return 'bg-amber-500/20 text-amber-200';
+      if (status === 'failed') return 'bg-red-500/20 text-red-200';
+      if (status === 'draft') return 'bg-white/10 text-gray-300';
+      return 'bg-white/10 text-gray-300';
+    };
 
     return (
       <div className="min-h-screen bg-[#0a0a0a] px-8 py-12">
-        <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-10">
-          <div className="glass w-full p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
-            <div className="text-center mb-10">
-              <h2 className="text-3xl font-black mb-2 uppercase tracking-tighter">Create New Project</h2>
-              <p className="text-gray-500">Enter the property address to begin.</p>
-            </div>
-            <form onSubmit={handleProjectCreate} className="space-y-6">
+        <div className="max-w-6xl mx-auto space-y-8">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+            <div className="flex items-center gap-3">
+              <button onClick={() => { setActiveTool(null); setShowProjectInput(false); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+                <i className="fa-solid fa-arrow-left"></i>
+              </button>
               <div>
-                <label className="block text-[10px] font-bold text-gray-500 uppercase mb-2 tracking-widest pl-1">Property Address</label>
-                <input type="text" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none focus:border-indigo-500" placeholder="e.g., 123 Main St, Vancouver, BC" value={projectName} onChange={e => setProjectName(e.target.value)} />
+                <div className="text-sm text-gray-500 uppercase tracking-widest">Projects</div>
+                <div className="text-2xl font-black text-white">{activeTool?.display_name}</div>
               </div>
-              <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg active:scale-95 transition">Create Project</button>
-            </form>
-             <button onClick={() => { setActiveTool(null); setShowProjectInput(false); }} className="w-full mt-4 text-xs text-gray-500 hover:text-white">Cancel</button>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                value={projectSearch}
+                onChange={(e) => setProjectSearch(e.target.value)}
+                className="bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-sm"
+                placeholder="Search projects..."
+              />
+              <button
+                onClick={() => setShowNewProjectForm(true)}
+                className="px-6 py-3 rounded-2xl bg-indigo-500 text-white text-xs font-black uppercase tracking-widest"
+              >
+                + New Project
+              </button>
+            </div>
           </div>
-          <div className="glass w-full p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Existing Projects</h3>
+
+          {showNewProjectForm && (
+            <div className="glass w-full p-8 rounded-[2.5rem] border border-white/10 shadow-2xl">
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h2 className="text-xl font-black uppercase tracking-tight">Create New Project</h2>
+                  <p className="text-gray-500 text-sm">Enter the property address to begin.</p>
+                </div>
+                <button onClick={() => setShowNewProjectForm(false)} className="text-xs text-gray-500 hover:text-white">Close</button>
+              </div>
+              <form onSubmit={handleProjectCreate} className="flex flex-col lg:flex-row gap-4">
+                <input
+                  type="text"
+                  required
+                  className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none focus:border-indigo-500"
+                  placeholder="e.g., 123 Main St, Vancouver, BC"
+                  value={projectName}
+                  onChange={e => setProjectName(e.target.value)}
+                />
+                <button className="px-8 py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg active:scale-95 transition">
+                  Create Project
+                </button>
+              </form>
+            </div>
+          )}
+
+          <div className="glass w-full p-6 rounded-[2.5rem] border border-white/10 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Project List</h3>
               {historyLoading && <span className="text-[10px] text-gray-600 uppercase tracking-widest">Loading...</span>}
             </div>
             {historyError && (
               <div className="text-sm text-red-400 mb-4">Failed to load projects: {historyError}</div>
             )}
-            {!historyLoading && toolHistory.length === 0 && (
+            {!historyLoading && filteredHistory.length === 0 && (
               <div className="text-sm text-gray-500 glass p-6 rounded-2xl border border-white/5">
                 No projects yet for this tool.
               </div>
             )}
-            {toolHistory.length > 0 && (
-              <div className="space-y-4">
-                {toolHistory.map((item) => (
-                  <div key={item.id} className="p-4 rounded-2xl border border-white/5 flex items-center justify-between gap-4">
-                    <div>
-                      <div className="text-sm font-semibold text-white">{item.project_name || 'Untitled Project'}</div>
-                      <div className="text-[10px] text-gray-600 uppercase tracking-widest mt-1">
-                        {item.status} | {formatDate(item.created_at)}
+            {filteredHistory.length > 0 && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-[minmax(200px,1fr)_120px_90px_120px_180px] gap-3 text-[10px] uppercase tracking-widest text-gray-500 px-2">
+                  <div>Listing</div>
+                  <div>Status</div>
+                  <div>Photos</div>
+                  <div>Created</div>
+                  <div>Actions</div>
+                </div>
+                {filteredHistory.map((item) => {
+                  const photoCount = item.original_filenames?.length ?? item.estimated_units ?? 0;
+                  return (
+                    <div key={item.id} className="grid grid-cols-[minmax(200px,1fr)_120px_90px_120px_180px] gap-3 items-center px-2 py-3 border border-white/5 rounded-2xl">
+                      <div>
+                        <div className="text-sm font-semibold text-white">{item.project_name || 'Untitled Project'}</div>
+                        <div className="text-[10px] text-gray-600 uppercase tracking-widest mt-1">
+                          {item.workflows?.display_name || activeTool?.display_name}
+                        </div>
                       </div>
-                    </div>
-                    {item.status === 'completed' || item.status === 'partial' ? (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={async () => {
-                          const { url } = await jobService.getPresignedDownloadUrl(item.id);
-                          if (url) window.location.href = url;
-                          }}
-                          className="px-4 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
-                        >
-                          Download ZIP
-                        </button>
-                        <button
-                          onClick={() => deleteExistingJob(item)}
-                          className="px-3 py-2 rounded-xl bg-red-500/20 text-red-200 text-[10px] font-black uppercase tracking-widest hover:bg-red-500/30 transition"
-                        >
-                          Delete
-                        </button>
+                      <div>
+                        <span className={`px-3 py-1 rounded-full text-[10px] uppercase tracking-widest ${getStatusBadge(item.status)}`}>
+                          {item.status}
+                        </span>
                       </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
+                      <div className="text-sm text-gray-300">{photoCount}</div>
+                      <div className="text-xs text-gray-400">{formatDate(item.created_at)}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {(item.status === 'completed' || item.status === 'partial') && (
+                          <button
+                            onClick={async () => {
+                            const { url } = await jobService.getPresignedDownloadUrl(item.id);
+                            if (url) window.location.href = url;
+                            }}
+                            className="px-3 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
+                          >
+                            Download
+                          </button>
+                        )}
                         <button
                           onClick={() => openExistingJob(item)}
-                          className="px-4 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                          className="px-3 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
                         >
-                          Open Project
+                          Open
                         </button>
                         <button
                           onClick={() => deleteExistingJob(item)}
@@ -699,9 +772,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                           Delete
                         </button>
                       </div>
-                    )}
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
             )}
             {hasMoreHistory && (
@@ -736,6 +809,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     'queued'
   ]);
   const canCancel = job?.id && cancelableStatuses.has(jobStatus);
+  const showWaitingForResults = !showUploadOnly && galleryItems.length === 0 && pipelineStages.has(jobStatus);
+  const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !currentImage;
   return (
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
@@ -750,6 +825,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               <span className="text-[9px] text-gray-600 font-bold">| Balance: {user.points} Pts</span>
               {jobStatus === 'uploading' && images.length > 0 && (
                 <span className="text-[9px] text-gray-400 font-bold">| Upload {uploadProgress}%</span>
+              )}
+              {uploadComplete && jobStatus !== 'uploading' && (
+                <span className="text-[9px] text-emerald-400 font-bold">| Upload Complete</span>
               )}
               {jobStatus !== 'uploading' && pipelineStages.has(jobStatus) && pipelineProgressValue !== null && (
                 <span className="text-[9px] text-gray-400 font-bold">| Progress {pipelineProgressValue}%</span>
@@ -793,7 +871,26 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       </div>
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 p-8 flex flex-col overflow-hidden">
-          {!currentImage ? (
+          {showUploadOnly ? (
+            <div className="flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5">
+              <div className="w-full max-w-md text-center space-y-4">
+                <div className="text-lg font-black uppercase tracking-widest text-white">Uploading</div>
+                <div className="text-xs text-gray-500">Uploading {images.length} files...</div>
+                <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
+                  <div className="h-full bg-indigo-500 transition-all" style={{ width: `${uploadProgress}%` }}></div>
+                </div>
+                <div className="text-xs text-gray-400">{uploadProgress}%</div>
+              </div>
+            </div>
+          ) : showWaitingForResults ? (
+            <div className="flex-1 flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5">
+              <div className="text-center space-y-3">
+                <div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin mx-auto"></div>
+                <div className="text-sm text-gray-300 uppercase tracking-widest">Processing HDR & AI</div>
+                <div className="text-xs text-gray-500">Results will appear here as they complete.</div>
+              </div>
+            </div>
+          ) : showEmptyDropzone ? (
             <div 
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -862,7 +959,17 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             <button onClick={() => fileInputRef.current?.click()} className="text-indigo-400 hover:text-indigo-300 transition-colors"><i className="fa-solid fa-plus-circle text-lg"></i></button>
           </div>
           <div className="space-y-4">
-            {galleryItems.map((img, idx) => (
+            {showUploadOnly && (
+              <div className="text-xs text-gray-500 border border-white/10 rounded-2xl p-4">
+                Uploading {images.length} files...
+              </div>
+            )}
+            {!showUploadOnly && galleryItems.length === 0 && (
+              <div className="text-xs text-gray-500 border border-white/10 rounded-2xl p-4">
+                Waiting for results...
+              </div>
+            )}
+            {!showUploadOnly && galleryItems.map((img, idx) => (
               <div key={img.id || idx} onClick={() => setActiveIndex(idx)} className={`relative h-24 rounded-2xl overflow-hidden cursor-pointer border-2 transition-all ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-transparent hover:border-white/10'}`}>
                 {img.preview ? (
                   <img src={img.preview} className="w-full h-full object-cover" />

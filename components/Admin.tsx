@@ -61,6 +61,7 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
   const [testInputs, setTestInputs] = useState<Record<string, string>>({});
   const [testResults, setTestResults] = useState<Record<string, any>>({});
   const [creditDrafts, setCreditDrafts] = useState<Record<string, CreditDraft>>({});
+  const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | null>(null);
 
   const loadWorkflows = async () => {
     setLoading(prev => ({ ...prev, workflows: true }));
@@ -394,99 +395,129 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
             };
             const testInput = testInputs[workflow.id] || '';
             const testResult = testResults[workflow.id];
+            const isExpanded = expandedWorkflowId === workflow.id;
 
             return (
               <div key={workflow.id} className="glass rounded-[2.5rem] p-8 border border-white/10 space-y-6">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                   <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Display Name</label>
-                    <input value={workflow.display_name} onChange={(e) => updateWorkflowField(workflow.id, 'display_name', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
+                    <div className="text-lg font-semibold text-white">{workflow.display_name}</div>
+                    <div className="text-xs text-gray-500 uppercase tracking-widest mt-2 flex flex-wrap gap-2">
+                      <span>slug: {workflow.slug}</span>
+                      <span>provider: {workflow.provider_name || 'runninghub_ai'}</span>
+                      <span>credits: {workflow.credit_per_unit}</span>
+                      <span className={workflow.is_active === false ? 'text-red-300' : 'text-emerald-300'}>
+                        {workflow.is_active === false ? 'inactive' : 'active'}
+                      </span>
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Slug</label>
-                    <input value={workflow.slug} readOnly className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-gray-500" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Credits Per Unit</label>
-                    <input value={workflow.credit_per_unit} onChange={(e) => updateWorkflowField(workflow.id, 'credit_per_unit', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Provider</label>
-                    <select value={workflow.provider_name || 'runninghub_ai'} onChange={(e) => updateWorkflowField(workflow.id, 'provider_name', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3">
-                      <option value="runninghub_ai">runninghub_ai</option>
-                      <option value="runninghub_cn">runninghub_cn</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Preview Before URL</label>
-                    <input value={workflow.preview_original || ''} onChange={(e) => updateWorkflowField(workflow.id, 'preview_original', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Preview After URL</label>
-                    <input value={workflow.preview_processed || ''} onChange={(e) => updateWorkflowField(workflow.id, 'preview_processed', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
-                  </div>
-                  <div className="lg:col-span-2">
-                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Description</label>
-                    <textarea value={workflow.description || ''} onChange={(e) => updateWorkflowField(workflow.id, 'description', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 h-24" />
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <input type="checkbox" checked={workflow.is_active ?? true} onChange={(e) => updateWorkflowField(workflow.id, 'is_active', e.target.checked)} />
-                    <span className="text-xs text-gray-400 uppercase tracking-widest">Active</span>
+                    <button
+                      onClick={() => setExpandedWorkflowId(isExpanded ? null : workflow.id)}
+                      className="px-4 py-2 rounded-xl bg-white/10 text-white text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                    >
+                      {isExpanded ? 'Close' : 'Edit'}
+                    </button>
+                    {isExpanded && (
+                      <button onClick={() => handleSaveWorkflow(workflow)} className="px-6 py-2 rounded-xl bg-indigo-500 text-white text-[10px] font-black uppercase tracking-widest">
+                        Save Changes
+                      </button>
+                    )}
                   </div>
-                  <button onClick={() => handleSaveWorkflow(workflow)} className="px-6 py-3 rounded-2xl bg-white/10 text-white text-xs font-black uppercase tracking-widest hover:bg-white/20 transition">Save Changes</button>
                 </div>
+
                 <div className="text-xs text-gray-500 uppercase tracking-widest">
                   Published: {workflow.published_version ? `v${workflow.published_version.version} / ${workflow.published_version.workflow_remote_id}` : 'None'}
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  <div className="space-y-3">
-                    <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Create Version</h3>
-                    <input value={draft.workflow_remote_id} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, workflow_remote_id: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="workflow_remote_id" />
-                    <input value={draft.input_node_key} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, input_node_key: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="input_node_key" />
-                    <textarea value={draft.runtime_config} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, runtime_config: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 h-20" placeholder='{"poll_interval": 4000}' />
+                {isExpanded && (
+                  <div className="space-y-6">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Display Name</label>
+                        <input value={workflow.display_name} onChange={(e) => updateWorkflowField(workflow.id, 'display_name', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Slug</label>
+                        <input value={workflow.slug} readOnly className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-gray-500" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Credits Per Unit</label>
+                        <input value={workflow.credit_per_unit} onChange={(e) => updateWorkflowField(workflow.id, 'credit_per_unit', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Provider</label>
+                        <select value={workflow.provider_name || 'runninghub_ai'} onChange={(e) => updateWorkflowField(workflow.id, 'provider_name', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3">
+                          <option value="runninghub_ai">runninghub_ai</option>
+                          <option value="runninghub_cn">runninghub_cn</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Preview Before URL</label>
+                        <input value={workflow.preview_original || ''} onChange={(e) => updateWorkflowField(workflow.id, 'preview_original', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Preview After URL</label>
+                        <input value={workflow.preview_processed || ''} onChange={(e) => updateWorkflowField(workflow.id, 'preview_processed', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" />
+                      </div>
+                      <div className="lg:col-span-2">
+                        <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Description</label>
+                        <textarea value={workflow.description || ''} onChange={(e) => updateWorkflowField(workflow.id, 'description', e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 h-24" />
+                      </div>
+                    </div>
                     <div className="flex items-center gap-3">
-                      <input type="checkbox" checked={draft.is_published} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, is_published: e.target.checked } }))} />
-                      <span className="text-xs text-gray-400 uppercase tracking-widest">Publish After Create</span>
+                      <input type="checkbox" checked={workflow.is_active ?? true} onChange={(e) => updateWorkflowField(workflow.id, 'is_active', e.target.checked)} />
+                      <span className="text-xs text-gray-400 uppercase tracking-widest">Active</span>
                     </div>
-                    <button onClick={() => handleCreateVersion(workflow.id)} className="px-4 py-2 rounded-xl bg-indigo-500 text-white text-xs font-black uppercase tracking-widest">Create Version</button>
-                  </div>
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Versions</h3>
-                      <button onClick={() => handleLoadVersions(workflow.id)} className="text-[10px] uppercase tracking-widest text-indigo-400">Load</button>
-                    </div>
-                    <div className="space-y-3 max-h-52 overflow-y-auto pr-1">
-                      {versions.length === 0 && (
-                        <div className="text-xs text-gray-500">No versions loaded.</div>
-                      )}
-                      {versions.map(version => (
-                        <div key={version.id} className="flex items-center justify-between text-xs border border-white/10 rounded-xl px-3 py-2">
-                          <div className="flex flex-col">
-                            <span className="text-gray-200">v{version.version} - {version.workflow_remote_id}</span>
-                            <span className="text-gray-500">{version.is_published ? 'published' : 'draft'}</span>
-                          </div>
-                          {!version.is_published && (
-                            <button onClick={() => handlePublishVersion(workflow.id, version.id)} className="px-3 py-1 rounded-lg bg-white/10 text-[10px] uppercase tracking-widest">Publish</button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
 
-                <div className="space-y-3">
-                  <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Test Run</h3>
-                  <div className="flex flex-col lg:flex-row gap-3">
-                    <input value={testInput} onChange={(e) => setTestInputs(prev => ({ ...prev, [workflow.id]: e.target.value }))} className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="https://example.com/input.jpg" />
-                    <button onClick={() => handleTestRun(workflow.id)} className="px-4 py-2 rounded-xl bg-white/10 text-xs uppercase tracking-widest">Run</button>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      <div className="space-y-3">
+                        <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Create Version</h3>
+                        <input value={draft.workflow_remote_id} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, workflow_remote_id: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="workflow_remote_id" />
+                        <input value={draft.input_node_key} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, input_node_key: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="input_node_key" />
+                        <textarea value={draft.runtime_config} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, runtime_config: e.target.value } }))} className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 h-20" placeholder='{"poll_interval": 4000}' />
+                        <div className="flex items-center gap-3">
+                          <input type="checkbox" checked={draft.is_published} onChange={(e) => setVersionDrafts(prev => ({ ...prev, [workflow.id]: { ...draft, is_published: e.target.checked } }))} />
+                          <span className="text-xs text-gray-400 uppercase tracking-widest">Publish After Create</span>
+                        </div>
+                        <button onClick={() => handleCreateVersion(workflow.id)} className="px-4 py-2 rounded-xl bg-indigo-500 text-white text-xs font-black uppercase tracking-widest">Create Version</button>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Versions</h3>
+                          <button onClick={() => handleLoadVersions(workflow.id)} className="text-[10px] uppercase tracking-widest text-indigo-400">Load</button>
+                        </div>
+                        <div className="space-y-3 max-h-52 overflow-y-auto pr-1">
+                          {versions.length === 0 && (
+                            <div className="text-xs text-gray-500">No versions loaded.</div>
+                          )}
+                          {versions.map(version => (
+                            <div key={version.id} className="flex items-center justify-between text-xs border border-white/10 rounded-xl px-3 py-2">
+                              <div className="flex flex-col">
+                                <span className="text-gray-200">v{version.version} - {version.workflow_remote_id}</span>
+                                <span className="text-gray-500">{version.is_published ? 'published' : 'draft'}</span>
+                              </div>
+                              {!version.is_published && (
+                                <button onClick={() => handlePublishVersion(workflow.id, version.id)} className="px-3 py-1 rounded-lg bg-white/10 text-[10px] uppercase tracking-widest">Publish</button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <h3 className="text-[10px] uppercase tracking-widest text-gray-500">Test Run</h3>
+                      <div className="flex flex-col lg:flex-row gap-3">
+                        <input value={testInput} onChange={(e) => setTestInputs(prev => ({ ...prev, [workflow.id]: e.target.value }))} className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-3" placeholder="https://example.com/input.jpg" />
+                        <button onClick={() => handleTestRun(workflow.id)} className="px-4 py-2 rounded-xl bg-white/10 text-xs uppercase tracking-widest">Run</button>
+                      </div>
+                      {testResult && (
+                        <pre className="text-xs bg-black/30 border border-white/10 rounded-2xl p-4 overflow-auto">{JSON.stringify(testResult, null, 2)}</pre>
+                      )}
+                    </div>
                   </div>
-                  {testResult && (
-                    <pre className="text-xs bg-black/30 border border-white/10 rounded-2xl p-4 overflow-auto">{JSON.stringify(testResult, null, 2)}</pre>
-                  )}
-                </div>
+                )}
               </div>
             );
           })}
