@@ -917,7 +917,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const frameHasRaw = item.frames?.some((frame) => frame.input_kind === 'raw');
     const groupType = item.group_type ?? null;
     const isRawGroup = groupType === 'hdr' || groupType === 'raw' || frameHasRaw;
-    const preview = item.output_url || item.hdr_url || (!isRawGroup ? item.preview_url : '') || '';
+    const preview = item.output_url || item.hdr_url || item.preview_url || '';
     const stage: GalleryItem['stage'] = outputReady
       ? 'output'
       : processingActive
