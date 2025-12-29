@@ -88,7 +88,10 @@ const App: React.FC = () => {
         const { error } = await supabase.auth.signUp({
           email,
           password,
-          options: { data: { full_name: normalizedName } }
+          options: {
+            data: { full_name: normalizedName },
+            emailRedirectTo: `${window.location.origin}/auth/callback`
+          }
         });
         if (error) throw error;
         setAuthNotice('Check your email for confirmation.');
@@ -123,7 +126,7 @@ const App: React.FC = () => {
     if (path.startsWith('/admin')) return 'admin';
     if (path.startsWith('/studio')) return 'editor';
     if (path.startsWith('/pricing')) return 'pricing';
-    if (path.startsWith('/login')) return 'login';
+    if (path.startsWith('/auth') || path.startsWith('/login')) return 'login';
     return 'home';
   })();
 
@@ -203,11 +206,48 @@ const App: React.FC = () => {
     </div>
   );
 
+  const authCallbackView = (
+    <div className="flex-1 flex items-center justify-center p-6">
+      <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl text-center">
+        <h2 className="text-2xl font-black mb-3 uppercase tracking-tight">Verifying Email</h2>
+        <p className="text-sm text-gray-400">Please wait while we confirm your account...</p>
+      </div>
+    </div>
+  );
+
+  useEffect(() => {
+    if (!location.pathname.startsWith('/auth/callback')) return;
+    let active = true;
+    const run = async () => {
+      try {
+        const url = new URL(window.location.href);
+        const code = url.searchParams.get('code');
+        if (code) {
+          const { error } = await supabase.auth.exchangeCodeForSession(code);
+          if (error) throw error;
+        } else {
+          await supabase.auth.getSession();
+        }
+        if (active) navigate('/studio', { replace: true });
+      } catch (error) {
+        if (active) {
+          setAuthNotice('Email confirmed. Please sign in.');
+          navigate('/login', { replace: true });
+        }
+      }
+    };
+    run();
+    return () => {
+      active = false;
+    };
+  }, [location.pathname, navigate]);
+
   return (
     <Layout user={user} onLogout={logout} onNavigate={handleNavigate} currentView={currentView}>
       <Routes>
         <Route path="/" element={<Home onStart={() => navigate(user ? '/studio' : '/login')} />} />
         <Route path="/login" element={user ? <Navigate to="/studio" replace /> : loginView} />
+        <Route path="/auth/callback" element={authCallbackView} />
         <Route path="/studio" element={user ? <Editor user={user} workflows={workflows} onUpdateUser={setUser} /> : <Navigate to="/login" replace />} />
         <Route path="/admin" element={user && user.isAdmin ? <Admin user={user} /> : <Navigate to={user ? '/studio' : '/login'} replace />} />
         <Route path="/pricing" element={<Home onStart={() => navigate(user ? '/studio' : '/login')} />} />
