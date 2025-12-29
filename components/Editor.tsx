@@ -1037,10 +1037,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     };
   };
 
-  const cycleRepresentative = async (item: GalleryItem) => {
+  const cycleRepresentative = async (item: GalleryItem, direction: 1 | -1 = 1) => {
     if (!job || !item.frames || item.frames.length < 2) return;
     const currentIndex = Math.max(0, (item.representativeIndex ?? 1) - 1);
-    const nextIndex = (currentIndex + 1) % item.frames.length;
+    const nextIndex = (currentIndex + direction + item.frames.length) % item.frames.length;
     const nextFrame = item.frames[nextIndex];
     try {
       await jobService.setGroupRepresentative(job.id, item.id, nextFrame.id);
@@ -1568,19 +1568,24 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                       </div>
                     )}
                     {showBadge && (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          cycleRepresentative(img);
-                        }}
-                        className="absolute top-3 left-3 px-2.5 py-1 rounded-full bg-black/70 text-[10px] text-white font-bold tracking-widest border border-white/10"
-                        title="Click to change preview frame"
-                      >
-                        {repIndex}/{groupSize}
-                      </button>
+                      <div className="absolute top-3 left-3 flex items-center gap-2">
+                        <div className="px-2.5 py-1 rounded-full bg-black/70 text-[10px] text-white font-bold tracking-widest border border-white/10">
+                          {repIndex}/{groupSize}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            cycleRepresentative(img, 1);
+                          }}
+                          className="w-7 h-7 rounded-full bg-black/70 text-[10px] text-white flex items-center justify-center border border-white/10 hover:border-white/30"
+                          title="Next frame"
+                        >
+                          <i className="fa-solid fa-chevron-right"></i>
+                        </button>
+                      </div>
                     )}
-                    {img.status === 'processing' && (
+                    {img.status === 'processing' && (img.stage === 'hdr' || img.stage === 'ai') && (
                       <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-3">
                         <div className="w-10 h-10 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin"></div>
                         <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
@@ -1588,7 +1593,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                             ? 'HDR Processing'
                             : img.stage === 'ai'
                               ? 'AI Processing'
-                              : 'Generating Preview'}
+                              : 'Processing'}
                         </p>
                       </div>
                     )}
