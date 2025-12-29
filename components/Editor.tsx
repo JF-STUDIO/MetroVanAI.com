@@ -831,12 +831,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
       await jobService.uploadComplete(job.id, uploadedFiles);
       setUploadComplete(true);
+      setPreviewSummary({ total: uploadedFiles.length, ready: 0 });
       setJobStatus('analyzing');
       const analysis = await jobService.analyzeJob(job.id);
       const estimatedUnits = analysis?.estimated_units || 0;
       setJob(prev => (prev ? { ...prev, estimated_units: estimatedUnits } : prev));
       setJobStatus('input_resolved');
-      setPreviewSummary({ total: uploadedFiles.length, ready: 0 });
       const hydratePipeline = async () => {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           const previewResponse = await jobService.getPipelineStatus(job.id);
@@ -856,7 +856,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       jobService.generatePreviews(job.id).catch((error) => {
         console.warn('Failed to enqueue previews', error);
       });
-      setImages([]);
+      // keep local placeholders until pipeline previews arrive
     } catch (err) {
       if (err instanceof Error) {
         pushNotice('error', `Upload failed: ${err.message}`);
@@ -990,7 +990,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   const previewInProgress = previewTotal > 0 && previewReady < previewTotal && pipelineStages.has(jobStatus);
   const processingActive = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
-  const hideGalleryUntilPreviewsDone = previewInProgress && jobStatus === 'input_resolved' && pipelineItems.length === 0;
+  const hideGalleryUntilPreviewsDone = previewInProgress && jobStatus === 'input_resolved' && pipelineItems.length === 0 && images.length === 0;
   const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
   const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
   const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
@@ -1058,11 +1058,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
+  const showUploadPlaceholders = !hideGalleryUntilPreviewsDone && pipelineItems.length === 0 && images.length > 0;
   const galleryItems = !hideGalleryUntilPreviewsDone && pipelineItems.length > 0
     ? pipelineItems.map(mapPipelineItem)
-    : showRawPreviews
-      ? images.filter((img) => !img.isRaw).map(mapUploadItem)
-      : [];
+    : showUploadPlaceholders
+      ? images.map(mapUploadItem)
+      : showRawPreviews
+        ? images.filter((img) => !img.isRaw).map(mapUploadItem)
+        : [];
   const noticeTone = notice?.type === 'error'
     ? 'border-red-500/30 bg-red-500/10 text-red-200'
     : notice?.type === 'success'
