@@ -12,6 +12,7 @@ const App: React.FC = () => {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [view, setView] = useState<string>('home');
   const [email, setEmail] = useState('');
+  const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
   const [isRegister, setIsRegister] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -26,10 +27,11 @@ const App: React.FC = () => {
       if (session?.user) {
         try {
           const profile = await jobService.getProfile();
+          const displayName = (session.user.user_metadata?.full_name as string | undefined) || session.user.email?.split('@')[0] || '';
           setUser({
             id: session.user.id,
             email: session.user.email || '',
-            name: session.user.email?.split('@')[0] || '',
+            name: displayName,
             points: profile.available_credits ?? profile.points ?? 0,
             isAdmin: profile.is_admin || false
           });
@@ -42,10 +44,11 @@ const App: React.FC = () => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.user) {
         jobService.getProfile().then(profile => {
+          const displayName = (session.user.user_metadata?.full_name as string | undefined) || session.user.email?.split('@')[0] || '';
           setUser({
             id: session.user.id,
             email: session.user.email || '',
-            name: session.user.email?.split('@')[0] || '',
+            name: displayName,
             points: profile.available_credits ?? profile.points ?? 0,
             isAdmin: profile.is_admin || false
           });
@@ -90,7 +93,22 @@ const App: React.FC = () => {
     setAuthNotice(null);
     try {
       if (isRegister) {
-        const { error } = await supabase.auth.signUp({ email, password });
+        const normalizedName = fullName.trim();
+        if (!normalizedName) {
+          setAuthError('Please enter your full name.');
+          return;
+        }
+        const hasLetter = /[A-Za-z]/.test(password);
+        const hasSymbol = /[^A-Za-z0-9\s]/.test(password);
+        if (!hasLetter || !hasSymbol) {
+          setAuthError('Password must include at least one letter and one symbol.');
+          return;
+        }
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { full_name: normalizedName } }
+        });
         if (error) throw error;
         setAuthNotice('Check your email for confirmation.');
       } else {
@@ -139,6 +157,19 @@ const App: React.FC = () => {
                 </div>
               )}
               <form onSubmit={handleAuth} className="space-y-6">
+                {isRegister && (
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Full Name</label>
+                    <input
+                      type="text"
+                      required
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
+                      placeholder="Enter your name"
+                      value={fullName}
+                      onChange={e => setFullName(e.target.value)}
+                    />
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Email Address</label>
                   <input type="email" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4" placeholder="Enter your email" value={email} onChange={e => setEmail(e.target.value)} />
@@ -146,6 +177,11 @@ const App: React.FC = () => {
                 <div>
                   <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Password</label>
                   <input type="password" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} />
+                  {isRegister && (
+                    <p className="mt-2 text-[11px] text-gray-500">
+                      Must include at least one letter and one symbol.
+                    </p>
+                  )}
                 </div>
                 <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg">
                   {isRegister ? 'Create Account' : 'Sign In'}

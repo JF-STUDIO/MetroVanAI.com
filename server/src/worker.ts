@@ -1,5 +1,5 @@
 import './config.js';
-import { Worker, Job, QueueEvents } from 'bullmq';
+import { Worker, Job, QueueEvents, Queue } from 'bullmq';
 import { createReadStream, createWriteStream, promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -22,7 +22,35 @@ import { createHdrForGroup, cleanupHdrTemp, convertToJpeg, createRawPreview } fr
 import { createRunningHubTask, pollRunningHub } from './services/runninghub.js';
 
 const HDR_CONCURRENCY = Number.parseInt(process.env.HDR_CONCURRENCY || '2', 10);
-const AI_CONCURRENCY = Number.parseInt(process.env.AI_CONCURRENCY || '1', 10);
+const AI_CONCURRENCY = Number.parseInt(process.env.AI_CONCURRENCY || '30', 10);
+const AI_GLOBAL_CONCURRENCY = Number.parseInt(process.env.AI_GLOBAL_CONCURRENCY || '30', 10);
+
+const jobQueue = new Queue('job-queue', { connection: createRedis() });
+
+const createLimiter = (limit: number) => {
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  const acquire = () => new Promise<() => void>((resolve) => {
+    const tryAcquire = () => {
+      if (active < limit) {
+        active += 1;
+        resolve(() => {
+          active -= 1;
+          const next = queue.shift();
+          if (next) next();
+        });
+        return;
+      }
+      queue.push(tryAcquire);
+    };
+    tryAcquire();
+  });
+
+  return { acquire };
+};
+
+const aiGlobalLimiter = createLimiter(Math.max(AI_GLOBAL_CONCURRENCY, 1));
 
 const runWithConcurrency = async <T>(items: T[], limit: number, handler: (item: T) => Promise<void>) => {
   if (!items.length) return;
@@ -482,6 +510,7 @@ const processRunningHubGroup = async (
   while (attempts < maxAttempts) {
     attempts += 1;
     if (await isJobCanceled(jobId)) return;
+    const releaseSlot = await aiGlobalLimiter.acquire();
     try {
       await (supabaseAdmin.from('job_groups') as any)
         .update({ status: 'ai_processing' })
@@ -534,8 +563,69 @@ const processRunningHubGroup = async (
         .eq('id', group.id);
       await new Promise((resolve) => setTimeout(resolve, backoff * 1000));
       backoff = Math.min(backoff * 2, retryCap);
+    } finally {
+      releaseSlot();
     }
   }
+};
+
+const maybeAutoRetryFailedGroups = async (jobId: string, runtimeConfig: Record<string, unknown>) => {
+  const autoRetry = runtimeConfig.auto_retry_failed !== false;
+  if (!autoRetry) return false;
+  if (await isJobCanceled(jobId)) return false;
+
+  const maxAttempts = Number(runtimeConfig.max_attempts ?? 3);
+  const { data: groups, error: groupError } = await (supabaseAdmin.from('job_groups') as any)
+    .select('id, status, attempts')
+    .eq('job_id', jobId);
+
+  if (groupError) {
+    console.warn('Auto-retry failed to fetch groups:', groupError.message);
+    return false;
+  }
+
+  const retryable = (groups || []).filter((group: any) => (
+    group.status === 'failed' && (group.attempts || 0) < maxAttempts
+  ));
+
+  if (retryable.length === 0) return false;
+
+  const retryIds = retryable.map((group: any) => group.id);
+  const { error: retryError } = await (supabaseAdmin.from('job_groups') as any)
+    .update({
+      status: 'queued',
+      hdr_bucket: null,
+      hdr_key: null,
+      output_bucket: null,
+      output_key: null,
+      last_error: null
+    })
+    .in('id', retryIds);
+
+  if (retryError) {
+    console.warn('Auto-retry failed to reset groups:', retryError.message);
+    return false;
+  }
+
+  await (supabaseAdmin.from('jobs') as any)
+    .update({ status: 'reserved', progress: 0, error_message: null })
+    .eq('id', jobId);
+
+  const delaySec = Number(runtimeConfig.auto_retry_delay_sec ?? 15);
+  try {
+    await jobQueue.add('pipeline-job', { jobId }, {
+      jobId: `pipeline:${jobId}:auto-retry:${Date.now()}`,
+      delay: Math.max(delaySec, 1) * 1000,
+      attempts: 1,
+      removeOnComplete: true,
+      removeOnFail: true
+    });
+  } catch (error) {
+    console.warn('Auto-retry enqueue failed:', (error as Error).message);
+    return false;
+  }
+
+  return true;
 };
 
 const processPipelineJob = async (jobId: string) => {
@@ -608,6 +698,9 @@ const processPipelineJob = async (jobId: string) => {
   });
 
   if (await isJobCanceled(jobId)) return;
+  const autoRetried = await maybeAutoRetryFailedGroups(jobId, context.runtimeConfig);
+  if (autoRetried) return;
+
   await (supabaseAdmin.from('jobs') as any)
     .update({ status: 'postprocess' })
     .eq('id', jobId);
