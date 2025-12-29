@@ -1588,6 +1588,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                         </button>
                       </div>
                     )}
+                    {img.status === 'processing' && img.stage === 'input' && (
+                      <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-2">
+                        <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin"></div>
+                        <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
+                          Processing
+                        </p>
+                      </div>
+                    )}
                     {img.status === 'processing' && (img.stage === 'hdr' || img.stage === 'ai') && (
                       <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-3">
                         <div className="w-10 h-10 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin"></div>
