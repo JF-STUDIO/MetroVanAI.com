@@ -1159,7 +1159,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       <div className="min-h-screen bg-[#0a0a0a] px-8 py-12">
         <div className="max-w-7xl mx-auto mb-12 text-center text-white">
           <h1 className="text-5xl font-black mb-2 uppercase tracking-tighter">Pro Studio Engines</h1>
-          <p className="font-medium opacity-40">Batch processing with R2 & RunningHub</p>
+          <p className="font-medium opacity-40">Professional photo enhancement workflows.</p>
         </div>
         <div className="max-w-[1200px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-10">
           {workflows.map(tool => (
