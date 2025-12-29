@@ -1008,32 +1008,20 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const previewReadyCount = (item.frames || []).filter((frame) => frame.preview_ready || frame.preview_url).length;
     const previewTotal = frameTotal || 1;
     const previewPercent = previewTotal ? Math.round((previewReadyCount / previewTotal) * 100) : 0;
-    const previewPending = !processingActive && previewPercent < 100;
     const stage: GalleryItem['stage'] = outputReady
       ? 'output'
-      : processingActive
-        ? (hdrReady ? 'ai' : 'hdr')
-        : 'input';
+      : item.status === 'ai_processing' || item.status === 'ai_ok'
+        ? 'ai'
+        : item.status === 'hdr_processing' || item.status === 'hdr_ok' || item.status === 'preprocess_ok'
+          ? 'hdr'
+          : 'input';
     const status: GalleryItem['status'] =
       item.status === 'failed'
         ? 'failed'
         : outputReady
           ? 'done'
-          : (processingActive || previewPending)
-            ? 'processing'
-            : 'pending';
-    let progress = 0;
-    if (status === 'done' || status === 'failed') {
-      progress = 100;
-    } else if (previewPending) {
-      progress = Math.max(5, previewPercent);
-    } else if (processingActive) {
-      if (stage === 'hdr') {
-        progress = hdrReady ? 65 : item.status === 'hdr_processing' ? 35 : 15;
-      } else if (stage === 'ai') {
-        progress = outputReady ? 100 : item.status === 'ai_processing' ? 75 : 55;
-      }
-    }
+          : 'processing';
+    const progress = status === 'done' || status === 'failed' ? 100 : 0;
     return {
       id: item.id,
       label: item.output_filename || `Group ${item.group_index}`,
@@ -1593,10 +1581,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                       </button>
                     )}
                     {img.status === 'processing' && (
-                      <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-3">
-                        <div className="w-32 bg-white/10 h-1.5 rounded-full overflow-hidden">
-                          <div className="h-full bg-indigo-500 transition-all" style={{ width: `${img.progress}%` }}></div>
-                        </div>
+                      <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-3">
+                        <div className="w-10 h-10 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin"></div>
                         <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
                           {img.stage === 'hdr'
                             ? 'HDR Processing'
@@ -1607,8 +1593,18 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                       </div>
                     )}
                     {img.status === 'failed' && img.error && (
-                      <div className="absolute inset-x-0 bottom-0 bg-red-500/30 text-red-100 text-[10px] px-3 py-2">
-                        {img.error}
+                      <div className="absolute inset-x-0 bottom-0 bg-red-500/30 text-red-100 text-[10px] px-3 py-2 flex items-center justify-between gap-3">
+                        <span className="truncate">{img.error}</span>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleRetryMissing();
+                          }}
+                          className="px-2 py-1 rounded-full bg-white/10 text-[9px] uppercase tracking-widest text-white hover:bg-white/20"
+                        >
+                          Retry
+                        </button>
                       </div>
                     )}
                     <div className="absolute bottom-3 left-3 right-3 text-[10px] uppercase tracking-widest text-white drop-shadow-sm">
