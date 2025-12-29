@@ -187,7 +187,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     const applyPipelineStatus = async (response: any) => {
       const pipelineJob = response.job;
-      setJob(pipelineJob);
+      setJob(prev => (prev ? { ...prev, ...pipelineJob } : pipelineJob));
       setJobStatus(pipelineJob.status);
       if (Array.isArray(response.items)) {
         setPipelineItems(response.items);

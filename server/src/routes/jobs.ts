@@ -1393,7 +1393,7 @@ router.post('/jobs/create', authenticate, async (req: AuthRequest, res: Response
 const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
     const { data: job, error } = await (supabaseAdmin
         .from('jobs') as any)
-        .select('id, status, estimated_units, reserved_units, settled_units, progress, zip_key, created_at, project_name')
+        .select('id, status, estimated_units, reserved_units, settled_units, progress, zip_key, created_at, project_name, workflow_id, workflow_version_id')
         .eq('id', jobId)
         .eq('user_id', userId)
         .single();
