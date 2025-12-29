@@ -1379,7 +1379,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const canAddMore = ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved'].includes(jobStatus);
   const downloadLabel = downloadType === 'jpg' ? 'Download JPG' : 'Download ZIP';
   const showReadyToEnhanceNotice = uploadComplete && jobStatus === 'input_resolved' && !processingActive;
-  const showProcessingNotice = uploadComplete && processingActive;
+  const showProcessingNotice = uploadComplete && (processingActive || previewInProgress || jobStatus === 'analyzing');
   const handleGallerySelect = (item: GalleryItem, index: number) => {
     setActiveIndex(index);
     if (item.preview) {
@@ -1588,11 +1588,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                         </button>
                       </div>
                     )}
-                    {img.status === 'processing' && img.stage === 'input' && (
+                    {img.stage === 'input' && !img.preview && img.status !== 'failed' && (
                       <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-2">
                         <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin"></div>
                         <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
-                          Processing
+                          Generating preview
                         </p>
                       </div>
                     )}
