@@ -1,4 +1,4 @@
-import os, sys, json, shutil
+import os, sys, json, shutil, math
 from datetime import datetime
 import pandas as pd
 import subprocess
@@ -181,9 +181,15 @@ def main(inp, out):
     # - 同一组通常在 1~3 秒内完成
     # - 曝光补偿/快门会变化，但光圈/焦距通常不变
     TIME_GAP_SEC = 3.0
+    BASE_GAP_SEC = 1.2
+    EXP_GAP_FACTOR = 2.5
 
-    groups = []
-    cur = []
+    def allowed_gap_sec(a, b):
+        exp_a = safe_num(a.get("shutter"), 0.0)
+        exp_b = safe_num(b.get("shutter"), 0.0)
+        max_exp = max(exp_a, exp_b)
+        dynamic = BASE_GAP_SEC + (EXP_GAP_FACTOR * max_exp)
+        return max(TIME_GAP_SEC, dynamic)
 
     def same_setup(a, b):
         # 光圈/焦距相近认为同一构图（容错）
@@ -193,29 +199,119 @@ def main(inp, out):
             return False
         return True
 
+    def exposure_value(item):
+        if item.get("ev") is not None:
+            return safe_num(item.get("ev"), None)
+        shutter = safe_num(item.get("shutter"), None)
+        if shutter is not None and shutter > 0:
+            return float(math.log2(shutter))
+        return None
+
+    def split_exposure_cluster(cluster):
+        if len(cluster) <= 1:
+            return [cluster]
+        if len(cluster) <= 7:
+            return [cluster]
+        ordered = sorted(cluster, key=lambda x: x["time"])
+        groups = []
+        current = []
+        direction = 0
+        start_exp = None
+        min_exp = None
+        max_exp = None
+
+        def push_current():
+            nonlocal current, direction, start_exp, min_exp, max_exp
+            if current:
+                groups.append(current)
+            current = []
+            direction = 0
+            start_exp = None
+            min_exp = None
+            max_exp = None
+
+        def update_range(exp):
+            nonlocal min_exp, max_exp
+            if exp is None:
+                return
+            if min_exp is None or exp < min_exp:
+                min_exp = exp
+            if max_exp is None or exp > max_exp:
+                max_exp = exp
+
+        for item in ordered:
+            if not current:
+                current = [item]
+                exp = exposure_value(item)
+                start_exp = exp
+                update_range(exp)
+                continue
+
+            prev = current[-1]
+            dt = (item["time"] - prev["time"]).total_seconds()
+            if dt > allowed_gap_sec(prev, item) or not same_setup(prev, item):
+                push_current()
+                current = [item]
+                exp = exposure_value(item)
+                start_exp = exp
+                update_range(exp)
+                continue
+
+            if len(current) >= 7:
+                push_current()
+                current = [item]
+                exp = exposure_value(item)
+                start_exp = exp
+                update_range(exp)
+                continue
+
+            exp = exposure_value(item)
+            prev_exp = exposure_value(prev)
+            if exp is not None and prev_exp is not None:
+                delta = exp - prev_exp
+                if direction == 0 and abs(delta) >= 0.4:
+                    direction = 1 if delta > 0 else -1
+
+                exp_range = 0.0
+                if min_exp is not None and max_exp is not None:
+                    exp_range = max_exp - min_exp
+
+                sign_flip = direction != 0 and ((direction > 0 and delta < -0.6) or (direction < 0 and delta > 0.6))
+                back_to_start = start_exp is not None and abs(exp - start_exp) <= 0.4
+
+                if len(current) >= 2 and sign_flip and (back_to_start or exp_range >= 0.6):
+                    push_current()
+                    current = [item]
+                    start_exp = exp
+                    update_range(exp)
+                    continue
+
+            current.append(item)
+            update_range(exp)
+
+        if current:
+            groups.append(current)
+        return groups
+
+    time_groups = []
+    cur = []
     for _, row in df.iterrows():
         if not cur:
             cur = [row]
             continue
         prev = cur[-1]
         dt = (row["time"] - prev["time"]).total_seconds()
-
-        ev_diff = abs(safe_num(row["ev"]) - safe_num(prev["ev"]))
-        shutter_diff = shutter_ratio(row["shutter"], prev["shutter"])
-
-        room_switch = (
-            dt > 1.2 and
-            ev_diff >= 0.7 and
-            shutter_diff >= 2.0
-        )
-
-        if dt <= TIME_GAP_SEC and same_setup(prev, row) and not room_switch:
+        if dt <= allowed_gap_sec(prev, row) and same_setup(prev, row):
             cur.append(row)
         else:
-            groups.append(cur)
+            time_groups.append(cur)
             cur = [row]
     if cur:
-        groups.append(cur)
+        time_groups.append(cur)
+
+    groups = []
+    for cluster in time_groups:
+        groups.extend(split_exposure_cluster(cluster))
 
     # 输出
     ensure_dir(out)
@@ -255,11 +351,20 @@ def main(inp, out):
                 score -= 0.20
                 reasons.append("shot_count_out_of_range")
 
-            time_gaps = gdf["time"].diff().dt.total_seconds()
-            max_gap = time_gaps.max() if len(time_gaps) else None
-            if max_gap is not None and not pd.isna(max_gap) and max_gap <= 1.5:
-                score += 0.20
-                reasons.append("time_gap_ok")
+            ordered = gdf.sort_values("time").reset_index(drop=True)
+            if len(ordered) > 1:
+                gap_ok = True
+                for idx in range(1, len(ordered)):
+                    prev = ordered.iloc[idx - 1]
+                    curr = ordered.iloc[idx]
+                    actual_gap = (curr["time"] - prev["time"]).total_seconds()
+                    allowed_gap = allowed_gap_sec(prev, curr)
+                    if actual_gap > allowed_gap:
+                        gap_ok = False
+                        break
+                if gap_ok:
+                    score += 0.20
+                    reasons.append("time_gap_ok")
 
             fnum_std = gdf["fnum"].std()
             if fnum_std is not None and not pd.isna(fnum_std) and fnum_std < 0.1:

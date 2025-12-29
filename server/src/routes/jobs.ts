@@ -143,6 +143,14 @@ const scoreCamera = (files: any[]) => {
     return same ? 0.1 : 0;
 };
 
+const evRange = (files: any[]) => {
+    const evs = files
+        .map(file => typeof file.ev === 'number' ? file.ev : null)
+        .filter((value: number | null) => value !== null) as number[];
+    if (evs.length < 2) return 0;
+    return Math.max(...evs) - Math.min(...evs);
+};
+
 const extractSequenceToken = (value: string) => {
     const base = path.basename(value || '');
     const match = base.match(/^(.*?)(\d+)(\.[^.]+)?$/);
@@ -170,9 +178,11 @@ const computeHdrConfidence = (files: any[]) => {
     if (files.length < 2) return 0;
     const hasExposureData = files.some((file) => typeof file.ev === 'number' || typeof file.exposure_time === 'number');
     const timeScore = scoreTime(files);
-    const score = timeScore + scoreExposureSteps(files) + scoreParams(files) + scoreCamera(files);
+    const evSpan = evRange(files);
+    const evRangeScore = evSpan >= 0.6 ? 0.2 : 0;
+    const score = timeScore + scoreExposureSteps(files) + scoreParams(files) + scoreCamera(files) + evRangeScore;
     const preferredSize = files.length === 3 || files.length === 5 || files.length === 7;
-    const fallback = preferredSize && hasExposureData && (timeScore >= 0.3 || hasSequentialFilenames(files)) ? 0.7 : 0;
+    const fallback = preferredSize && hasExposureData && (timeScore >= 0.3 || hasSequentialFilenames(files) || evSpan >= 0.6) ? 0.7 : 0;
     return Math.max(0, Math.min(1, Math.max(score, fallback)));
 };
 
@@ -241,6 +251,123 @@ const sameCaptureSetup = (a: any, b: any) => {
     return true;
 };
 
+const getExposureSeconds = (file: any) => {
+    if (typeof file?.exposure_time !== 'number') return null;
+    if (!Number.isFinite(file.exposure_time) || file.exposure_time <= 0) return null;
+    return file.exposure_time;
+};
+
+const computeAllowedGapMs = (a: any, b: any, baseMs: number) => {
+    const expA = getExposureSeconds(a) ?? 0;
+    const expB = getExposureSeconds(b) ?? 0;
+    const maxExp = Math.max(expA, expB);
+    const dynamicMs = 1200 + (maxExp * 2500);
+    return Math.max(baseMs, dynamicMs);
+};
+
+const exposureValue = (file: any) => {
+    if (typeof file?.ev === 'number' && Number.isFinite(file.ev)) return file.ev;
+    if (typeof file?.exposure_time === 'number' && Number.isFinite(file.exposure_time) && file.exposure_time > 0) {
+        return Math.log2(file.exposure_time);
+    }
+    return null;
+};
+
+const splitExposureCluster = (cluster: any[], thresholdMs: number) => {
+    if (cluster.length <= 1) return [cluster];
+    if (cluster.length <= 7) return [cluster];
+    const ordered = [...cluster].sort((a, b) => {
+        if (a.exif_time && b.exif_time) {
+            return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
+        }
+        if (a.exif_time) return -1;
+        if (b.exif_time) return 1;
+        return (a.filename || '').localeCompare(b.filename || '');
+    });
+
+    const groups: any[][] = [];
+    let current: any[] = [];
+    let direction = 0;
+    let startExp: number | null = null;
+    let minExp: number | null = null;
+    let maxExp: number | null = null;
+
+    const pushCurrent = () => {
+        if (current.length > 0) groups.push(current);
+        current = [];
+        direction = 0;
+        startExp = null;
+        minExp = null;
+        maxExp = null;
+    };
+
+    const updateRange = (value: number | null) => {
+        if (value === null) return;
+        if (minExp === null || value < minExp) minExp = value;
+        if (maxExp === null || value > maxExp) maxExp = value;
+    };
+
+    for (const file of ordered) {
+        if (current.length === 0) {
+            current.push(file);
+            const exp = exposureValue(file);
+            startExp = exp;
+            updateRange(exp);
+            continue;
+        }
+
+        const last = current[current.length - 1];
+        if (last.exif_time && file.exif_time) {
+            const deltaMs = Math.abs(new Date(file.exif_time).getTime() - new Date(last.exif_time).getTime());
+            const allowedGap = computeAllowedGapMs(last, file, thresholdMs);
+            if (deltaMs > allowedGap || !sameCaptureSetup(last, file)) {
+                pushCurrent();
+                current.push(file);
+                const exp = exposureValue(file);
+                startExp = exp;
+                updateRange(exp);
+                continue;
+            }
+        }
+
+        if (current.length >= 7) {
+            pushCurrent();
+            current.push(file);
+            const exp = exposureValue(file);
+            startExp = exp;
+            updateRange(exp);
+            continue;
+        }
+
+        const exp = exposureValue(file);
+        const lastExp = exposureValue(last);
+        if (exp !== null && lastExp !== null) {
+            const deltaExp = exp - lastExp;
+            if (direction === 0 && Math.abs(deltaExp) >= 0.4) {
+                direction = deltaExp > 0 ? 1 : -1;
+            }
+
+            const range = (minExp !== null && maxExp !== null) ? (maxExp - minExp) : 0;
+            const signFlip = direction !== 0 && ((direction > 0 && deltaExp < -0.6) || (direction < 0 && deltaExp > 0.6));
+            const backToStart = startExp !== null && Math.abs(exp - startExp) <= 0.4;
+
+            if (current.length >= 2 && signFlip && (backToStart || range >= 0.6)) {
+                pushCurrent();
+                current.push(file);
+                startExp = exp;
+                updateRange(exp);
+                continue;
+            }
+        }
+
+        current.push(file);
+        updateRange(exp);
+    }
+
+    if (current.length > 0) groups.push(current);
+    return groups;
+};
+
 const buildTimeGroups = (files: any[], thresholdMs: number) => {
     const groups: any[][] = [];
     let current: any[] = [];
@@ -264,7 +391,8 @@ const buildTimeGroups = (files: any[], thresholdMs: number) => {
             continue;
         }
         const delta = Math.abs(new Date(file.exif_time).getTime() - new Date(last.exif_time).getTime());
-        if (delta <= thresholdMs && sameCaptureSetup(last, file)) {
+        const allowedGap = computeAllowedGapMs(last, file, thresholdMs);
+        if (delta <= allowedGap && sameCaptureSetup(last, file)) {
             current.push(file);
         } else {
             groups.push(current);
@@ -827,19 +955,63 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
     const groups: { files: any[]; group_type: string; hdr_confidence: number | null; output_filename: string }[] = [];
 
     for (const cluster of timeGroups) {
-        if (cluster.length < 3) {
-            const orderedCluster = orderGroupFiles(cluster);
-            const confidence = computeHdrConfidence(orderedCluster);
-            if (orderedCluster.length >= 2 && confidence >= 0.7) {
-                const lead = pickOutputLead(orderedCluster) || orderedCluster[0];
+        const segments = splitExposureCluster(cluster, thresholdMs);
+        for (const segment of segments) {
+            if (segment.length === 0) continue;
+            const hasExposureData = segment.some((file: any) => typeof file.ev === 'number' || typeof file.exposure_time === 'number');
+
+            if (!hasExposureData && segment.length >= 3) {
+                const { sizes } = exposurePlan(segment.length);
+                let offset = 0;
+                for (const size of sizes) {
+                    const subset = orderGroupFiles(segment.slice(offset, offset + size));
+                    offset += size;
+                    const confidence = computeHdrConfidence(subset);
+                    if (confidence >= 0.7) {
+                        const lead = pickOutputLead(subset) || subset[0];
+                        groups.push({
+                            files: subset,
+                            group_type: 'hdr',
+                            hdr_confidence: confidence,
+                            output_filename: normalizeOutputFilename(lead.filename, lead.r2_key.split('/').pop() || 'hdr')
+                        });
+                    } else {
+                        for (const file of subset) {
+                            groups.push({
+                                files: [file],
+                                group_type: 'raw',
+                                hdr_confidence: confidence,
+                                output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
+                            });
+                        }
+                    }
+                }
+
+                const remaining = segment.length - offset;
+                for (let i = 0; i < remaining; i += 1) {
+                    const file = segment[offset + i];
+                    groups.push({
+                        files: [file],
+                        group_type: 'raw',
+                        hdr_confidence: null,
+                        output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
+                    });
+                }
+                continue;
+            }
+
+            const orderedSegment = orderGroupFiles(segment);
+            const confidence = computeHdrConfidence(orderedSegment);
+            if (orderedSegment.length >= 2 && confidence >= 0.7) {
+                const lead = pickOutputLead(orderedSegment) || orderedSegment[0];
                 groups.push({
-                    files: orderedCluster,
+                    files: orderedSegment,
                     group_type: 'hdr',
                     hdr_confidence: confidence,
                     output_filename: normalizeOutputFilename(lead.filename, lead.r2_key.split('/').pop() || 'hdr')
                 });
             } else {
-                for (const file of orderedCluster) {
+                for (const file of orderedSegment) {
                     groups.push({
                         files: [file],
                         group_type: 'raw',
@@ -848,44 +1020,6 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
                     });
                 }
             }
-            continue;
-        }
-
-        const { sizes } = exposurePlan(cluster.length);
-        let offset = 0;
-        for (const size of sizes) {
-            const subset = orderGroupFiles(cluster.slice(offset, offset + size));
-            offset += size;
-            const confidence = computeHdrConfidence(subset);
-            if (confidence >= 0.7) {
-                const lead = pickOutputLead(subset) || subset[0];
-                groups.push({
-                    files: subset,
-                    group_type: 'hdr',
-                    hdr_confidence: confidence,
-                    output_filename: normalizeOutputFilename(lead.filename, lead.r2_key.split('/').pop() || 'hdr')
-                });
-            } else {
-                for (const file of subset) {
-                    groups.push({
-                        files: [file],
-                        group_type: 'raw',
-                        hdr_confidence: confidence,
-                        output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
-                    });
-                }
-            }
-        }
-
-        const remaining = cluster.length - offset;
-        for (let i = 0; i < remaining; i += 1) {
-            const file = cluster[offset + i];
-            groups.push({
-                files: [file],
-                group_type: 'raw',
-                hdr_confidence: null,
-                output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
-            });
         }
     }
 
