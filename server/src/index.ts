@@ -7,6 +7,7 @@ import morgan from 'morgan';
 import jobRoutes from './routes/jobs.js';
 import workflowRoutes from './routes/workflows.js';
 import adminRoutes from './routes/admin.js';
+import settingsRoutes from './routes/settings.js';
 import { createRedis } from './services/redis.js';
 
 const app = express();
@@ -53,6 +54,7 @@ app.use(express.json());
 app.use('/api', jobRoutes);
 app.use('/api', workflowRoutes);
 app.use('/api', adminRoutes);
+app.use('/api', settingsRoutes);
 
 const inlineWorkerEnabled = process.env.ENABLE_INLINE_WORKER === 'true';
 console.log(`Inline worker enabled: ${inlineWorkerEnabled ? 'true' : 'false'}`);

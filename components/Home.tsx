@@ -1,11 +1,31 @@
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { jobService } from '../services/jobService';
 
 interface HomeProps {
   onStart: () => void;
 }
 
 const Home: React.FC<HomeProps> = ({ onStart }) => {
+  const [trialPoints, setTrialPoints] = useState<number>(10);
+
+  useEffect(() => {
+    let mounted = true;
+    jobService.getSettings()
+      .then((data) => {
+        const value = Number(data?.free_trial_points);
+        if (mounted && Number.isFinite(value)) {
+          setTrialPoints(value);
+        }
+      })
+      .catch(() => {
+        // Keep default if settings cannot load.
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   return (
     <div className="max-w-7xl mx-auto px-6 pt-20 pb-40">
       <div className="text-center mb-24">
@@ -30,7 +50,7 @@ const Home: React.FC<HomeProps> = ({ onStart }) => {
           </button>
           <div className="flex items-center gap-2 text-gray-500 text-sm font-medium">
             <i className="fa-solid fa-check text-green-500"></i>
-            10 Free Points for New Users
+            {trialPoints} Free Points for New Users
           </div>
         </div>
       </div>

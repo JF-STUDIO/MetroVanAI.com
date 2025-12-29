@@ -121,6 +121,11 @@ export const jobService = {
     return response.data;
   },
 
+  getSettings: async () => {
+    const response = await api.get('/settings');
+    return response.data;
+  },
+
   adminGetWorkflows: async () => {
     const response = await api.get('/admin/workflows');
     return response.data;
@@ -168,6 +173,16 @@ export const jobService = {
 
   adminGetJobs: async (limit = 20) => {
     const response = await api.get(`/admin/jobs?limit=${limit}`);
+    return response.data;
+  },
+
+  adminGetSettings: async () => {
+    const response = await api.get('/admin/settings');
+    return response.data;
+  },
+
+  adminUpdateSettings: async (payload: Record<string, unknown>) => {
+    const response = await api.patch('/admin/settings', payload);
     return response.data;
   },
 

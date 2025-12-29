@@ -121,3 +121,7 @@ export interface AdminJobRow {
   created_at?: string;
   group_errors?: { group_index: number; last_error: string | null }[];
 }
+
+export interface AppSettings {
+  free_trial_points: number;
+}

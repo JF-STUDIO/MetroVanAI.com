@@ -10,6 +10,7 @@ import path from 'path';
 import { AuthRequest } from '../types/auth.js';
 import { createRedis } from '../services/redis.js';
 import { extractExifFromR2 } from '../services/exif.js';
+import { getFreeTrialPoints } from '../services/settings.js';
 
 const router = Router();
 
@@ -718,10 +719,16 @@ router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => 
     if (error) return res.status(500).json({ error: error.message });
 
     if (!data) {
+        let trialPoints = 10;
+        try {
+            trialPoints = await getFreeTrialPoints();
+        } catch (settingsError) {
+            console.warn('Failed to load free trial points, using default.', settingsError);
+        }
         const fallbackProfile = {
             id: userId,
             email: req.user?.email || null,
-            points: 10,
+            points: trialPoints,
             is_admin: false
         };
         const { data: created, error: createError } = await (supabaseAdmin.from('profiles') as any)

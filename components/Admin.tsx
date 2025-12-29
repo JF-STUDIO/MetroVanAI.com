@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AdminJobRow, AdminWorkflow, CreditRow, User, WorkflowVersion } from '../types';
+import { AdminJobRow, AdminWorkflow, AppSettings, CreditRow, User, WorkflowVersion } from '../types';
 import { jobService } from '../services/jobService';
 
 type NewWorkflowForm = {
@@ -78,6 +78,9 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
   const [versionsByWorkflow, setVersionsByWorkflow] = useState<Record<string, WorkflowVersion[]>>({});
   const [credits, setCredits] = useState<CreditRow[]>([]);
   const [jobs, setJobs] = useState<AdminJobRow[]>([]);
+  const [settings, setSettings] = useState<AppSettings>({ free_trial_points: 10 });
+  const [settingsDraft, setSettingsDraft] = useState('10');
+  const [settingsLoading, setSettingsLoading] = useState(false);
   const [loading, setLoading] = useState({ workflows: false, credits: false, jobs: false });
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -144,11 +147,28 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     }
   };
 
+  const loadSettings = async () => {
+    setSettingsLoading(true);
+    setError(null);
+    try {
+      const data = await jobService.adminGetSettings();
+      const value = Number(data?.free_trial_points ?? 10);
+      const next = Number.isFinite(value) ? value : 10;
+      setSettings({ free_trial_points: next });
+      setSettingsDraft(String(next));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load settings.');
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (user.isAdmin) {
       loadWorkflows();
       loadCredits();
       loadJobs();
+      loadSettings();
     }
   }, [user.isAdmin]);
 
@@ -410,6 +430,25 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     }
   };
 
+  const handleUpdateSettings = async () => {
+    setNotice(null);
+    setError(null);
+    const nextValue = Number(settingsDraft);
+    if (!Number.isFinite(nextValue) || nextValue < 0) {
+      setError('Free trial points must be a non-negative number.');
+      return;
+    }
+    try {
+      const updated = await jobService.adminUpdateSettings({ free_trial_points: nextValue });
+      const value = Number(updated?.free_trial_points ?? nextValue);
+      setSettings({ free_trial_points: Number.isFinite(value) ? value : nextValue });
+      setSettingsDraft(String(Number.isFinite(value) ? value : nextValue));
+      setNotice('Settings updated.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update settings.');
+    }
+  };
+
   if (!user.isAdmin) {
     return (
       <div className="min-h-screen bg-[#0a0a0a] px-8 py-12 text-white">
@@ -441,6 +480,37 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
             {notice && <div className="text-emerald-400">{notice}</div>}
           </div>
         )}
+
+        <section className="glass rounded-[2.5rem] p-8 border border-white/10">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-sm font-black uppercase tracking-widest text-gray-400">Trial Settings</h2>
+              <p className="text-xs text-gray-500">Controls the free points granted to new users.</p>
+            </div>
+            {settingsLoading && <span className="text-xs text-gray-500">Loading...</span>}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-4">
+            <div>
+              <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Free Trial Points</label>
+              <input
+                value={settingsDraft}
+                onChange={(e) => setSettingsDraft(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3"
+              />
+            </div>
+            <div className="flex items-end">
+              <button
+                onClick={handleUpdateSettings}
+                className="px-6 py-3 rounded-2xl gradient-btn text-white text-xs font-black uppercase tracking-widest"
+              >
+                Save Settings
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 text-xs text-gray-500">
+            Current: {settings.free_trial_points} points
+          </div>
+        </section>
 
         <section className="glass rounded-[2.5rem] p-8 border border-white/10">
           <h2 className="text-sm font-black uppercase tracking-widest text-gray-400 mb-6">Create Workflow</h2>
