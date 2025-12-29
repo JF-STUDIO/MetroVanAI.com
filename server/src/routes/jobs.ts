@@ -1427,17 +1427,23 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
         filesByGroup.set(file.group_id, list);
     });
 
+    const resolveInputKind = (file: any) => file?.input_kind || detectInputKind(file?.filename, file?.r2_key);
+    const isPreviewReady = (file: any) => {
+        const kind = resolveInputKind(file);
+        if (kind && kind !== 'raw') return true;
+        return Boolean(file?.preview_key || file?.preview_ready);
+    };
+
     const previewTotal = (fileRows || []).length;
-    const previewReady = (fileRows || []).filter((file: any) => (
-        file.input_kind !== 'raw' || Boolean(file.preview_key)
-    )).length;
+    const previewReady = (fileRows || []).filter((file: any) => isPreviewReady(file)).length;
 
     const buildPreviewUrl = async (file: any) => {
         if (!file) return null;
         if (file.preview_key) {
             return getPresignedGetUrl(file.preview_bucket || HDR_BUCKET, file.preview_key, 900);
         }
-        if (file.input_kind && file.input_kind !== 'raw') {
+        const kind = resolveInputKind(file);
+        if (kind && kind !== 'raw') {
             return getPresignedGetUrl(file.r2_bucket || RAW_BUCKET, file.r2_key, 900);
         }
         return null;
@@ -1464,8 +1470,8 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
             filename: file.filename || path.basename(file.r2_key),
             order: index + 1,
             preview_url: await buildPreviewUrl(file),
-            input_kind: file.input_kind || null,
-            preview_ready: Boolean(file.preview_key)
+            input_kind: resolveInputKind(file),
+            preview_ready: isPreviewReady(file)
         })));
         const representativeFrame = frames[repIndex] || frames[0] || null;
         const previewUrl = representativeFrame?.preview_url || null;

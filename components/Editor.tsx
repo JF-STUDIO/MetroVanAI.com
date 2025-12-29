@@ -1597,7 +1597,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                         </p>
                       </div>
                     )}
-                    {img.status === 'failed' && img.error && (
+                    {img.status === 'failed' && img.error && img.stage !== 'input' && (
                       <div className="absolute inset-x-0 bottom-0 bg-red-500/30 text-red-100 text-[10px] px-3 py-2 flex items-center justify-between gap-3">
                         <span className="truncate">{img.error}</span>
                         <button

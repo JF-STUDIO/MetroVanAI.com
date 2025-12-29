@@ -37,6 +37,31 @@ const runCommand = (command: string, args: string[], options: { cwd?: string } =
     });
   });
 
+const runCommandToFile = (command: string, args: string[], outputPath: string, options: { cwd?: string } = {}) =>
+  new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: options.cwd
+    });
+    let stderr = '';
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    const output = createWriteStream(outputPath);
+    pipeline(child.stdout, output)
+      .then(() => undefined)
+      .catch((err) => {
+        stderr += err instanceof Error ? err.message : String(err);
+      });
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${command} failed: ${stderr.trim()}`));
+      }
+    });
+  });
+
 const resolveBinary = async (name: string) => {
   try {
     const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
@@ -124,6 +149,18 @@ const extractEmbeddedJpeg = async (inputPath: string, outputPath: string) => {
     return false;
   }
 
+  return fileExists(outputPath);
+};
+
+const extractDcrawThumbnail = async (inputPath: string, outputPath: string) => {
+  const dcraw = await resolveBinary('dcraw');
+  if (!dcraw) return false;
+  try {
+    await fs.rm(outputPath, { force: true });
+    await runCommandToFile(dcraw, ['-e', '-c', inputPath], outputPath);
+  } catch {
+    return false;
+  }
   return fileExists(outputPath);
 };
 
@@ -215,36 +252,8 @@ export const createRawPreview = async (inputPath: string, outputPath: string) =>
   const extracted = await extractEmbeddedJpeg(inputPath, outputPath);
   if (extracted) return;
 
-  const dcraw = await resolveBinary('dcraw');
-  if (dcraw) {
-    try {
-      const dir = path.dirname(inputPath);
-      const base = path.basename(inputPath);
-      const stem = path.parse(inputPath).name;
-      await runCommand(dcraw, ['-e', inputPath], { cwd: dir });
-      const candidates = [
-        path.join(dir, `${base}.thumb.jpg`),
-        path.join(dir, `${base}.thumb.JPG`),
-        path.join(dir, `${stem}.thumb.jpg`),
-        path.join(dir, `${stem}.thumb.JPG`),
-        path.join(dir, `${base}.thumb.tif`),
-        path.join(dir, `${base}.thumb.TIF`),
-        path.join(dir, `${stem}.thumb.tif`),
-        path.join(dir, `${stem}.thumb.TIF`)
-      ];
-      for (const candidate of candidates) {
-        if (await fileExists(candidate)) {
-          await fs.copyFile(candidate, outputPath);
-          if (candidate !== outputPath) {
-            await fs.rm(candidate, { force: true });
-          }
-          return;
-        }
-      }
-    } catch {
-      // ignore and fallback to full conversion
-    }
-  }
+  const dcrawThumb = await extractDcrawThumbnail(inputPath, outputPath);
+  if (dcrawThumb) return;
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mvai-preview-'));
   try {
