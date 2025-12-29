@@ -190,39 +190,6 @@ const App: React.FC = () => {
     setAuthNotice(null);
   };
 
-  if (loading) return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
-
-  const currentView = (() => {
-    const path = location.pathname;
-    if (path.startsWith('/admin')) return 'admin';
-    if (path.startsWith('/studio')) return 'editor';
-    if (path.startsWith('/pricing')) return 'pricing';
-    if (path.startsWith('/auth') || path.startsWith('/login')) return 'login';
-    return 'home';
-  })();
-
-  const handleNavigate = (target: string) => {
-    switch (target) {
-      case 'home':
-        navigate('/');
-        break;
-      case 'login':
-        navigate('/login');
-        break;
-      case 'editor':
-        navigate('/studio');
-        break;
-      case 'admin':
-        navigate('/admin');
-        break;
-      case 'pricing':
-        navigate('/pricing');
-        break;
-      default:
-        navigate('/');
-    }
-  };
-
   const loginView = (
     <div className="flex-1 flex items-center justify-center p-6">
       <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
@@ -440,6 +407,39 @@ const App: React.FC = () => {
       active = false;
     };
   }, [location.pathname]);
+
+  if (loading) return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
+
+  const currentView = (() => {
+    const path = location.pathname;
+    if (path.startsWith('/admin')) return 'admin';
+    if (path.startsWith('/studio')) return 'editor';
+    if (path.startsWith('/pricing')) return 'pricing';
+    if (path.startsWith('/auth') || path.startsWith('/login')) return 'login';
+    return 'home';
+  })();
+
+  const handleNavigate = (target: string) => {
+    switch (target) {
+      case 'home':
+        navigate('/');
+        break;
+      case 'login':
+        navigate('/login');
+        break;
+      case 'editor':
+        navigate('/studio');
+        break;
+      case 'admin':
+        navigate('/admin');
+        break;
+      case 'pricing':
+        navigate('/pricing');
+        break;
+      default:
+        navigate('/');
+    }
+  };
 
   return (
     <Layout user={user} onLogout={logout} onNavigate={handleNavigate} currentView={currentView}>
