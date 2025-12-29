@@ -15,6 +15,11 @@ const App: React.FC = () => {
   const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
   const [isRegister, setIsRegister] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirm, setResetConfirm] = useState('');
+  const [resetReady, setResetReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
@@ -67,6 +72,15 @@ const App: React.FC = () => {
     }
   }, [user]);
 
+  const normalizeAuthError = (message: string) => {
+    const lower = message.toLowerCase();
+    if (lower.includes('invalid login')) return 'Incorrect email or password.';
+    if (lower.includes('email') && lower.includes('not confirmed')) return 'Please confirm your email before signing in.';
+    return message;
+  };
+
+  const isStrongPassword = (value: string) => /[A-Za-z]/.test(value) && /[^A-Za-z0-9\s]/.test(value);
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -102,7 +116,64 @@ const App: React.FC = () => {
       }
     } catch (error) {
       if (error instanceof Error) {
-        setAuthError(error.message);
+        setAuthError(normalizeAuthError(error.message));
+      } else {
+        setAuthError('An unknown error occurred.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      const targetEmail = (resetEmail || email).trim();
+      if (!targetEmail) {
+        setAuthError('Please enter your email.');
+        return;
+      }
+      const { error } = await supabase.auth.resetPasswordForEmail(targetEmail, {
+        redirectTo: `${window.location.origin}/auth/reset`
+      });
+      if (error) throw error;
+      setAuthNotice('Password reset link sent. Check your email.');
+      setResetEmail(targetEmail);
+    } catch (error) {
+      if (error instanceof Error) {
+        setAuthError(normalizeAuthError(error.message));
+      } else {
+        setAuthError('An unknown error occurred.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePasswordUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      if (!isStrongPassword(resetPassword)) {
+        setAuthError('Password must include at least one letter and one symbol.');
+        return;
+      }
+      if (resetPassword !== resetConfirm) {
+        setAuthError('Passwords do not match.');
+        return;
+      }
+      const { error } = await supabase.auth.updateUser({ password: resetPassword });
+      if (error) throw error;
+      setAuthNotice('Password updated. Please sign in.');
+      navigate('/login', { replace: true });
+    } catch (error) {
+      if (error instanceof Error) {
+        setAuthError(normalizeAuthError(error.message));
       } else {
         setAuthError('An unknown error occurred.');
       }
@@ -197,9 +268,61 @@ const App: React.FC = () => {
           </button>
         </form>
         <div className="mt-8 text-center text-sm text-gray-500">
-          {isRegister ? 'Already have an account?' : "Don't have an account?"}
-          <button onClick={() => { setIsRegister(!isRegister); setAuthError(null); setAuthNotice(null); }} className="ml-1 text-indigo-400 font-bold hover:underline">
-            {isRegister ? 'Sign In' : 'Create one'}
+          {!isRegister && (
+            <button onClick={() => { setIsResetting(true); setAuthError(null); setAuthNotice(null); }} className="text-indigo-400 font-bold hover:underline">
+              Forgot password?
+            </button>
+          )}
+          {isRegister ? (
+            <>
+              {' '}Already have an account?
+              <button onClick={() => { setIsRegister(false); setAuthError(null); setAuthNotice(null); }} className="ml-1 text-indigo-400 font-bold hover:underline">
+                Sign In
+              </button>
+            </>
+          ) : (
+            <>
+              {" Don't have an account?"}
+              <button onClick={() => { setIsRegister(true); setAuthError(null); setAuthNotice(null); }} className="ml-1 text-indigo-400 font-bold hover:underline">
+                Create one
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const resetRequestView = (
+    <div className="flex-1 flex items-center justify-center p-6">
+      <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl text-center">
+        <h2 className="text-2xl font-black mb-2 uppercase tracking-tight">Reset Password</h2>
+        <p className="text-sm text-gray-500 mb-8">We’ll send you a reset link.</p>
+        {(authError || authNotice) && (
+          <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs text-left">
+            {authError && <div className="text-red-400">{authError}</div>}
+            {authNotice && <div className="text-emerald-300">{authNotice}</div>}
+          </div>
+        )}
+        <form onSubmit={handleResetRequest} className="space-y-6">
+          <div>
+            <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Email Address</label>
+            <input
+              type="email"
+              required
+              className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
+              placeholder="Enter your email"
+              value={resetEmail || email}
+              onChange={e => setResetEmail(e.target.value)}
+            />
+          </div>
+          <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg">
+            Send Reset Link
+          </button>
+        </form>
+        <div className="mt-8 text-sm text-gray-500">
+          <button onClick={() => { setIsResetting(false); setAuthError(null); setAuthNotice(null); }} className="text-indigo-400 font-bold hover:underline">
+            Back to Sign In
           </button>
         </div>
       </div>
@@ -211,6 +334,55 @@ const App: React.FC = () => {
       <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl text-center">
         <h2 className="text-2xl font-black mb-3 uppercase tracking-tight">Verifying Email</h2>
         <p className="text-sm text-gray-400">Please wait while we confirm your account...</p>
+      </div>
+    </div>
+  );
+
+  const resetPasswordView = (
+    <div className="flex-1 flex items-center justify-center p-6">
+      <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
+        <div className="text-center mb-8">
+          <h2 className="text-2xl font-black mb-2 uppercase tracking-tight">Set New Password</h2>
+          <p className="text-sm text-gray-500">Choose a strong password to continue.</p>
+        </div>
+        {(authError || authNotice) && (
+          <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs">
+            {authError && <div className="text-red-400">{authError}</div>}
+            {authNotice && <div className="text-emerald-300">{authNotice}</div>}
+          </div>
+        )}
+        {!resetReady ? (
+          <div className="text-center text-sm text-gray-500">Validating reset link...</div>
+        ) : (
+          <form onSubmit={handlePasswordUpdate} className="space-y-6">
+            <div>
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-2">New Password</label>
+              <input
+                type="password"
+                required
+                className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
+                placeholder="••••••••"
+                value={resetPassword}
+                onChange={e => setResetPassword(e.target.value)}
+              />
+              <p className="mt-2 text-[11px] text-gray-500">Must include at least one letter and one symbol.</p>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Confirm Password</label>
+              <input
+                type="password"
+                required
+                className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
+                placeholder="••••••••"
+                value={resetConfirm}
+                onChange={e => setResetConfirm(e.target.value)}
+              />
+            </div>
+            <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg">
+              Update Password
+            </button>
+          </form>
+        )}
       </div>
     </div>
   );
@@ -242,12 +414,40 @@ const App: React.FC = () => {
     };
   }, [location.pathname, navigate]);
 
+  useEffect(() => {
+    if (!location.pathname.startsWith('/auth/reset')) return;
+    let active = true;
+    const run = async () => {
+      try {
+        const url = new URL(window.location.href);
+        const code = url.searchParams.get('code');
+        if (code) {
+          const { error } = await supabase.auth.exchangeCodeForSession(code);
+          if (error) throw error;
+        } else {
+          await supabase.auth.getSession();
+        }
+        if (active) setResetReady(true);
+      } catch (error) {
+        if (active) {
+          setAuthError('Reset link is invalid or expired.');
+          setResetReady(false);
+        }
+      }
+    };
+    run();
+    return () => {
+      active = false;
+    };
+  }, [location.pathname]);
+
   return (
     <Layout user={user} onLogout={logout} onNavigate={handleNavigate} currentView={currentView}>
       <Routes>
         <Route path="/" element={<Home onStart={() => navigate(user ? '/studio' : '/login')} />} />
-        <Route path="/login" element={user ? <Navigate to="/studio" replace /> : loginView} />
+        <Route path="/login" element={user ? <Navigate to="/studio" replace /> : (isResetting ? resetRequestView : loginView)} />
         <Route path="/auth/callback" element={authCallbackView} />
+        <Route path="/auth/reset" element={resetPasswordView} />
         <Route path="/studio" element={user ? <Editor user={user} workflows={workflows} onUpdateUser={setUser} /> : <Navigate to="/login" replace />} />
         <Route path="/admin" element={user && user.isAdmin ? <Admin user={user} /> : <Navigate to={user ? '/studio' : '/login'} replace />} />
         <Route path="/pricing" element={<Home onStart={() => navigate(user ? '/studio' : '/login')} />} />
