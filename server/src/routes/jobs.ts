@@ -1313,18 +1313,19 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
         .eq('job_id', jobId);
     if (groupError) return res.status(500).json({ error: groupError.message });
 
-    const retryable = (groups || []).filter((group: any) => (
-        group.status === 'failed' && (group.attempts || 0) < maxAttempts
-    ));
+    const failedGroups = (groups || []).filter((group: any) => group.status === 'failed');
+    const retryable = failedGroups.filter((group: any) => (group.attempts || 0) < maxAttempts);
 
-    if (retryable.length === 0) {
-        return res.json({ retried: 0, message: 'No retryable groups' });
+    if (retryable.length === 0 && failedGroups.length === 0) {
+        return res.json({ retried: 0, message: 'No failed groups to retry' });
     }
 
-    const retryIds = retryable.map((group: any) => group.id);
+    const retryIds = (retryable.length > 0 ? retryable : failedGroups).map((group: any) => group.id);
+    const forced = retryable.length === 0 && failedGroups.length > 0;
     const { error: retryError } = await (supabaseAdmin.from('job_groups') as any)
         .update({
             status: 'queued',
+            attempts: 0,
             hdr_bucket: null,
             hdr_key: null,
             output_bucket: null,
@@ -1335,7 +1336,7 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
     if (retryError) return res.status(500).json({ error: retryError.message });
 
     await (supabaseAdmin.from('jobs') as any)
-        .update({ status: 'reserved', progress: 0 })
+        .update({ status: 'reserved', progress: 0, error_message: null })
         .eq('id', jobId)
         .eq('user_id', userId);
 
@@ -1346,7 +1347,7 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
         removeOnFail: true
     });
 
-    res.json({ retried: retryIds.length });
+    res.json({ retried: retryIds.length, forced });
 });
 
 // New pipeline: create job from workflow
