@@ -1,6 +1,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { jobService } from '../services/jobService';
+import { Workflow } from '../types';
 
 interface HomeProps {
   onStart: () => void;
@@ -8,6 +9,7 @@ interface HomeProps {
 
 const Home: React.FC<HomeProps> = ({ onStart }) => {
   const [trialPoints, setTrialPoints] = useState<number>(10);
+  const [publicWorkflows, setPublicWorkflows] = useState<Workflow[]>([]);
 
   useEffect(() => {
     let mounted = true;
@@ -26,6 +28,22 @@ const Home: React.FC<HomeProps> = ({ onStart }) => {
     };
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+    jobService.getPublicWorkflows()
+      .then((data) => {
+        if (mounted && Array.isArray(data)) {
+          setPublicWorkflows(data);
+        }
+      })
+      .catch(() => {
+        // Keep empty if workflows cannot load.
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   return (
     <div className="max-w-7xl mx-auto px-6 pt-20 pb-40">
       <div className="text-center mb-24">
@@ -34,11 +52,11 @@ const Home: React.FC<HomeProps> = ({ onStart }) => {
         </span>
         <h1 className="text-6xl md:text-8xl font-black mb-8 tracking-tighter leading-none">
           FLAWLESS SHOTS <br />
-          <span className="gradient-text">IN SECONDS.</span>
+          <span className="gradient-text">READY FAST.</span>
         </h1>
         <p className="text-xl text-gray-400 max-w-3xl mx-auto mb-12 leading-relaxed">
           Stop waiting days for retouched photos. Metrovan AI is engineered for real estate professionals 
-          to transform property images into high-end, listing-ready masterpieces instantly. 
+          to transform property images into high-end, listing-ready masterpieces quickly. 
           No manual back-and-forth—just premium results every time.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -82,6 +100,53 @@ const Home: React.FC<HomeProps> = ({ onStart }) => {
           </div>
         ))}
       </div>
+
+      {publicWorkflows.length > 0 && (
+        <div className="mt-24">
+          <div className="text-center mb-12">
+            <h2 className="text-3xl md:text-4xl font-black mb-3 uppercase tracking-tight">Featured Workflows</h2>
+            <p className="text-gray-500 max-w-2xl mx-auto text-sm">
+              Explore the editing styles available in Metrovan AI. Results shown are previews only.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {publicWorkflows.map((workflow) => (
+              <div key={workflow.id} className="glass rounded-[2.5rem] p-6 border border-white/10">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="rounded-2xl overflow-hidden bg-white/5 border border-white/10 aspect-[4/3] flex items-center justify-center">
+                    {workflow.preview_original ? (
+                      <img
+                        src={workflow.preview_original}
+                        alt={`${workflow.display_name} before`}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="text-xs text-gray-500 uppercase tracking-widest">Before</div>
+                    )}
+                  </div>
+                  <div className="rounded-2xl overflow-hidden bg-white/5 border border-white/10 aspect-[4/3] flex items-center justify-center">
+                    {workflow.preview_processed ? (
+                      <img
+                        src={workflow.preview_processed}
+                        alt={`${workflow.display_name} after`}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="text-xs text-gray-500 uppercase tracking-widest">After</div>
+                    )}
+                  </div>
+                </div>
+                <div className="mt-5">
+                  <div className="text-lg font-bold">{workflow.display_name}</div>
+                  {workflow.description && (
+                    <p className="text-sm text-gray-500 mt-2">{workflow.description}</p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

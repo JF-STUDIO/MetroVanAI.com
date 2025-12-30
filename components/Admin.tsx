@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AdminJobRow, AdminWorkflow, AppSettings, CreditRow, User, WorkflowVersion } from '../types';
+import { AdminJobRow, AdminWorkflow, AppSettings, CreditRow, PricingPack, PricingSettings, User, WorkflowVersion } from '../types';
 import { jobService } from '../services/jobService';
 
 type NewWorkflowForm = {
@@ -41,6 +41,14 @@ const DEFAULT_INPUT_NODE = 'image';
 const DEFAULT_INPUT_NODE_ID = '31';
 const DEFAULT_OUTPUT_NODE_ID = '57';
 const DEFAULT_API_MODE = 'task_openapi';
+const DEFAULT_PRICING: PricingSettings = {
+  base_rate: 0.25,
+  packs: [
+    { label: 'Starter Boost', amount: 100, bonus: 40 },
+    { label: 'Growth Pack', amount: 500, bonus: 250 },
+    { label: 'Studio Scale', amount: 1000, bonus: 500 }
+  ]
+};
 
 const parseRuntimeConfig = (value: string) => {
   if (!value || value.trim().length === 0) return undefined;
@@ -80,6 +88,8 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
   const [jobs, setJobs] = useState<AdminJobRow[]>([]);
   const [settings, setSettings] = useState<AppSettings>({ free_trial_points: 10 });
   const [settingsDraft, setSettingsDraft] = useState('10');
+  const [pricingDraft, setPricingDraft] = useState<PricingSettings>(DEFAULT_PRICING);
+  const [pricingSaving, setPricingSaving] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [loading, setLoading] = useState({ workflows: false, credits: false, jobs: false });
   const [error, setError] = useState<string | null>(null);
@@ -154,8 +164,13 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
       const data = await jobService.adminGetSettings();
       const value = Number(data?.free_trial_points ?? 10);
       const next = Number.isFinite(value) ? value : 10;
-      setSettings({ free_trial_points: next });
+      setSettings({ free_trial_points: next, pricing: data?.pricing || DEFAULT_PRICING });
       setSettingsDraft(String(next));
+      if (data?.pricing) {
+        setPricingDraft(data.pricing as PricingSettings);
+      } else {
+        setPricingDraft(DEFAULT_PRICING);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings.');
     } finally {
@@ -449,6 +464,46 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
     }
   };
 
+  const updatePackField = (index: number, field: keyof PricingPack, value: string) => {
+    setPricingDraft(prev => {
+      const packs = [...prev.packs];
+      const current = packs[index] || { label: '', amount: 0, bonus: 0 };
+      if (field === 'label') {
+        packs[index] = { ...current, label: value };
+      } else {
+        const numeric = Number(value);
+        packs[index] = { ...current, [field]: Number.isFinite(numeric) ? numeric : current[field] };
+      }
+      return { ...prev, packs };
+    });
+  };
+
+  const handleUpdatePricing = async () => {
+    setNotice(null);
+    setError(null);
+    setPricingSaving(true);
+    try {
+      const normalizedPacks = pricingDraft.packs.map(pack => ({
+        label: pack.label.trim() || 'Pack',
+        amount: Math.max(1, Math.round(pack.amount)),
+        bonus: Math.max(0, Math.round(pack.bonus))
+      }));
+      const payload: PricingSettings = {
+        base_rate: Math.max(0.01, Number(pricingDraft.base_rate) || DEFAULT_PRICING.base_rate),
+        packs: normalizedPacks
+      };
+      const updated = await jobService.adminUpdateSettings({ pricing: payload });
+      const nextPricing = (updated?.pricing as PricingSettings) || payload;
+      setPricingDraft(nextPricing);
+      setSettings(prev => ({ ...prev, pricing: nextPricing }));
+      setNotice('Pricing updated.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update pricing.');
+    } finally {
+      setPricingSaving(false);
+    }
+  };
+
   if (!user.isAdmin) {
     return (
       <div className="min-h-screen bg-[#0a0a0a] px-8 py-12 text-white">
@@ -509,6 +564,73 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
           </div>
           <div className="mt-4 text-xs text-gray-500">
             Current: {settings.free_trial_points} points
+          </div>
+        </section>
+
+        <section className="glass rounded-[2.5rem] p-8 border border-white/10">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-sm font-black uppercase tracking-widest text-gray-400">Pricing Settings</h2>
+              <p className="text-xs text-gray-500">Update base rate and credit packs shown on the marketing page.</p>
+            </div>
+            {pricingSaving && <span className="text-xs text-gray-500">Saving...</span>}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div>
+              <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Base Rate (USD)</label>
+              <input
+                value={pricingDraft.base_rate}
+                onChange={(e) => setPricingDraft(prev => ({ ...prev, base_rate: Number(e.target.value) }))}
+                className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3"
+              />
+            </div>
+            <div className="md:col-span-3 text-xs text-gray-500 flex items-end">
+              Credits = amount / base rate + bonus
+            </div>
+          </div>
+          <div className="space-y-4">
+            {pricingDraft.packs.map((pack, index) => {
+              const credits = Math.round(pack.amount / (pricingDraft.base_rate || DEFAULT_PRICING.base_rate)) + pack.bonus;
+              return (
+                <div key={`${pack.label}-${index}`} className="grid grid-cols-1 md:grid-cols-5 gap-4 items-center">
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Label</label>
+                    <input
+                      value={pack.label}
+                      onChange={(e) => updatePackField(index, 'label', e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Amount (USD)</label>
+                    <input
+                      value={pack.amount}
+                      onChange={(e) => updatePackField(index, 'amount', e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-2">Bonus</label>
+                    <input
+                      value={pack.bonus}
+                      onChange={(e) => updatePackField(index, 'bonus', e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3"
+                    />
+                  </div>
+                  <div className="text-xs text-gray-400 md:col-span-2">
+                    Total credits: <span className="text-white font-semibold">{credits}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-6">
+            <button
+              onClick={handleUpdatePricing}
+              className="px-6 py-3 rounded-2xl gradient-btn text-white text-xs font-black uppercase tracking-widest"
+            >
+              Save Pricing
+            </button>
           </div>
         </section>
 

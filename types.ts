@@ -124,4 +124,16 @@ export interface AdminJobRow {
 
 export interface AppSettings {
   free_trial_points: number;
+  pricing?: PricingSettings;
+}
+
+export interface PricingPack {
+  label: string;
+  amount: number;
+  bonus: number;
+}
+
+export interface PricingSettings {
+  base_rate: number;
+  packs: PricingPack[];
 }

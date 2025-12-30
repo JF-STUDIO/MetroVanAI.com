@@ -22,6 +22,11 @@ export const jobService = {
     return response.data;
   },
 
+  getPublicWorkflows: async () => {
+    const response = await api.get('/public/workflows');
+    return response.data;
+  },
+
   getTools: async () => {
     const response = await api.get('/tools');
     return response.data;
