@@ -73,34 +73,6 @@ const Home: React.FC<HomeProps> = ({ onStart }) => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        {[
-          { 
-            icon: 'fa-gauge-high', 
-            title: 'Zero Latency', 
-            desc: 'Skip the outsourced editors. Our AI engines deliver studio-grade results in the blink of an eye.' 
-          },
-          { 
-            icon: 'fa-house-chimney-window', 
-            title: 'Built for Real Estate', 
-            desc: 'Specifically tuned for architectural lighting, window recovery, and spatial clarity.' 
-          },
-          { 
-            icon: 'fa-layer-group', 
-            title: 'Batch Efficiency', 
-            desc: 'Process entire property folders at once. Maintain consistent style across every room.' 
-          }
-        ].map((feat, i) => (
-          <div key={i} className="glass p-8 rounded-3xl hover:border-white/20 transition group border border-white/5">
-            <div className="w-14 h-14 rounded-2xl bg-white/5 flex items-center justify-center mb-6 group-hover:bg-indigo-500/20 transition">
-              <i className={`fa-solid ${feat.icon} text-2xl text-indigo-400`}></i>
-            </div>
-            <h3 className="text-xl font-bold mb-3 uppercase tracking-tight">{feat.title}</h3>
-            <p className="text-gray-400 leading-relaxed text-sm">{feat.desc}</p>
-          </div>
-        ))}
-      </div>
-
       {publicWorkflows.length > 0 && (
         <div className="mt-24">
           <div className="text-center mb-12">
