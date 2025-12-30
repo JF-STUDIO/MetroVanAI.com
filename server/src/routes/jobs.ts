@@ -34,8 +34,15 @@ const runWithConcurrency = async <T>(
     await Promise.all(workers);
 };
 
-const exposurePlan = (count: number) => {
-    const sizes = [5, 3, 7];
+const HDR_GROUP_MIN_SHOTS = Number.parseInt(process.env.HDR_GROUP_MIN_SHOTS || '2', 10);
+const HDR_GROUP_MAX_SHOTS = Number.parseInt(process.env.HDR_GROUP_MAX_SHOTS || '10', 10);
+
+const exposurePlan = (count: number, minShots: number, maxShots: number) => {
+    const sizes: number[] = [];
+    const upper = Math.min(maxShots, count);
+    for (let size = upper; size >= minShots; size -= 1) {
+        sizes.push(size);
+    }
     const memo = new Map<number, number[]>();
     const best = (remaining: number): number[] => {
         if (memo.has(remaining)) return memo.get(remaining)!;
@@ -184,14 +191,23 @@ const hasSequentialFilenames = (files: any[]) => {
 };
 
 const computeHdrConfidence = (files: any[]) => {
-    if (files.length < 2) return 0;
+    if (files.length < HDR_GROUP_MIN_SHOTS) return 0;
     const hasExposureData = files.some((file) => exposureValue(file) !== null);
     const timeScore = scoreTime(files);
     const evSpan = evRange(files);
     const evRangeScore = evSpan >= 0.6 ? 0.2 : 0;
     const score = timeScore + scoreExposureSteps(files) + scoreParams(files) + scoreCamera(files) + evRangeScore;
+    const inSizeRange = files.length >= HDR_GROUP_MIN_SHOTS && files.length <= HDR_GROUP_MAX_SHOTS;
+
+    if (!hasExposureData) {
+        const sequenceScore = hasSequentialFilenames(files) ? 0.35 : 0;
+        const noExposureScore = Math.min(1, timeScore + sequenceScore + scoreCamera(files));
+        const fallback = inSizeRange && (sequenceScore > 0 || timeScore >= 0.2) ? 0.7 : 0;
+        return Math.max(0, Math.min(1, Math.max(noExposureScore, fallback)));
+    }
+
     const preferredSize = files.length === 3 || files.length === 5 || files.length === 7;
-    const fallback = preferredSize && hasExposureData && (timeScore >= 0.3 || hasSequentialFilenames(files) || evSpan >= 0.6) ? 0.7 : 0;
+    const fallback = preferredSize && (timeScore >= 0.3 || hasSequentialFilenames(files) || evSpan >= 0.6) ? 0.7 : 0;
     return Math.max(0, Math.min(1, Math.max(score, fallback)));
 };
 
@@ -274,9 +290,9 @@ const computeAllowedGapMs = (a: any, b: any, baseMs: number) => {
     return Math.max(baseMs, dynamicMs);
 };
 
-const splitExposureCluster = (cluster: any[], thresholdMs: number) => {
+const splitExposureCluster = (cluster: any[], thresholdMs: number, maxShots: number) => {
     if (cluster.length <= 1) return [cluster];
-    if (cluster.length <= 7) return [cluster];
+    if (cluster.length <= maxShots) return [cluster];
     const ordered = [...cluster].sort((a, b) => {
         if (a.exif_time && b.exif_time) {
             return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
@@ -331,7 +347,7 @@ const splitExposureCluster = (cluster: any[], thresholdMs: number) => {
             }
         }
 
-        if (current.length >= 7) {
+        if (current.length >= maxShots) {
             pushCurrent();
             current.push(file);
             const exp = exposureValue(file);
@@ -906,7 +922,10 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         });
     }
 
-    const needsExif = fileList.filter((file: any) => file.input_kind === 'raw' && (!file.exif_time || file.ev === null || file.exposure_time === null || file.fnumber === null || file.iso === null || file.focal_length === null));
+    const needsExif = fileList.filter((file: any) => (
+        (file.input_kind === 'raw' || file.input_kind === 'jpg' || file.input_kind === 'png') &&
+        (!file.exif_time || file.exposure_time === null || file.fnumber === null || file.iso === null || file.focal_length === null)
+    ));
     if (needsExif.length > 0) {
         await runWithConcurrency(needsExif, 2, async (file: any) => {
             try {
@@ -934,13 +953,17 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         });
     }
 
-    const rawFiles = fileList.filter((file: any) => file.input_kind === 'raw');
-    const imageFiles = fileList.filter((file: any) => file.input_kind === 'jpg' || file.input_kind === 'png');
+    const hdrCandidates = fileList.filter((file: any) => (
+        file.input_kind === 'raw' || file.input_kind === 'jpg' || file.input_kind === 'png'
+    ));
+    const otherFiles = fileList.filter((file: any) => (
+        file.input_kind !== 'raw' && file.input_kind !== 'jpg' && file.input_kind !== 'png'
+    ));
 
-    const hasMissingExif = rawFiles.some((file: any) => !file.exif_time);
-    const hasSequentialAll = rawFiles.length >= 3 && hasSequentialFilenames(rawFiles);
+    const hasMissingExif = hdrCandidates.some((file: any) => !file.exif_time);
+    const hasSequentialAll = hdrCandidates.length >= HDR_GROUP_MIN_SHOTS && hasSequentialFilenames(hdrCandidates);
 
-    const sortedRaw = [...rawFiles].sort((a: any, b: any) => {
+    const sortedCandidates = [...hdrCandidates].sort((a: any, b: any) => {
         if (a.exif_time && b.exif_time) {
             return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
         }
@@ -951,24 +974,24 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
 
     const thresholdMs = Number.parseInt(process.env.HDR_GROUP_TIME_MS || '2000', 10);
     let timeGroups: any[][] = hasMissingExif && hasSequentialAll
-        ? [sortBySequence(sortedRaw)]
-        : buildTimeGroups(sortedRaw.filter((file: any) => file.exif_time), thresholdMs)
-            .concat(buildSequenceGroups(sortedRaw.filter((file: any) => !file.exif_time)));
+        ? [sortBySequence(sortedCandidates)]
+        : buildTimeGroups(sortedCandidates.filter((file: any) => file.exif_time), thresholdMs)
+            .concat(buildSequenceGroups(sortedCandidates.filter((file: any) => !file.exif_time)));
 
-    if (hasSequentialAll && timeGroups.length > 0 && !timeGroups.some((group) => group.length >= 3)) {
-        timeGroups = buildSequenceGroups(sortedRaw);
+    if (hasSequentialAll && timeGroups.length > 0 && !timeGroups.some((group) => group.length >= HDR_GROUP_MIN_SHOTS)) {
+        timeGroups = buildSequenceGroups(sortedCandidates);
     }
 
     const groups: { files: any[]; group_type: string; hdr_confidence: number | null; output_filename: string }[] = [];
 
     for (const cluster of timeGroups) {
-        const segments = splitExposureCluster(cluster, thresholdMs);
+        const segments = splitExposureCluster(cluster, thresholdMs, HDR_GROUP_MAX_SHOTS);
         for (const segment of segments) {
             if (segment.length === 0) continue;
             const hasExposureData = segment.some((file: any) => typeof file.ev === 'number' || typeof file.exposure_time === 'number');
 
-            if (!hasExposureData && segment.length >= 3) {
-                const { sizes } = exposurePlan(segment.length);
+            if (!hasExposureData && segment.length >= HDR_GROUP_MIN_SHOTS) {
+                const { sizes } = exposurePlan(segment.length, HDR_GROUP_MIN_SHOTS, HDR_GROUP_MAX_SHOTS);
                 let offset = 0;
                 for (const size of sizes) {
                     const subset = orderGroupFiles(segment.slice(offset, offset + size));
@@ -984,9 +1007,10 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
                         });
                     } else {
                         for (const file of subset) {
+                            const fallbackType = file.input_kind === 'raw' ? 'raw' : 'image';
                             groups.push({
                                 files: [file],
-                                group_type: 'raw',
+                                group_type: fallbackType,
                                 hdr_confidence: confidence,
                                 output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
                             });
@@ -997,9 +1021,10 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
                 const remaining = segment.length - offset;
                 for (let i = 0; i < remaining; i += 1) {
                     const file = segment[offset + i];
+                    const fallbackType = file.input_kind === 'raw' ? 'raw' : 'image';
                     groups.push({
                         files: [file],
-                        group_type: 'raw',
+                        group_type: fallbackType,
                         hdr_confidence: null,
                         output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
                     });
@@ -1009,7 +1034,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
 
             const orderedSegment = orderGroupFiles(segment);
             const confidence = computeHdrConfidence(orderedSegment);
-            if (orderedSegment.length >= 2 && confidence >= 0.7) {
+            if (orderedSegment.length >= HDR_GROUP_MIN_SHOTS && confidence >= 0.7) {
                 const lead = pickOutputLead(orderedSegment) || orderedSegment[0];
                 groups.push({
                     files: orderedSegment,
@@ -1019,9 +1044,10 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
                 });
             } else {
                 for (const file of orderedSegment) {
+                    const fallbackType = file.input_kind === 'raw' ? 'raw' : 'image';
                     groups.push({
                         files: [file],
-                        group_type: 'raw',
+                        group_type: fallbackType,
                         hdr_confidence: confidence,
                         output_filename: normalizeOutputFilename(file.filename, file.r2_key.split('/').pop() || 'image')
                     });
@@ -1030,7 +1056,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         }
     }
 
-    for (const file of imageFiles) {
+    for (const file of otherFiles) {
         groups.push({
             files: [file],
             group_type: 'image',
