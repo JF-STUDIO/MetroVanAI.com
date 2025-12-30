@@ -129,6 +129,70 @@ const fileExists = async (filePath: string) => {
   }
 };
 
+const parseExposureValue = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.includes('/')) {
+      const [num, den] = trimmed.split('/', 2).map((part) => Number(part));
+      if (!Number.isFinite(num) || !Number.isFinite(den) || den === 0) return null;
+      return num / den;
+    }
+    const parsed = Number.parseFloat(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  if (value && typeof value === 'object') {
+    const maybe = value as { numerator?: number; denominator?: number };
+    if (
+      typeof maybe.numerator === 'number' &&
+      typeof maybe.denominator === 'number' &&
+      Number.isFinite(maybe.numerator) &&
+      Number.isFinite(maybe.denominator) &&
+      maybe.denominator !== 0
+    ) {
+      const ratio = maybe.numerator / maybe.denominator;
+      return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+    }
+  }
+  return null;
+};
+
+const readExposureSeconds = async (filePath: string) => {
+  ensureExiftoolShutdown();
+  try {
+    const metadata = await exiftool.read(filePath);
+    return (
+      parseExposureValue((metadata as any).ExposureTime) ||
+      parseExposureValue((metadata as any).ShutterSpeed) ||
+      parseExposureValue((metadata as any).ShutterSpeedValue)
+    );
+  } catch {
+    return null;
+  }
+};
+
+const pickSecondDarkest = async (paths: string[]) => {
+  const measures = await Promise.all(
+    paths.map(async (localPath) => ({
+      path: localPath,
+      exposure: await readExposureSeconds(localPath)
+    }))
+  );
+  const withExposure = measures.filter(
+    (item) => typeof item.exposure === 'number' && Number.isFinite(item.exposure)
+  );
+  if (withExposure.length >= 2) {
+    const sorted = [...withExposure].sort((a, b) => (a.exposure as number) - (b.exposure as number));
+    return sorted[1].path;
+  }
+  if (withExposure.length === 1) return withExposure[0].path;
+  const mid = Math.floor((paths.length - 1) / 2);
+  return paths[Math.max(0, mid)] ?? paths[0];
+};
+
 const extractEmbeddedJpeg = async (inputPath: string, outputPath: string) => {
   ensureExiftoolShutdown();
   try {
@@ -342,40 +406,25 @@ export const createHdrForGroup = async (sources: HdrSource[], outputName: string
       return { outputPath, tempDir };
     }
 
-    const jpegInputs: string[] = [];
-    const rawInputs: string[] = [];
-
-    for (const localPath of localPaths) {
-      if (isRawFile(localPath)) {
-        const embeddedPath = path.join(tempDir, `${path.parse(localPath).name}_embedded.jpg`);
-        const extracted = await extractEmbeddedJpeg(localPath, embeddedPath);
-        if (extracted) {
-          jpegInputs.push(embeddedPath);
-        } else {
-          rawInputs.push(localPath);
-        }
+    const selectedPath = await pickSecondDarkest(localPaths);
+    if (isRawFile(selectedPath)) {
+      const embeddedPath = path.join(tempDir, `${path.parse(selectedPath).name}_embedded.jpg`);
+      const extracted = await extractEmbeddedJpeg(selectedPath, embeddedPath);
+      if (extracted) {
+        await fs.copyFile(embeddedPath, outputPath);
       } else {
-        jpegInputs.push(localPath);
+        const tiffPath = path.join(tempDir, `${path.parse(selectedPath).name}.tiff`);
+        await convertRawToTiff(selectedPath, tiffPath);
+        await convertToJpeg(tiffPath, outputPath);
+      }
+    } else {
+      const ext = path.extname(selectedPath).toLowerCase();
+      if (ext === '.jpg' || ext === '.jpeg') {
+        await fs.copyFile(selectedPath, outputPath);
+      } else {
+        await convertToJpeg(selectedPath, outputPath);
       }
     }
-
-    if (jpegInputs.length >= 2 && rawInputs.length === 0) {
-      await alignAndFuse(jpegInputs, outputPath, tempDir);
-      return { outputPath, tempDir };
-    }
-
-    const alignInputs: string[] = [];
-    for (const localPath of localPaths) {
-      if (isRawFile(localPath)) {
-        const tiffPath = path.join(tempDir, `${path.parse(localPath).name}.tiff`);
-        await convertRawToTiff(localPath, tiffPath);
-        alignInputs.push(tiffPath);
-      } else {
-        alignInputs.push(localPath);
-      }
-    }
-
-    await alignAndFuse(alignInputs, outputPath, tempDir);
     return { outputPath, tempDir };
   } catch (error) {
     await fs.rm(tempDir, { recursive: true, force: true });
