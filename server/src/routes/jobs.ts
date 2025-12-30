@@ -1294,7 +1294,7 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
 
     const { data: job, error: jobError } = await (supabaseAdmin
         .from('jobs') as any)
-        .select('id, workflow_version_id, status')
+        .select('id, workflow_id, workflow_version_id, status, reserved_units')
         .eq('id', jobId)
         .eq('user_id', userId)
         .single();
@@ -1322,6 +1322,39 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
 
     const retryIds = (retryable.length > 0 ? retryable : failedGroups).map((group: any) => group.id);
     const forced = retryable.length === 0 && failedGroups.length > 0;
+    const retryCount = retryIds.length;
+
+    let creditsReserved = 0;
+    let balance = null;
+    if (!job.reserved_units || job.reserved_units <= 0) {
+        const { data: workflow, error: workflowError } = await (supabaseAdmin
+            .from('workflows') as any)
+            .select('credit_per_unit')
+            .eq('id', job.workflow_id)
+            .single();
+        if (workflowError || !workflow) {
+            return res.status(400).json({ error: 'Workflow not found' });
+        }
+
+        const creditsToReserve = retryCount * (workflow.credit_per_unit || 1);
+        const idempotencyKey = `reserve:retry:${jobId}:${Date.now()}`;
+        const reserveResult = await (supabaseAdmin as any)
+            .rpc('credit_reserve', {
+                p_user_id: userId,
+                p_job_id: jobId,
+                p_units: creditsToReserve,
+                p_idempotency_key: idempotencyKey,
+                p_note: 'Reserve credits for retry'
+            });
+        if (reserveResult.error) {
+            const message = reserveResult.error.message || 'Failed to reserve credits';
+            const status = message.includes('insufficient credits') ? 402 : 500;
+            return res.status(status).json({ error: message });
+        }
+        creditsReserved = creditsToReserve;
+        balance = reserveResult.data;
+    }
+
     const { error: retryError } = await (supabaseAdmin.from('job_groups') as any)
         .update({
             status: 'queued',
@@ -1336,7 +1369,7 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
     if (retryError) return res.status(500).json({ error: retryError.message });
 
     await (supabaseAdmin.from('jobs') as any)
-        .update({ status: 'reserved', progress: 0, error_message: null })
+        .update({ status: 'reserved', progress: 0, error_message: null, reserved_units: retryCount })
         .eq('id', jobId)
         .eq('user_id', userId);
 
@@ -1347,7 +1380,7 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
         removeOnFail: true
     });
 
-    res.json({ retried: retryIds.length, forced });
+    res.json({ retried: retryIds.length, forced, credits_reserved: creditsReserved, balance });
 });
 
 // New pipeline: create job from workflow
