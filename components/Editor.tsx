@@ -629,19 +629,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
-  const handleCancelJob = async () => {
-    if (!job?.id) return;
-    try {
-      await jobService.cancelJob(job.id);
-      setJobStatus('canceled');
-      const profile = await jobService.getProfile();
-      onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to cancel job.';
-      pushNotice('error', message);
-    }
-  };
-
   const deleteExistingJob = async (item: HistoryJob) => {
     try {
       await jobService.deleteJob(item.id);
@@ -663,15 +650,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       const message = err instanceof Error ? err.message : 'Failed to delete project.';
       pushNotice('error', message);
     }
-  };
-
-  const requestCancelJob = () => {
-    openConfirm({
-      title: 'Cancel processing?',
-      message: 'This will stop remaining processing and release unused credits.',
-      confirmLabel: 'Cancel Job',
-      onConfirm: handleCancelJob
-    });
   };
 
   const requestDeleteJob = (item: HistoryJob) => {
@@ -708,7 +686,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       return;
     }
     if (job && isProcessing) {
-      pushNotice('error', 'Processing is already running. Please wait or cancel before adding more files.');
+      pushNotice('error', 'Processing is already running. Please wait for it to finish before adding more files.');
       return;
     }
     const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
@@ -1355,20 +1333,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   }
 
   // VIEW 3: Main Uploader & Editor
-  const cancelableStatuses = new Set([
-    'reserved',
-    'input_resolved',
-    'preprocessing',
-    'hdr_processing',
-    'workflow_running',
-    'ai_processing',
-    'postprocess',
-    'packaging',
-    'zipping',
-    'processing',
-    'queued'
-  ]);
-  const canCancel = job?.id && cancelableStatuses.has(jobStatus);
   const showGeneratingPreviews = !showUploadOnly && previewInProgress && hideGalleryUntilPreviewsDone;
   const showWaitingForResults = !showUploadOnly && !showGeneratingPreviews && galleryItems.length === 0 && pipelineStages.has(jobStatus);
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && images.length === 0;
@@ -1442,11 +1406,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           {job?.workflow_id && (jobStatus === 'partial' || jobStatus === 'failed') && (
             <button onClick={handleRetryMissing} className="px-6 py-2.5 rounded-full bg-white/10 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
               Retry Missing <i className="fa-solid fa-rotate-right"></i>
-            </button>
-          )}
-          {canCancel && (
-            <button onClick={requestCancelJob} className="px-6 py-2.5 rounded-full bg-red-500/20 text-red-200 text-xs font-black uppercase tracking-widest flex items-center gap-2 hover:bg-red-500/30 transition">
-              Cancel Processing <i className="fa-solid fa-ban"></i>
             </button>
           )}
           <button
