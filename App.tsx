@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import Layout from './components/Layout';
 import Home from './components/Home';
+import Pricing from './components/Pricing';
 import Editor from './components/Editor';
 import Admin from './components/Admin';
 import { User, Workflow } from './types';
@@ -450,7 +451,7 @@ const App: React.FC = () => {
         <Route path="/auth/reset" element={resetPasswordView} />
         <Route path="/studio" element={user ? <Editor user={user} workflows={workflows} onUpdateUser={setUser} /> : <Navigate to="/login" replace />} />
         <Route path="/admin" element={user && user.isAdmin ? <Admin user={user} /> : <Navigate to={user ? '/studio' : '/login'} replace />} />
-        <Route path="/pricing" element={<Home onStart={() => navigate(user ? '/studio' : '/login')} />} />
+        <Route path="/pricing" element={<Pricing user={user} onStart={() => navigate(user ? '/studio' : '/login')} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Layout>
