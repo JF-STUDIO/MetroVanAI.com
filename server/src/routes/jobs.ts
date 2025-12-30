@@ -35,7 +35,10 @@ const runWithConcurrency = async <T>(
 };
 
 const HDR_GROUP_MIN_SHOTS = Number.parseInt(process.env.HDR_GROUP_MIN_SHOTS || '2', 10);
-const HDR_GROUP_MAX_SHOTS = Number.parseInt(process.env.HDR_GROUP_MAX_SHOTS || '10', 10);
+const HDR_GROUP_MAX_SHOTS = (() => {
+    const raw = Number.parseInt(process.env.HDR_GROUP_MAX_SHOTS || '0', 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : Number.MAX_SAFE_INTEGER;
+})();
 
 const exposurePlan = (count: number, minShots: number, maxShots: number) => {
     const sizes: number[] = [];
