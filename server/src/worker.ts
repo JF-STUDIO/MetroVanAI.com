@@ -229,6 +229,9 @@ const processPreviewJob = async (jobId: string) => {
         .eq('id', file.id);
     } catch (error) {
       console.warn(`Preview generation failed for file ${file.id}:`, error);
+      await (supabaseAdmin.from('job_files') as any)
+        .update({ preview_ready: true })
+        .eq('id', file.id);
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }

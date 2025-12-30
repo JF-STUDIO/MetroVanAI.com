@@ -360,41 +360,23 @@ export const createHdrForGroup = async (sources: HdrSource[], outputName: string
     }
 
     if (jpegInputs.length >= 2 && rawInputs.length === 0) {
-      try {
-        await alignAndFuse(jpegInputs, outputPath, tempDir);
-        return { outputPath, tempDir };
-      } catch (error) {
-        const fallback = pickFallbackJpeg(jpegInputs);
-        if (fallback) {
-          await fs.copyFile(fallback, outputPath);
-          return { outputPath, tempDir };
-        }
-        throw error;
-      }
+      await alignAndFuse(jpegInputs, outputPath, tempDir);
+      return { outputPath, tempDir };
     }
 
     const alignInputs: string[] = [];
-    try {
-      for (const localPath of localPaths) {
-        if (isRawFile(localPath)) {
-          const tiffPath = path.join(tempDir, `${path.parse(localPath).name}.tiff`);
-          await convertRawToTiff(localPath, tiffPath);
-          alignInputs.push(tiffPath);
-        } else {
-          alignInputs.push(localPath);
-        }
+    for (const localPath of localPaths) {
+      if (isRawFile(localPath)) {
+        const tiffPath = path.join(tempDir, `${path.parse(localPath).name}.tiff`);
+        await convertRawToTiff(localPath, tiffPath);
+        alignInputs.push(tiffPath);
+      } else {
+        alignInputs.push(localPath);
       }
-
-      await alignAndFuse(alignInputs, outputPath, tempDir);
-      return { outputPath, tempDir };
-    } catch (error) {
-      const fallback = pickFallbackJpeg(jpegInputs);
-      if (fallback) {
-        await fs.copyFile(fallback, outputPath);
-        return { outputPath, tempDir };
-      }
-      throw error;
     }
+
+    await alignAndFuse(alignInputs, outputPath, tempDir);
+    return { outputPath, tempDir };
   } catch (error) {
     await fs.rm(tempDir, { recursive: true, force: true });
     throw error;

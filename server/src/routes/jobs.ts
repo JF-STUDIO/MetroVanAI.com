@@ -96,6 +96,14 @@ const normalizeOutputFilename = (filename?: string | null, fallback = 'image') =
     return `${base}.jpg`;
 };
 
+const exposureValue = (file: any) => {
+    if (typeof file?.ev === 'number' && Number.isFinite(file.ev)) return file.ev;
+    if (typeof file?.exposure_time === 'number' && Number.isFinite(file.exposure_time) && file.exposure_time > 0) {
+        return Math.log2(file.exposure_time);
+    }
+    return null;
+};
+
 const scoreTime = (files: any[]) => {
     const timestamps = files
         .map(file => file.exif_time ? new Date(file.exif_time).getTime() : null)
@@ -112,7 +120,7 @@ const scoreTime = (files: any[]) => {
 
 const scoreExposureSteps = (files: any[]) => {
     const evs = files
-        .map(file => typeof file.ev === 'number' ? file.ev : null)
+        .map(file => exposureValue(file))
         .filter((value: number | null) => value !== null) as number[];
     if (evs.length < 2) return 0;
     const sorted = [...evs].sort((a, b) => b - a);
@@ -146,7 +154,7 @@ const scoreCamera = (files: any[]) => {
 
 const evRange = (files: any[]) => {
     const evs = files
-        .map(file => typeof file.ev === 'number' ? file.ev : null)
+        .map(file => exposureValue(file))
         .filter((value: number | null) => value !== null) as number[];
     if (evs.length < 2) return 0;
     return Math.max(...evs) - Math.min(...evs);
@@ -177,7 +185,7 @@ const hasSequentialFilenames = (files: any[]) => {
 
 const computeHdrConfidence = (files: any[]) => {
     if (files.length < 2) return 0;
-    const hasExposureData = files.some((file) => typeof file.ev === 'number' || typeof file.exposure_time === 'number');
+    const hasExposureData = files.some((file) => exposureValue(file) !== null);
     const timeScore = scoreTime(files);
     const evSpan = evRange(files);
     const evRangeScore = evSpan >= 0.6 ? 0.2 : 0;
@@ -264,14 +272,6 @@ const computeAllowedGapMs = (a: any, b: any, baseMs: number) => {
     const maxExp = Math.max(expA, expB);
     const dynamicMs = 1200 + (maxExp * 2500);
     return Math.max(baseMs, dynamicMs);
-};
-
-const exposureValue = (file: any) => {
-    if (typeof file?.ev === 'number' && Number.isFinite(file.ev)) return file.ev;
-    if (typeof file?.exposure_time === 'number' && Number.isFinite(file.exposure_time) && file.exposure_time > 0) {
-        return Math.log2(file.exposure_time);
-    }
-    return null;
 };
 
 const splitExposureCluster = (cluster: any[], thresholdMs: number) => {
@@ -691,7 +691,7 @@ router.delete('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Respon
             .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
             .map((result) => result.reason?.message || String(result.reason));
         if (deleteErrors.length) {
-            throw new Error(`R2 delete failed: ${deleteErrors.join(' | ')}`);
+            console.warn('R2 delete failed for job', jobId, deleteErrors);
         }
 
         const { error: filesError } = await (supabaseAdmin.from('job_files') as any).delete().eq('job_id', jobId);

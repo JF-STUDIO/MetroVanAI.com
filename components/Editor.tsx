@@ -144,6 +144,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     'packaging',
     'zipping'
   ]);
+  const streamStages = new Set([...pipelineStages, 'uploaded', 'analyzing']);
   const [resumeAttempted, setResumeAttempted] = useState(false);
   const rawExtensions = new Set(['arw', 'cr2', 'cr3', 'nef', 'dng', 'rw2', 'orf', 'raf']);
   const isRawFile = (file: File) => {
@@ -174,7 +175,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   useEffect(() => {
     if (!job) return;
     const isPipelineJob = Boolean(job.workflow_id);
-    const shouldStreamPipeline = isPipelineJob && pipelineStages.has(jobStatus);
+    const shouldStreamPipeline = isPipelineJob && streamStages.has(jobStatus);
     const shouldPollLegacy = !isPipelineJob && (jobStatus === 'processing' || jobStatus === 'queued');
     if (!shouldStreamPipeline && !shouldPollLegacy) return;
 
@@ -966,9 +967,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     ? Math.round((previewReady / previewTotal) * 100)
     : 0;
 
-  const previewInProgress = previewTotal > 0 && previewReady < previewTotal && pipelineStages.has(jobStatus);
-  const processingActive = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
-  const hideGalleryUntilPreviewsDone = previewInProgress && jobStatus === 'input_resolved' && pipelineItems.length === 0 && images.length === 0;
+  const previewInProgress = previewTotal > 0 && previewReady < previewTotal;
+  const processingActive = (pipelineStages.has(jobStatus) || jobStatus === 'analyzing') && jobStatus !== 'input_resolved';
+  const hideGalleryUntilPreviewsDone = false;
   const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
   const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
   const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
@@ -1333,7 +1334,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   }
 
   // VIEW 3: Main Uploader & Editor
-  const showGeneratingPreviews = !showUploadOnly && previewInProgress && hideGalleryUntilPreviewsDone;
+  const showGeneratingPreviews = !showUploadOnly && previewInProgress && pipelineItems.length === 0 && images.length === 0;
   const showWaitingForResults = !showUploadOnly && !showGeneratingPreviews && galleryItems.length === 0 && pipelineStages.has(jobStatus);
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && images.length === 0;
   const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
@@ -1548,16 +1549,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                       </div>
                     )}
                     {img.stage === 'input' && !img.preview && img.status !== 'failed' && (
-                      <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-2">
-                        <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin"></div>
+                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
                         <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
-                          Generating preview
+                          Preview pending
                         </p>
                       </div>
                     )}
                     {img.status === 'processing' && (img.stage === 'hdr' || img.stage === 'ai') && (
-                      <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-3">
-                        <div className="w-10 h-10 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin"></div>
+                      <div className="absolute inset-0 bg-black/70 flex items-center justify-center">
                         <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
                           {img.stage === 'hdr'
                             ? 'HDR Processing'
