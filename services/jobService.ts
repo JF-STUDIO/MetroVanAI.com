@@ -83,10 +83,8 @@ export const jobService = {
   },
 
   getPipelineStatus: async (jobId: string) => {
-    const response = await api.get(`/jobs/${jobId}/status`, {
-      params: { t: Date.now() }
-    });
-    return response.data;
+    // 兼容旧调用，直接复用 job 详情
+    return api.get(`/jobs/${jobId}`, { params: { t: Date.now() } }).then(r => r.data);
   },
 
   setGroupRepresentative: async (jobId: string, groupId: string, fileId: string) => {

@@ -11,6 +11,8 @@ import { AuthRequest } from '../types/auth.js';
 import { createRedis } from '../services/redis.js';
 import { extractExifFromR2 } from '../services/exif.js';
 import { getFreeTrialPoints } from '../services/settings.js';
+import { attachTaskStream, emitTaskEvent } from '../services/taskStream.js';
+import { attachJobStream, emitJobEvent, sendInitialJobEvents } from '../services/jobEvents.js';
 
 const router = Router();
 
@@ -39,6 +41,8 @@ const HDR_GROUP_MAX_SHOTS = (() => {
     const raw = Number.parseInt(process.env.HDR_GROUP_MAX_SHOTS || '0', 10);
     return Number.isFinite(raw) && raw > 0 ? raw : Number.MAX_SAFE_INTEGER;
 })();
+const HDR_GROUP_TIME_MS = Number.parseInt(process.env.HDR_GROUP_TIME_MS || '3000', 10);
+const HDR_GROUP_TIME_HDR_MS = Number.parseInt(process.env.HDR_GROUP_TIME_HDR_MS || '10000', 10);
 
 const exposurePlan = (count: number, minShots: number, maxShots: number) => {
     const sizes: number[] = [];
@@ -74,7 +78,6 @@ const PNG_EXTENSIONS = new Set(['png']);
 const MAX_UPLOAD_FILES = Number.parseInt(process.env.MAX_UPLOAD_FILES || '0', 10);
 const MAX_FILE_BYTES = Number.parseInt(process.env.MAX_FILE_BYTES || `${200 * 1024 * 1024}`, 10);
 const MAX_TOTAL_BYTES = Number.parseInt(process.env.MAX_UPLOAD_BYTES || '0', 10);
-const SSE_POLL_MS = Number.parseInt(process.env.SSE_POLL_MS || '1000', 10);
 
 const sanitizeFilename = (value: string | null | undefined, fallback = 'image') => {
     const raw = value || fallback;
@@ -112,6 +115,62 @@ const exposureValue = (file: any) => {
         return Math.log2(file.exposure_time);
     }
     return null;
+};
+
+const isNumber = (value: any) => typeof value === 'number' && Number.isFinite(value);
+
+const hasHardBreak = (a: any, b: any) => {
+    if (isNumber(a?.focal_length) && isNumber(b?.focal_length)) {
+        if (Math.abs(a.focal_length - b.focal_length) > 0.1) return true;
+    }
+    if (isNumber(a?.fnumber) && isNumber(b?.fnumber)) {
+        if (Math.abs(a.fnumber - b.fnumber) > 0.1) return true;
+    }
+    if (isNumber(a?.iso) && isNumber(b?.iso) && a.iso > 0) {
+        const ratio = Math.abs(a.iso - b.iso) / a.iso;
+        if (ratio > 0.1) return true;
+    }
+    return false;
+};
+
+const shutterRatio = (a: any, b: any) => {
+    if (!isNumber(a?.exposure_time) || !isNumber(b?.exposure_time)) return null;
+    if (a.exposure_time <= 0 || b.exposure_time <= 0) return null;
+    const max = Math.max(a.exposure_time, b.exposure_time);
+    const min = Math.min(a.exposure_time, b.exposure_time);
+    if (min <= 0) return null;
+    return max / min;
+};
+
+const isMonotonic = (values: number[]) => {
+    if (values.length < 2) return false;
+    const deltas = values.slice(1).map((value, index) => value - values[index]);
+    const tol = 0.05;
+    const nonDecreasing = deltas.every(delta => delta >= -tol);
+    const nonIncreasing = deltas.every(delta => delta <= tol);
+    return nonDecreasing || nonIncreasing;
+};
+
+const isHdrCandidate = (files: any[]) => {
+    if (files.length < 3) return false;
+    const ordered = [...files].sort((a, b) => {
+        if (a.exif_time && b.exif_time) {
+            return new Date(a.exif_time).getTime() - new Date(b.exif_time).getTime();
+        }
+        if (a.exif_time) return -1;
+        if (b.exif_time) return 1;
+        return (a.filename || '').localeCompare(b.filename || '');
+    });
+
+    const values = ordered
+        .map(file => exposureValue(file))
+        .filter((value): value is number => value !== null);
+    if (values.length < 3) return false;
+
+    const evSpan = Math.max(...values) - Math.min(...values);
+    const ratio = shutterRatio(ordered[0], ordered[ordered.length - 1]);
+    const exposureDiffOk = evSpan >= 0.6 || (ratio !== null && ratio >= 2);
+    return exposureDiffOk && isMonotonic(values);
 };
 
 const scoreTime = (files: any[]) => {
@@ -270,12 +329,7 @@ const pickOutputLead = (files: any[]) => {
 const sameCaptureSetup = (a: any, b: any) => {
     if (a.camera_make && b.camera_make && a.camera_make !== b.camera_make) return false;
     if (a.camera_model && b.camera_model && a.camera_model !== b.camera_model) return false;
-    if (typeof a.fnumber === 'number' && typeof b.fnumber === 'number') {
-        if (Math.abs(a.fnumber - b.fnumber) > 0.2) return false;
-    }
-    if (typeof a.focal_length === 'number' && typeof b.focal_length === 'number') {
-        if (Math.abs(a.focal_length - b.focal_length) > 2) return false;
-    }
+    if (hasHardBreak(a, b)) return false;
     return true;
 };
 
@@ -285,12 +339,9 @@ const getExposureSeconds = (file: any) => {
     return file.exposure_time;
 };
 
-const computeAllowedGapMs = (a: any, b: any, baseMs: number) => {
-    const expA = getExposureSeconds(a) ?? 0;
-    const expB = getExposureSeconds(b) ?? 0;
-    const maxExp = Math.max(expA, expB);
-    const dynamicMs = 1200 + (maxExp * 2500);
-    return Math.max(baseMs, dynamicMs);
+const computeAllowedGapMs = (currentGroup: any[], nextFile: any, baseMs: number) => {
+    const candidate = [...currentGroup, nextFile];
+    return isHdrCandidate(candidate) ? HDR_GROUP_TIME_HDR_MS : baseMs;
 };
 
 const splitExposureCluster = (cluster: any[], thresholdMs: number, maxShots: number) => {
@@ -339,7 +390,7 @@ const splitExposureCluster = (cluster: any[], thresholdMs: number, maxShots: num
         const last = current[current.length - 1];
         if (last.exif_time && file.exif_time) {
             const deltaMs = Math.abs(new Date(file.exif_time).getTime() - new Date(last.exif_time).getTime());
-            const allowedGap = computeAllowedGapMs(last, file, thresholdMs);
+            const allowedGap = computeAllowedGapMs(current, file, thresholdMs);
             if (deltaMs > allowedGap || !sameCaptureSetup(last, file)) {
                 pushCurrent();
                 current.push(file);
@@ -411,7 +462,7 @@ const buildTimeGroups = (files: any[], thresholdMs: number) => {
             continue;
         }
         const delta = Math.abs(new Date(file.exif_time).getTime() - new Date(last.exif_time).getTime());
-        const allowedGap = computeAllowedGapMs(last, file, thresholdMs);
+        const allowedGap = computeAllowedGapMs(current, file, thresholdMs);
         if (delta <= allowedGap && sameCaptureSetup(last, file)) {
             current.push(file);
         } else {
@@ -439,7 +490,9 @@ const buildSequenceGroups = (files: any[]) => {
             groups.push([file]);
             continue;
         }
-        if (!lastToken || token.prefix !== lastToken.prefix || token.num !== lastToken.num + 1) {
+        const lastFile = current.length > 0 ? current[current.length - 1] : null;
+        const hardBreak = lastFile ? hasHardBreak(lastFile, file) : false;
+        if (hardBreak || !lastToken || token.prefix !== lastToken.prefix || token.num !== lastToken.num + 1) {
             if (current.length > 0) groups.push(current);
             current = [file];
         } else {
@@ -873,9 +926,14 @@ router.post('/jobs/:jobId/upload-complete', authenticate, async (req: AuthReques
     if (insertError) return res.status(500).json({ error: insertError.message });
 
     await (supabaseAdmin.from('jobs') as any)
-        .update({ status: 'uploaded' })
+        .update({ status: 'grouping' })
         .eq('id', jobId)
         .eq('user_id', userId);
+    try {
+        await emitJobEvent(jobId, { type: 'grouping_progress', progress: 0 });
+    } catch {
+        // ignore
+    }
 
     res.json({ uploaded: rows.length });
 });
@@ -899,6 +957,11 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         .update({ status: 'analyzing' })
         .eq('id', jobId)
         .eq('user_id', userId);
+    try {
+        await emitJobEvent(jobId, { type: 'grouping_progress', progress: 0 });
+    } catch {
+        // ignore
+    }
 
     const { data: files, error: filesError } = await (supabaseAdmin.from('job_files') as any)
         .select('id, r2_bucket, r2_key, filename, input_kind, exif_time, camera_make, camera_model, size, exposure_time, fnumber, iso, ev, focal_length')
@@ -975,7 +1038,7 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         return (a.filename || '').localeCompare(b.filename || '');
     });
 
-    const thresholdMs = Number.parseInt(process.env.HDR_GROUP_TIME_MS || '2000', 10);
+    const thresholdMs = HDR_GROUP_TIME_MS;
     let timeGroups: any[][] = hasMissingExif && hasSequentialAll
         ? [sortBySequence(sortedCandidates)]
         : buildTimeGroups(sortedCandidates.filter((file: any) => file.exif_time), thresholdMs)
@@ -1097,6 +1160,26 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         .insert(groupRows);
     if (groupError) return res.status(500).json({ error: groupError.message });
 
+    // SSE: grouped summary
+    try {
+        await emitJobEvent(jobId, {
+            type: 'grouped',
+            total_files: fileList.length,
+            total_groups: groupRows.length,
+            items: groups.map((group, index) => ({
+                id: groupRows[index].id,
+                group_index: index + 1,
+                status: 'queued',
+                group_type: group.group_type,
+                output_filename: group.output_filename,
+                representative_index: Math.floor((group.files.length - 1) / 2) + 1,
+                group_size: group.files.length
+            }))
+        });
+    } catch (err) {
+        console.warn('emit grouped failed', (err as Error).message);
+    }
+
     for (let index = 0; index < groups.length; index += 1) {
         const group = groups[index];
         const groupId = groupRows[index].id;
@@ -1123,6 +1206,16 @@ router.post('/jobs/:jobId/analyze', authenticate, async (req: AuthRequest, res: 
         })
         .eq('id', jobId)
         .eq('user_id', userId);
+
+    try {
+        await emitJobEvent(jobId, {
+            type: 'group_status_changed',
+            status: 'input_resolved'
+        });
+        await emitJobEvent(jobId, { type: 'grouping_progress', progress: 100 });
+    } catch {
+        // ignore
+    }
 
     res.json({ estimated_units: groupRows.length });
 });
@@ -1584,118 +1677,97 @@ router.get('/jobs/:jobId/status', authenticate, async (req: AuthRequest, res: Re
     res.json(payload);
 });
 
-router.get('/jobs/:jobId/stream', authenticateSse, async (req: AuthRequest, res: Response) => {
-    const { jobId } = req.params;
+const streamTaskEvents = async (req: AuthRequest, res: Response, taskId: string) => {
     const userId = req.user?.id;
-
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    res.write('retry: 3000\n\n');
     res.flushHeaders?.();
 
-    let closed = false;
-    let pending = false;
-    const terminalStatuses = new Set(['completed', 'partial', 'failed', 'canceled']);
-    let lastPreviewReady = 0;
-    let lastPreviewTotal = 0;
-    const lastGroupState = new Map<string, { previewReady: number; hdrReady: boolean; aiReady: boolean }>();
+    attachTaskStream(taskId, res);
 
-    const sendEvent = (event: string, data: any) => {
-        res.write(`event: ${event}\n`);
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
+    const { data: job, error: jobError } = await (supabaseAdmin.from('jobs') as any)
+        .select('id, user_id, status')
+        .eq('id', taskId)
+        .single();
 
-    const countPreviewReady = (item: any) => {
-        const frames = Array.isArray(item?.frames) ? item.frames : [];
-        const total = frames.length || 1;
-        const ready = frames.filter((frame: any) => frame?.preview_ready || frame?.preview_url).length;
-        return { ready, total };
-    };
+    if (jobError || !job || job.user_id !== userId) {
+        emitTaskEvent(taskId, { type: 'error', message: 'Job not found' });
+        return;
+    }
 
-    const isHdrReady = (item: any) => Boolean(item?.hdr_url) || ['hdr_ok', 'ai_ok'].includes(item?.status);
-    const isAiReady = (item: any) => Boolean(item?.output_url) || item?.status === 'ai_ok';
+    const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
+        .select('group_index, status, output_bucket, output_key')
+        .eq('job_id', taskId)
+        .order('group_index', { ascending: true });
 
-    const emitItemEvents = (payload: any) => {
-        const previews = payload?.previews;
-        if (previews && (previews.ready !== lastPreviewReady || previews.total !== lastPreviewTotal)) {
-            lastPreviewReady = previews.ready;
-            lastPreviewTotal = previews.total;
-            sendEvent('preview-ready', { previews });
+    if (Array.isArray(groups)) {
+        for (const group of groups) {
+            if (group.status !== 'ai_ok' || !group.output_key) continue;
+            const bucket = group.output_bucket || OUTPUT_BUCKET;
+            const imageUrl = await getPresignedGetUrl(bucket, group.output_key, 900);
+            const index = Math.max((group.group_index || 1) - 1, 0);
+            emitTaskEvent(taskId, { type: 'image_ready', index, imageUrl });
         }
+    }
 
-        const items = Array.isArray(payload?.items) ? payload.items : [];
-        items.forEach((item: any) => {
-            if (!item?.id) return;
-            const { ready, total } = countPreviewReady(item);
-            const hdrReady = isHdrReady(item);
-            const aiReady = isAiReady(item);
-            const prev = lastGroupState.get(item.id);
-
-            if (!prev || ready !== prev.previewReady) {
-                sendEvent('preview-ready', { group: item, ready, total, previews });
-            }
-            if (!prev?.hdrReady && hdrReady) {
-                sendEvent('hdr-ready', { group: item });
-            }
-            if (!prev?.aiReady && aiReady) {
-                sendEvent('ai-ready', { group: item });
-            }
-
-            lastGroupState.set(item.id, { previewReady: ready, hdrReady, aiReady });
-        });
-    };
-
-    const closeStream = () => {
-        if (closed) return;
-        closed = true;
-        clearInterval(pollTimer);
-        clearInterval(pingTimer);
-        res.end();
-    };
-
-    const pushStatus = async () => {
-        if (closed || pending) return;
-        pending = true;
-        try {
-            const payload = await buildPipelineStatusPayload(jobId, userId);
-            if (!payload) {
-                sendEvent('error', { error: 'Job not found' });
-                closeStream();
-                return;
-            }
-            emitItemEvents(payload);
-            sendEvent('status', payload);
-            if (terminalStatuses.has(payload.job.status)) {
-                sendEvent('done', { status: payload.job.status });
-                closeStream();
-            }
-        } catch (err) {
-            const message = err instanceof Error ? err.message : 'Stream error';
-            sendEvent('error', { error: message });
-            closeStream();
-        } finally {
-            pending = false;
-        }
-    };
-
-    const pollTimer = setInterval(() => {
-        void pushStatus();
-    }, Math.max(SSE_POLL_MS, 1000));
-
-    const pingTimer = setInterval(() => {
-        if (closed) return;
-        res.write(': ping\n\n');
-    }, 15000);
+    if (job.status === 'failed' || job.status === 'canceled') {
+        emitTaskEvent(taskId, { type: 'error', message: 'workflow failed' });
+        return;
+    }
+    if (job.status === 'completed' || job.status === 'partial') {
+        emitTaskEvent(taskId, { type: 'done' });
+        return;
+    }
 
     req.on('close', () => {
-        closeStream();
+        res.end();
     });
+};
 
-    await pushStatus();
+router.get('/tasks/:taskId/stream', authenticateSse, async (req: AuthRequest, res: Response) => {
+    const { taskId } = req.params;
+    await streamTaskEvents(req, res, taskId);
+});
+
+router.get('/jobs/:jobId/stream', authenticateSse, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    await streamTaskEvents(req, res, jobId);
+});
+
+// Unified job event stream (SSE)
+router.get('/jobs/:jobId/events', authenticateSse, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const lastEventIdRaw = (req.headers['last-event-id'] as string | undefined) || null;
+    const lastEventId = lastEventIdRaw ? Number.parseInt(lastEventIdRaw, 10) : null;
+
+    const { data: job, error } = await (supabaseAdmin.from('jobs') as any)
+        .select('id, user_id')
+        .eq('id', jobId)
+        .single();
+
+    if (error || !job || job.user_id !== userId) {
+        return res.status(404).json({ error: 'Job not found' });
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    attachJobStream(jobId, res);
+    await sendInitialJobEvents(jobId, res, lastEventId);
+
+    req.on('close', () => {
+        res.end();
+    });
 });
 
 export default router;

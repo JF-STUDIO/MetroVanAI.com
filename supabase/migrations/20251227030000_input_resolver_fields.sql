@@ -11,7 +11,9 @@ alter table public.job_files
   add column if not exists exposure_time double precision,
   add column if not exists fnumber double precision,
   add column if not exists iso double precision,
-  add column if not exists ev double precision;
+  add column if not exists ev double precision,
+  add column if not exists r2_key_thumb text,
+  add column if not exists exif_json jsonb;
 
 alter table public.job_groups
   add column if not exists group_type text,

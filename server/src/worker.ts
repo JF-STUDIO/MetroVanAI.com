@@ -20,12 +20,20 @@ import {
 import { createRedis } from './services/redis.js';
 import { createHdrForGroup, cleanupHdrTemp, convertToJpeg, createRawPreview } from './services/hdr.js';
 import { createRunningHubTask, pollRunningHub } from './services/runninghub.js';
+import { emitTaskEvent } from './services/taskStream.js';
+import { emitJobEvent } from './services/jobEvents.js';
 
 const HDR_CONCURRENCY = Number.parseInt(process.env.HDR_CONCURRENCY || '2', 10);
 const AI_CONCURRENCY = Number.parseInt(process.env.AI_CONCURRENCY || '30', 10);
 const AI_GLOBAL_CONCURRENCY = Number.parseInt(process.env.AI_GLOBAL_CONCURRENCY || '30', 10);
 
 const jobQueue = new Queue('job-queue', { connection: createRedis() });
+
+const emitJobEventAll = async (jobId: string, payload: any) => {
+  // 保留旧的任务流兼容，同时写入新事件流
+  emitTaskEvent(jobId, payload);
+  await emitJobEvent(jobId, payload);
+};
 
 const createLimiter = (limit: number) => {
   let active = 0;
@@ -348,6 +356,7 @@ const finalizePipelineJob = async (
     await (supabaseAdmin.from('jobs') as any)
       .update({ status: 'failed', error_message: 'No job groups found' })
       .eq('id', job.id);
+    emitJobEventAll(job.id, { type: 'error', message: 'workflow failed' });
     return;
   }
 
@@ -399,6 +408,7 @@ const finalizePipelineJob = async (
           ...creditUpdate
         })
         .eq('id', job.id);
+      emitJobEventAll(job.id, { type: 'error', message: 'workflow failed' });
       return;
     }
 
@@ -414,6 +424,7 @@ const finalizePipelineJob = async (
           ...creditUpdate
         })
         .eq('id', job.id);
+      emitJobEventAll(job.id, { type: 'job_done' });
       return;
     }
 
@@ -447,6 +458,7 @@ const finalizePipelineJob = async (
         ...creditUpdate
       })
       .eq('id', job.id);
+    emitJobEventAll(job.id, { type: 'job_done' });
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -456,6 +468,12 @@ const processHdrGroup = async (jobId: string, group: any) => {
   await (supabaseAdmin.from('job_groups') as any)
     .update({ status: 'hdr_processing' })
     .eq('id', group.id);
+  emitJobEventAll(jobId, {
+    type: 'group_status_changed',
+    index: Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0),
+    status: 'hdr_processing',
+    group_id: group.id
+  });
 
   const { data: files } = await (supabaseAdmin.from('job_files') as any)
     .select('id, r2_bucket, r2_key')
@@ -488,6 +506,12 @@ const processHdrGroup = async (jobId: string, group: any) => {
       last_error: null
     })
     .eq('id', group.id);
+  emitJobEventAll(jobId, {
+    type: 'group_status_changed',
+    index: Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0),
+    status: 'hdr_ok',
+    group_id: group.id
+  });
 };
 
 const processRunningHubGroup = async (
@@ -518,6 +542,12 @@ const processRunningHubGroup = async (
       await (supabaseAdmin.from('job_groups') as any)
         .update({ status: 'ai_processing' })
         .eq('id', group.id);
+      emitJobEventAll(jobId, {
+        type: 'group_status_changed',
+        index: Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0),
+        status: 'ai_processing',
+        group_id: group.id
+      });
       const inputUrl = await getPresignedGetUrl(HDR_BUCKET, group.hdr_key, 3600);
       const { taskId } = await createRunningHubTask(
         context.provider,
@@ -551,6 +581,21 @@ const processRunningHubGroup = async (
           last_error: null
         })
         .eq('id', group.id);
+      emitJobEventAll(jobId, {
+        type: 'group_done',
+        index,
+        group_id: group.id,
+        output_key: outputKey
+      });
+      emitJobEventAll(jobId, {
+        type: 'group_status_changed',
+        index,
+        status: 'ai_ok',
+        group_id: group.id
+      });
+      const outputUrl = await getPresignedGetUrl(OUTPUT_BUCKET, outputKey, 900);
+      const index = Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0);
+      emitJobEventAll(jobId, { type: 'image_ready', index, imageUrl: outputUrl, group_id: group.id });
       return;
     } catch (error) {
       const message = (error as Error).message;
@@ -558,6 +603,12 @@ const processRunningHubGroup = async (
         await (supabaseAdmin.from('job_groups') as any)
           .update({ status: 'failed', attempts, last_error: message })
           .eq('id', group.id);
+        emitJobEventAll(jobId, {
+          type: 'group_failed',
+          index: Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0),
+          group_id: group.id,
+          error: message
+        });
         throw error;
       }
 
@@ -609,6 +660,10 @@ const maybeAutoRetryFailedGroups = async (jobId: string, runtimeConfig: Record<s
     console.warn('Auto-retry failed to reset groups:', retryError.message);
     return false;
   }
+  retryable.forEach((group: any) => {
+    const idx = Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0);
+    emitJobEventAll(jobId, { type: 'group_status_changed', index: idx, status: 'queued', group_id: group.id });
+  });
 
   await (supabaseAdmin.from('jobs') as any)
     .update({ status: 'reserved', progress: 0, error_message: null })
@@ -680,7 +735,7 @@ const processPipelineJob = async (jobId: string) => {
     .eq('id', jobId);
 
   const { data: aiGroups } = await (supabaseAdmin.from('job_groups') as any)
-    .select('id, status, hdr_key, attempts')
+    .select('id, status, hdr_key, attempts, group_index')
     .eq('job_id', jobId)
     .order('group_index', { ascending: true });
 

@@ -101,7 +101,7 @@ const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ o
 const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [activeTool, setActiveTool] = useState<Workflow | null>(null);
   const [showProjectInput, setShowProjectInput] = useState(false);
-  const [images, setImages] = useState<ImageItem[]>([]);
+  const [uploadImages, setUploadImages] = useState<ImageItem[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [projectName, setProjectName] = useState('');
@@ -110,6 +110,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [downloadType, setDownloadType] = useState<'zip' | 'jpg' | null>(null);
   const [pipelineItems, setPipelineItems] = useState<PipelineGroupItem[]>([]);
   const [pipelineProgress, setPipelineProgress] = useState<number | null>(null);
+  const [images, setImages] = useState<Array<{ status: 'pending' | 'ready'; url?: string }>>([]);
   const [previewSummary, setPreviewSummary] = useState<{ total: number; ready: number } | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -144,12 +145,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     'packaging',
     'zipping'
   ]);
-  const streamStages = new Set([...pipelineStages, 'uploaded', 'analyzing']);
   const [resumeAttempted, setResumeAttempted] = useState(false);
   const rawExtensions = new Set(['arw', 'cr2', 'cr3', 'nef', 'dng', 'rw2', 'orf', 'raf']);
   const isRawFile = (file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
     return ext ? rawExtensions.has(ext) : false;
+  };
+  const resetStreamState = () => {
+    setImages([]);
   };
 
   useEffect(() => {
@@ -171,234 +174,138 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
-  // Poll or stream for job status
+  // 新 SSE：按 job 订阅事件，逐张更新
   useEffect(() => {
-    if (!job) return;
-    const isPipelineJob = Boolean(job.workflow_id);
-    const shouldStreamPipeline = isPipelineJob && streamStages.has(jobStatus);
-    const shouldPollLegacy = !isPipelineJob && (jobStatus === 'processing' || jobStatus === 'queued');
-    if (!shouldStreamPipeline && !shouldPollLegacy) return;
+    if (!job?.id) return;
+    let es: EventSource | null = null;
+    let closed = false;
 
-    let timer: ReturnType<typeof setInterval> | null = null;
-    let safetyTimer: ReturnType<typeof setInterval> | null = null;
-    let eventSource: EventSource | null = null;
-    let destroyed = false;
-    let fallbackStarted = false;
-    let lastEventAt = Date.now();
+    const connect = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token || closed) return;
+      const streamUrl = `${API_BASE_URL}/jobs/${job.id}/events?token=${encodeURIComponent(token)}`;
+      es = new EventSource(streamUrl);
 
-    const applyPipelineStatus = async (response: any) => {
-      const pipelineJob = response.job;
-      setJob(prev => (prev ? { ...prev, ...pipelineJob } : pipelineJob));
-      setJobStatus(pipelineJob.status);
-      if (Array.isArray(response.items)) {
-        setPipelineItems(response.items);
-      }
-      if (typeof response.progress === 'number') {
-        setPipelineProgress(response.progress);
-      }
-      if (response?.previews) {
-        setPreviewSummary(response.previews);
-      }
+      es.onmessage = async (event) => {
+        const data = JSON.parse(event.data);
 
-      if (pipelineJob.status === 'completed' || pipelineJob.status === 'partial') {
-        const download = await jobService.getPresignedDownloadUrl(job.id);
-        setZipUrl(download?.url || null);
-        setDownloadType(download?.type || null);
-        const profile = await jobService.getProfile();
-        onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
-        setImages(prev => prev.map(img => ({ ...img, status: 'done', progress: 100 })));
-        return true;
-      }
-      if (pipelineJob.status === 'failed' || pipelineJob.status === 'canceled') {
-        return true;
-      }
-      return false;
-    };
-
-    const startPipelinePolling = () => {
-      if (timer) return;
-      timer = setInterval(async () => {
-        try {
-          const response = await jobService.getPipelineStatus(job.id);
-          const done = await applyPipelineStatus(response);
-          if (done && timer) {
-            clearInterval(timer);
-            timer = null;
-          }
-        } catch (err) {
-          console.error('Polling error:', err);
+        if (data.type === 'image_ready') {
+          setImages(prev => {
+            const next = [...prev];
+            next[data.index] = { status: 'ready', url: data.imageUrl };
+            return next;
+          });
+          setPipelineItems(prev => {
+            if (!prev || prev.length === 0) return prev;
+            const next = [...prev];
+            const item = next[data.index];
+            if (!item) return prev;
+            next[data.index] = { ...item, output_url: data.imageUrl, status: 'ai_ok' };
+            return next;
+          });
         }
-      }, 3000);
-    };
 
-    const startLegacyPolling = () => {
-      if (timer) return;
-      timer = setInterval(async () => {
-        try {
-          if (pipelineItems.length > 0) {
-            setPipelineItems([]);
-            setPipelineProgress(null);
-            setPreviewSummary(null);
-          }
-          const jobData = await jobService.getJobStatus(job.id);
-          setJobStatus(jobData.status);
+        if (data.type === 'grouping_progress' && typeof data.progress === 'number') {
+          setPipelineProgress(Math.min(100, Math.max(0, Math.round(data.progress))));
+        }
 
-          setImages(prev => prev.map(img => {
-            const serverAsset = jobData.job_assets.find((a: JobAsset) => a.id === img.id);
-            if (serverAsset) {
-              return {
-                ...img,
-                status: serverAsset.status === 'processed' ? 'done' :
-                        serverAsset.status === 'failed' ? 'failed' : 'processing',
-                progress: serverAsset.status === 'processed' ? 100 : 50,
-              };
-            }
-            return img;
-          }));
+        if (data.type === 'grouped' && Array.isArray(data.items)) {
+          const items = data.items as PipelineGroupItem[];
+          setPipelineItems(items);
+          setPipelineProgress(0);
+          setImages(() => items.map(() => ({ status: 'pending' })));
+        }
 
-          if (jobData.status === 'completed') {
-            if (timer) {
-              clearInterval(timer);
-              timer = null;
-            }
+        if (data.type === 'group_status_changed' && typeof data.index === 'number') {
+          setPipelineItems(prev => {
+            if (!prev || prev.length === 0) return prev;
+            const next = [...prev];
+            const item = next[data.index];
+            if (!item) return prev;
+            next[data.index] = { ...item, status: data.status || item.status, error: data.error || item.error };
+            return next;
+          });
+        }
+
+        if (data.type === 'group_done' && typeof data.index === 'number') {
+          setPipelineItems(prev => {
+            if (!prev || prev.length === 0) return prev;
+            const next = [...prev];
+            const item = next[data.index];
+            if (!item) return prev;
+            next[data.index] = { ...item, status: 'ai_ok', error: null };
+            return next;
+          });
+        }
+
+        if (data.type === 'group_failed' && typeof data.index === 'number') {
+          setPipelineItems(prev => {
+            if (!prev || prev.length === 0) return prev;
+            const next = [...prev];
+            const item = next[data.index];
+            if (!item) return prev;
+            next[data.index] = { ...item, status: 'failed', error: data.error || item.error };
+            return next;
+          });
+          pushNotice('error', data.error || '分组处理失败');
+        }
+
+        if (data.type === 'job_done') {
+          closed = true;
+          es?.close();
+          setJob(prev => (prev ? { ...prev, status: 'completed', progress: 100 } : prev));
+          setJobStatus('completed');
+          try {
             const download = await jobService.getPresignedDownloadUrl(job.id);
             setZipUrl(download?.url || null);
             setDownloadType(download?.type || null);
+          } catch {
+            // ignore
+          }
+          try {
             const profile = await jobService.getProfile();
             onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
-          } else if (jobData.status === 'failed') {
-            if (timer) {
-              clearInterval(timer);
-              timer = null;
-            }
+          } catch {
+            // ignore
           }
-        } catch (err) {
-          console.error('Polling error:', err);
         }
-      }, 3000);
+
+        if (data.type === 'error') {
+          closed = true;
+          es?.close();
+          setJobStatus('failed');
+          pushNotice('error', data.message || 'workflow failed');
+        }
+      };
+
+      es.onerror = () => {
+        if (closed) return;
+        es?.close();
+        closed = true;
+      };
     };
 
-    const startPipelineStream = async () => {
-      const hasEventSource = typeof window !== 'undefined' && 'EventSource' in window;
-      if (!hasEventSource) {
-        startPipelinePolling();
-        return;
-      }
-
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) {
-        startPipelinePolling();
-        return;
-      }
-
-      const streamUrl = `${API_BASE_URL}/jobs/${job.id}/stream?token=${encodeURIComponent(token)}`;
-      eventSource = new EventSource(streamUrl);
-
-      const patchPipelineGroup = (group: PipelineGroupItem) => {
-        if (!group) return;
-        setPipelineItems(prev => {
-          if (!prev || prev.length === 0) {
-            return [group].sort((a, b) => a.group_index - b.group_index);
-          }
-          const idx = prev.findIndex(item => item.id === group.id);
-          if (idx === -1) {
-            const next = [...prev, group];
-            next.sort((a, b) => a.group_index - b.group_index);
-            return next;
-          }
-          const next = [...prev];
-          next[idx] = { ...next[idx], ...group };
-          return next;
-        });
-      };
-
-      const handleGroupEvent = (raw: string) => {
-        if (destroyed) return;
-        try {
-          lastEventAt = Date.now();
-          const payload = JSON.parse(raw);
-          if (payload?.previews) {
-            setPreviewSummary(payload.previews);
-          }
-          if (payload?.group) {
-            patchPipelineGroup(payload.group);
-          }
-        } catch (err) {
-          console.error('Stream group event error:', err);
-        }
-      };
-
-      const handlePayload = async (raw: string) => {
-        if (destroyed) return;
-        try {
-          lastEventAt = Date.now();
-          const payload = JSON.parse(raw);
-          const done = await applyPipelineStatus(payload);
-          if (done && eventSource) {
-            eventSource.close();
-          }
-        } catch (err) {
-          console.error('Stream payload error:', err);
-        }
-      };
-
-      eventSource.addEventListener('status', (event) => {
-        void handlePayload((event as MessageEvent).data);
-      });
-
-      eventSource.addEventListener('preview-ready', (event) => {
-        handleGroupEvent((event as MessageEvent).data);
-      });
-
-      eventSource.addEventListener('hdr-ready', (event) => {
-        handleGroupEvent((event as MessageEvent).data);
-      });
-
-      eventSource.addEventListener('ai-ready', (event) => {
-        handleGroupEvent((event as MessageEvent).data);
-      });
-
-      eventSource.onmessage = (event) => {
-        void handlePayload(event.data);
-      };
-
-      eventSource.onerror = () => {
-        if (destroyed) return;
-        if (!fallbackStarted) {
-          fallbackStarted = true;
-          startPipelinePolling();
-        }
-        eventSource?.close();
-      };
-
-      if (!fallbackStarted) {
-        fallbackStarted = true;
-        startPipelinePolling();
-      }
-
-      safetyTimer = setInterval(() => {
-        if (destroyed) return;
-        if (Date.now() - lastEventAt > 10000 && !fallbackStarted) {
-          fallbackStarted = true;
-          startPipelinePolling();
-        }
-      }, 5000);
-    };
-
-    if (shouldStreamPipeline) {
-      void startPipelineStream();
-    } else if (shouldPollLegacy) {
-      startLegacyPolling();
-    }
+    void connect();
 
     return () => {
-      destroyed = true;
-      if (timer) clearInterval(timer);
-      if (safetyTimer) clearInterval(safetyTimer);
-      eventSource?.close();
+      closed = true;
+      es?.close();
     };
-  }, [job, jobStatus, onUpdateUser, user]);
+  }, [job?.id]);
+
+  useEffect(() => {
+    if (!job?.id) return;
+    if (pipelineItems.length === 0) return;
+    setImages(prev => {
+      if (prev.length === pipelineItems.length) return prev;
+      const next = [...prev];
+      while (next.length < pipelineItems.length) {
+        next.push({ status: 'pending' });
+      }
+      return next.slice(0, pipelineItems.length);
+    });
+  }, [pipelineItems.length, job?.id]);
 
   const loadHistory = async (page = 1) => {
     setHistoryLoading(true);
@@ -450,13 +357,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setShowProjectInput(true);
         setShowNewProjectForm(false);
         setProjectSearch(editorState.search || '');
-        setImages([]);
+        setUploadImages([]);
         setActiveIndex(null);
         setZipUrl(null);
         setDownloadType(null);
         setPipelineItems([]);
         setPipelineProgress(null);
         setPreviewSummary(null);
+        resetStreamState();
         setUploadComplete(true);
       }
       setResumeAttempted(true);
@@ -475,16 +383,17 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
     setActiveTool(workflow);
     setShowProjectInput(false);
-    setImages([]);
+    setUploadImages([]);
     setActiveIndex(null);
     setZipUrl(null);
     setDownloadType(null);
     setPipelineItems([]);
     setPipelineProgress(null);
     setPreviewSummary(null);
+    resetStreamState();
     setUploadComplete(true);
     setPendingActiveIndex(typeof editorState?.activeIndex === 'number' ? editorState.activeIndex : null);
-    jobService.getPipelineStatus(jobId)
+    jobService.getJobStatus(jobId)
       .then(async (response) => {
         const pipelineJob = response.job;
         setJob(pipelineJob);
@@ -576,11 +485,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   const openExistingJob = async (item: HistoryJob) => {
     setConfirmDialog(null);
-    setImages([]);
+    setUploadImages([]);
     setActiveIndex(null);
     setZipUrl(null);
     setDownloadType(null);
     setPreviewSummary(null);
+    resetStreamState();
     setProjectName(item.project_name || '');
     setJobStatus(item.status);
     setJob(item as Job);
@@ -594,7 +504,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     try {
       if (item.workflow_id) {
-        const response = await jobService.getPipelineStatus(item.id);
+        const response = await jobService.getJobStatus(item.id);
         const pipelineJob = response.job;
         setJob(pipelineJob);
         setJobStatus(pipelineJob.status);
@@ -611,11 +521,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           const download = await jobService.getPresignedDownloadUrl(pipelineJob.id);
           setZipUrl(download?.url || null);
           setDownloadType(download?.type || null);
+        } else if (pipelineStages.has(pipelineJob.status)) {
         }
       } else {
         setPipelineItems([]);
         setPipelineProgress(null);
         setPreviewSummary(null);
+        resetStreamState();
         const jobData = await jobService.getJobStatus(item.id);
         setJob(jobData);
         setJobStatus(jobData.status);
@@ -623,6 +535,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           const download = await jobService.getPresignedDownloadUrl(jobData.id);
           setZipUrl(download?.url || null);
           setDownloadType(download?.type || null);
+        } else if (pipelineStages.has(jobData.status)) {
         }
       }
     } catch (err) {
@@ -637,7 +550,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setHistoryCount(prev => Math.max(prev - 1, 0));
       if (job?.id === item.id) {
         setJob(null);
-        setImages([]);
+        setUploadImages([]);
         setJobStatus('idle');
         setProjectName('');
         setZipUrl(null);
@@ -645,6 +558,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setPipelineItems([]);
         setPipelineProgress(null);
         setPreviewSummary(null);
+        resetStreamState();
         localStorage.removeItem('mvai:last_job');
       }
     } catch (err) {
@@ -692,7 +606,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
     const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
     const maxFileBytes = Number(import.meta.env.VITE_MAX_FILE_BYTES || (200 * 1024 * 1024));
-    if (maxFiles > 0 && images.length + files.length > maxFiles) {
+    if (maxFiles > 0 && uploadImages.length + files.length > maxFiles) {
       pushNotice('error', `Too many files. Max ${maxFiles} per project.`);
       return;
     }
@@ -720,9 +634,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPipelineItems([]);
       setPipelineProgress(null);
       setPreviewSummary(null);
+      resetStreamState();
     }
-    setImages(prev => [...prev, ...newItems]);
-    if (activeIndex === null) setActiveIndex(images.length - 1 + newItems.length);
+    setUploadImages(prev => [...prev, ...newItems]);
+    if (activeIndex === null) setActiveIndex(uploadImages.length - 1 + newItems.length);
     if (uploadAllowedStatuses.has(jobStatus)) {
       setAutoUploadQueued(true);
     }
@@ -769,7 +684,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   // Main batch processing logic
   const startBatchProcess = async () => {
-    if (!activeTool || images.length === 0 || !job) {
+    if (!activeTool || uploadImages.length === 0 || !job) {
       pushNotice('error', 'Missing job details. Select a project and upload files first.');
       return;
     }
@@ -781,13 +696,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPipelineItems([]);
       setPipelineProgress(null);
       setPreviewSummary(null);
+      resetStreamState();
       const presignedData: { r2Key: string; putUrl: string; fileName: string }[] = await jobService.getPresignedRawUploadUrls(
         job.id,
-        images.map(img => ({ name: img.file.name, type: img.file.type || 'application/octet-stream', size: img.file.size }))
+        uploadImages.map(img => ({ name: img.file.name, type: img.file.type || 'application/octet-stream', size: img.file.size }))
       );
 
       const uploadedFiles: { r2_key: string; filename: string }[] = [];
-      await Promise.all(images.map(async (img) => {
+      await Promise.all(uploadImages.map(async (img) => {
         const presignInfo = presignedData.find((p) => p.fileName === img.file.name);
         if (!presignInfo) return;
 
@@ -797,7 +713,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           onUploadProgress: (progressEvent) => {
             const total = progressEvent.total || 1;
             img.progress = Math.round((progressEvent.loaded * 100) / total);
-            setImages(prev => [...prev]);
+            setUploadImages(prev => [...prev]);
           }
         });
 
@@ -805,7 +721,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         img.status = 'processing';
         img.statusText = 'Uploaded';
         img.progress = 100;
-        setImages(prev => [...prev]);
+        setUploadImages(prev => [...prev]);
       }));
 
       await jobService.uploadComplete(job.id, uploadedFiles);
@@ -818,7 +734,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setJobStatus('input_resolved');
       const hydratePipeline = async () => {
         for (let attempt = 0; attempt < 3; attempt += 1) {
-          const previewResponse = await jobService.getPipelineStatus(job.id);
+          const previewResponse = await jobService.getJobStatus(job.id);
           if (Array.isArray(previewResponse.items)) {
             setPipelineItems(previewResponse.items);
           }
@@ -863,10 +779,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     if (!autoUploadQueued) return;
     if (!job) return;
     if (!autoUploadStatuses.has(jobStatus)) return;
-    if (images.length === 0) return;
+    if (uploadImages.length === 0) return;
     setAutoUploadQueued(false);
     void startBatchProcess();
-  }, [autoUploadQueued, images.length, job?.id, jobStatus]);
+  }, [autoUploadQueued, uploadImages.length, job?.id, jobStatus]);
 
   const startEnhanceProcess = async () => {
     if (!job || !activeTool) {
@@ -875,6 +791,21 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
     try {
       setNotice(null);
+      let currentItems = pipelineItems;
+      if (currentItems.length === 0) {
+        const response = await jobService.getJobStatus(job.id);
+        if (Array.isArray(response?.items)) {
+          setPipelineItems(response.items);
+          currentItems = response.items;
+        }
+        if (response?.previews) {
+          setPreviewSummary(response.previews);
+        }
+      }
+      const placeholderCount = currentItems.length || job.estimated_units || previewSummary?.total || 0;
+      if (placeholderCount > 0) {
+        setImages(Array.from({ length: placeholderCount }, () => ({ status: 'pending' })));
+      }
       const startResponse = await jobService.startJob(job.id);
       setJobStatus('reserved');
       const profile = await jobService.getProfile();
@@ -899,6 +830,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setPipelineProgress(null);
     setPreviewSummary(null);
     setLightboxUrl(null);
+    resetStreamState();
     setUploadComplete(false);
     localStorage.removeItem('mvai:last_job');
     saveEditorState({ mode: 'projects', workflowId: tool.id, jobId: null, search: '' });
@@ -919,6 +851,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPipelineProgress(null);
       setPreviewSummary(null);
       setLightboxUrl(null);
+      resetStreamState();
       saveLastJob(newJob.id, activeTool.id);
       saveEditorState({ mode: 'studio', workflowId: activeTool.id, jobId: newJob.id, activeIndex: null });
       setHistory(prev => [{
@@ -945,14 +878,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     stage: 'input'
   });
 
-  const hasPendingUploads = images.some((img) => img.status === 'pending' || img.status === 'uploading');
+  const hasPendingUploads = uploadImages.some((img) => img.status === 'pending' || img.status === 'uploading');
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
   const showUploadOnly = jobStatus === 'uploading';
 
-  const uploadProgress = images.length
-    ? Math.round(images.reduce((sum, img) => sum + img.progress, 0) / images.length)
+  const uploadProgress = uploadImages.length
+    ? Math.round(uploadImages.reduce((sum, img) => sum + img.progress, 0) / uploadImages.length)
     : 0;
-  const isFinalizingUpload = jobStatus === 'uploading' && images.length > 0 && uploadProgress >= 100 && !uploadComplete;
+  const isFinalizingUpload = jobStatus === 'uploading' && uploadImages.length > 0 && uploadProgress >= 100 && !uploadComplete;
   const displayUploadProgress = isFinalizingUpload ? 99 : uploadProgress;
 
   const pipelineProgressValue = typeof pipelineProgress === 'number'
@@ -979,10 +912,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const hdrProcessing = totalGroups > 0 && hdrReadyCount < totalGroups && processingActive;
 
   const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
-    const outputReady = isOutputReady(item);
+    const streamIndex = Math.max((item.group_index ?? 1) - 1, 0);
+    const streamImage = images[streamIndex];
+    const outputOverride = streamImage?.status === 'ready' ? streamImage.url : null;
+    const outputReady = Boolean(outputOverride) || isOutputReady(item);
     const hdrReady = isHdrReady(item);
     const groupType = item.group_type ?? null;
-    const preview = item.output_url || item.hdr_url || item.preview_url || '';
+    const preview = outputOverride || item.output_url || item.hdr_url || item.preview_url || '';
     const frameTotal = item.frames?.length || 0;
     const previewReadyCount = (item.frames || []).filter((frame) => frame.preview_ready || frame.preview_url).length;
     const previewTotal = frameTotal || 1;
@@ -1037,13 +973,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
-  const showUploadPlaceholders = !hideGalleryUntilPreviewsDone && pipelineItems.length === 0 && images.length > 0;
+  const showUploadPlaceholders = !hideGalleryUntilPreviewsDone && pipelineItems.length === 0 && uploadImages.length > 0;
   const galleryItems = !hideGalleryUntilPreviewsDone && pipelineItems.length > 0
     ? pipelineItems.map(mapPipelineItem)
     : showUploadPlaceholders
-      ? images.map(mapUploadItem)
+      ? uploadImages.map(mapUploadItem)
       : showRawPreviews
-        ? images.filter((img) => !img.isRaw).map(mapUploadItem)
+        ? uploadImages.filter((img) => !img.isRaw).map(mapUploadItem)
         : [];
   const noticeTone = notice?.type === 'error'
     ? 'border-red-500/30 bg-red-500/10 text-red-200'
@@ -1191,7 +1127,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         <div className="max-w-6xl mx-auto space-y-8">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
             <div className="flex items-center gap-3">
-              <button onClick={() => { setActiveTool(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); clearEditorState(); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+              <button onClick={() => { setActiveTool(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); resetStreamState(); clearEditorState(); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
                 <i className="fa-solid fa-arrow-left"></i>
               </button>
               <div>
@@ -1334,10 +1270,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   }
 
   // VIEW 3: Main Uploader & Editor
-  const showGeneratingPreviews = !showUploadOnly && previewInProgress && pipelineItems.length === 0 && images.length === 0;
+  const showGeneratingPreviews = !showUploadOnly && previewInProgress && pipelineItems.length === 0 && uploadImages.length === 0;
   const showWaitingForResults = !showUploadOnly && !showGeneratingPreviews && galleryItems.length === 0 && pipelineStages.has(jobStatus);
-  const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && images.length === 0;
-  const hasHiddenUploads = images.length > 0 && galleryItems.length === 0 && showRawPreviews;
+  const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && uploadImages.length === 0;
+  const hasHiddenUploads = uploadImages.length > 0 && galleryItems.length === 0 && showRawPreviews;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
   const canEnhance = jobStatus === 'input_resolved' && !hasPendingUploads;
   const canUploadBatch = hasPendingUploads && ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
@@ -1355,7 +1291,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button onClick={() => { setActiveTool(null); setImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); clearEditorState(); localStorage.removeItem('mvai:last_job'); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+          <button onClick={() => { setActiveTool(null); setUploadImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); resetStreamState(); clearEditorState(); localStorage.removeItem('mvai:last_job'); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
             <i className="fa-solid fa-arrow-left"></i>
           </button>
           <div>
@@ -1363,7 +1299,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             <div className="flex items-center gap-2">
               <p className="text-[9px] text-indigo-400 font-black tracking-widest uppercase">{jobStatus}</p>
               <span className="text-[9px] text-gray-600 font-bold">| Balance: {user.points} Pts</span>
-              {jobStatus === 'uploading' && images.length > 0 && (
+              {jobStatus === 'uploading' && uploadImages.length > 0 && (
                 <span className="text-[9px] text-gray-400 font-bold">
                   | {isFinalizingUpload ? 'Finalizing upload' : `Upload ${displayUploadProgress}%`}
                 </span>
@@ -1430,7 +1366,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             <div className="w-full max-w-md text-center space-y-4">
               <div className="text-lg font-black uppercase tracking-widest text-white">Uploading</div>
               <div className="text-xs text-gray-500">
-                {isFinalizingUpload ? 'Finalizing upload…' : `Uploading ${images.length} files...`}
+                {isFinalizingUpload ? 'Finalizing upload…' : `Uploading ${uploadImages.length} files...`}
               </div>
               <div className="text-[10px] text-gray-500 uppercase tracking-widest">
                 Please keep this page open until upload finishes.
