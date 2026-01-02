@@ -13,6 +13,7 @@ import { extractExifFromR2 } from '../services/exif.js';
 import { getFreeTrialPoints } from '../services/settings.js';
 import { attachTaskStream, emitTaskEvent } from '../services/taskStream.js';
 import { attachJobStream, emitJobEvent, sendInitialJobEvents } from '../services/jobEvents.js';
+import fetch from 'node-fetch';
 
 const router = Router();
 
@@ -107,6 +108,28 @@ const normalizeOutputFilename = (filename?: string | null, fallback = 'image') =
     const safeName = sanitizeFilename(filename || fallback, fallback);
     const base = safeName.replace(/\.[^.]+$/, '');
     return `${base}.jpg`;
+};
+
+// == Runpod helpers ==
+const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID;
+const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY;
+const RUNPOD_CALLBACK_URL = process.env.RUNPOD_CALLBACK_URL;
+const RUNPOD_CALLBACK_SECRET = process.env.RUNPOD_CALLBACK_SECRET;
+
+const fetchJobFiles = async (jobId: string) => {
+    const { data, error } = await supabaseAdmin
+        .from('job_files')
+        .select('id, filename, r2_key_raw, exif_json')
+        .eq('job_id', jobId);
+    if (error) throw error;
+    return data || [];
+};
+
+const updateJobStatus = async (jobId: string, status: string) => {
+    await supabaseAdmin
+        .from('jobs')
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq('id', jobId);
 };
 
 const exposureValue = (file: any) => {
@@ -1768,6 +1791,102 @@ router.get('/jobs/:jobId/events', authenticateSse, async (req: AuthRequest, res:
     req.on('close', () => {
         res.end();
     });
+});
+
+// === Runpod: trigger grouping/HDR ===
+router.post('/api/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+        if (!RUNPOD_ENDPOINT_ID || !RUNPOD_API_KEY || !RUNPOD_CALLBACK_URL || !RUNPOD_CALLBACK_SECRET) {
+            return res.status(500).json({ error: 'Runpod env missing' });
+        }
+        const { jobId } = req.params;
+
+        const files = await fetchJobFiles(jobId);
+        if (!files.length) return res.status(400).json({ error: 'no files' });
+
+        // 触发 Runpod
+        const payload = {
+            jobId,
+            files: files.map((f: any) => ({
+                id: f.id,
+                filename: f.filename,
+                r2_key_raw: f.r2_key_raw,
+                exif: f.exif_json,
+            })),
+            callbackUrl: RUNPOD_CALLBACK_URL,
+            callbackSecret: RUNPOD_CALLBACK_SECRET,
+        };
+
+        const rpResp = await fetch(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${RUNPOD_API_KEY}`,
+            },
+            body: JSON.stringify({ input: payload }),
+        });
+
+        if (!rpResp.ok) {
+            const text = await rpResp.text();
+            return res.status(500).json({ error: 'runpod failed', detail: text });
+        }
+        const data = await rpResp.json();
+
+        // 更新状态 & SSE
+        await updateJobStatus(jobId, 'grouping');
+        emitJobEvent(jobId, 'grouping_progress', { progress: 0 });
+
+        res.json({ ok: true, requestId: data.id });
+    } catch (err: any) {
+        console.error(err);
+        res.status(500).json({ error: err.message || 'internal error' });
+    }
+});
+
+// === Runpod 回调 ===
+router.post('/api/runpod/callback', async (req: Request, res: Response) => {
+    try {
+        const secret = (req.headers['x-runpod-secret'] as string) || (req.body && (req.body as any).callbackSecret) || (req.body && (req.body as any).secret);
+        if (secret !== RUNPOD_CALLBACK_SECRET) {
+            return res.status(401).json({ error: 'unauthorized' });
+        }
+
+        const { jobId, groups, error, uploads } = (req.body || {}) as any;
+        if (!jobId) return res.status(400).json({ error: 'missing jobId' });
+
+        if (error) {
+            await updateJobStatus(jobId, 'failed');
+            emitJobEvent(jobId, 'job_done', { status: 'FAILED', error });
+            return res.json({ ok: true });
+        }
+
+        // 将回调结果写入 job_groups
+        if (Array.isArray(groups) && groups.length) {
+            const upserts = groups.map((g: any, idx: number) => ({
+                id: g.id || uuidv4(),
+                job_id: jobId,
+                group_index: g.groupIndex ?? g.index ?? idx + 1,
+                representative_file_id: g.representativeId || null,
+                result_r2_key: g.resultKey || null,
+                preview_r2_key: g.previewKey || null,
+                status: 'processing',
+                runninghub_task_id: null,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            }));
+            const { error: upErr } = await supabaseAdmin.from('job_groups').upsert(upserts, { onConflict: 'id' });
+            if (upErr) console.error('upsert groups err', upErr);
+        }
+
+        // 标记已分组
+        await updateJobStatus(jobId, 'grouped');
+        emitJobEvent(jobId, 'grouped', { groups, uploads });
+
+        res.json({ ok: true });
+    } catch (err: any) {
+        console.error(err);
+        res.status(500).json({ error: err.message || 'internal error' });
+    }
 });
 
 export default router;
