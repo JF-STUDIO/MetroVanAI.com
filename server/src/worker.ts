@@ -542,9 +542,10 @@ const processRunningHubGroup = async (
       await (supabaseAdmin.from('job_groups') as any)
         .update({ status: 'ai_processing' })
         .eq('id', group.id);
+      const groupIndex = Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0);
       emitJobEventAll(jobId, {
         type: 'group_status_changed',
-        index: Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0),
+        index: groupIndex,
         status: 'ai_processing',
         group_id: group.id
       });
@@ -583,19 +584,18 @@ const processRunningHubGroup = async (
         .eq('id', group.id);
       emitJobEventAll(jobId, {
         type: 'group_done',
-        index,
+        index: groupIndex,
         group_id: group.id,
         output_key: outputKey
       });
       emitJobEventAll(jobId, {
         type: 'group_status_changed',
-        index,
+        index: groupIndex,
         status: 'ai_ok',
         group_id: group.id
       });
-      const outputUrl = await getPresignedGetUrl(OUTPUT_BUCKET, outputKey, 900);
-      const index = Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0);
-      emitJobEventAll(jobId, { type: 'image_ready', index, imageUrl: outputUrl, group_id: group.id });
+      const signedOutputUrl = await getPresignedGetUrl(OUTPUT_BUCKET, outputKey, 900);
+      emitJobEventAll(jobId, { type: 'image_ready', index: groupIndex, imageUrl: signedOutputUrl, group_id: group.id });
       return;
     } catch (error) {
       const message = (error as Error).message;
