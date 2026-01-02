@@ -1834,7 +1834,7 @@ router.post('/api/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthReq
 
         // 更新状态 & SSE
         await updateJobStatus(jobId, 'grouping');
-        emitJobEvent(jobId, 'grouping_progress', { progress: 0 });
+        emitJobEvent(jobId, { type: 'grouping_progress', progress: 0 });
 
         res.json({ ok: true, requestId: data.id });
     } catch (err: any) {
@@ -1856,7 +1856,7 @@ router.post('/api/runpod/callback', async (req: Request, res: Response) => {
 
         if (error) {
             await updateJobStatus(jobId, 'failed');
-            emitJobEvent(jobId, 'job_done', { status: 'FAILED', error });
+            emitJobEvent(jobId, { type: 'job_done', status: 'FAILED', error });
             return res.json({ ok: true });
         }
 
@@ -1880,7 +1880,7 @@ router.post('/api/runpod/callback', async (req: Request, res: Response) => {
 
         // 标记已分组
         await updateJobStatus(jobId, 'grouped');
-        emitJobEvent(jobId, 'grouped', { groups, uploads });
+        emitJobEvent(jobId, { type: 'grouped', groups, uploads });
 
         res.json({ ok: true });
     } catch (err: any) {
