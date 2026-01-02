@@ -13,7 +13,6 @@ import { extractExifFromR2 } from '../services/exif.js';
 import { getFreeTrialPoints } from '../services/settings.js';
 import { attachTaskStream, emitTaskEvent } from '../services/taskStream.js';
 import { attachJobStream, emitJobEvent, sendInitialJobEvents } from '../services/jobEvents.js';
-import fetch from 'node-fetch';
 
 const router = Router();
 
@@ -1817,7 +1816,7 @@ router.post('/api/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthReq
             callbackSecret: RUNPOD_CALLBACK_SECRET,
         };
 
-        const rpResp: any = await (fetch as any)(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
+        const rpResp: any = await fetch(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
