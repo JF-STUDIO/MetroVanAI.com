@@ -210,8 +210,23 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           setPipelineProgress(Math.min(100, Math.max(0, Math.round(data.progress))));
         }
 
-        if (data.type === 'grouped' && Array.isArray(data.items)) {
-          const items = data.items as PipelineGroupItem[];
+        if (data.type === 'grouped' && (Array.isArray(data.items) || Array.isArray(data.groups))) {
+          const source = Array.isArray(data.items) ? data.items : data.groups;
+          // 兼容 Runpod 回调的 groups 结构：{ id?, index?, resultKey?, previewKey? }
+          const items: PipelineGroupItem[] = source.map((g: any, idx: number) => ({
+            id: g.id || g.groupId || `group-${idx + 1}`,
+            group_index: g.groupIndex ?? g.index ?? idx + 1,
+            status: g.status || 'processing',
+            group_type: g.groupType ?? null,
+            output_filename: g.outputFilename ?? null,
+            hdr_url: g.hdrUrl || null,
+            output_url: g.resultKey || g.outputUrl || null,
+            preview_url: g.previewKey || g.preview || g.resultKey || g.outputUrl || null,
+            group_size: g.groupSize ?? null,
+            representative_index: g.representativeIndex ?? null,
+            frames: g.frames || [],
+            last_error: g.error || null,
+          }));
           setPipelineItems(items);
           setPipelineProgress(0);
           setImages(() => items.map(() => ({ status: 'pending' })));
