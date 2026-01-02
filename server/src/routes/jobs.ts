@@ -1817,7 +1817,7 @@ router.post('/api/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthReq
             callbackSecret: RUNPOD_CALLBACK_SECRET,
         };
 
-        const rpResp = await fetch(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
+        const rpResp: any = await (fetch as any)(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1830,7 +1830,7 @@ router.post('/api/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthReq
             const text = await rpResp.text();
             return res.status(500).json({ error: 'runpod failed', detail: text });
         }
-        const data = await rpResp.json();
+        const data: any = await rpResp.json();
 
         // 更新状态 & SSE
         await updateJobStatus(jobId, 'grouping');
@@ -1874,8 +1874,8 @@ router.post('/api/runpod/callback', async (req: Request, res: Response) => {
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
             }));
-            const { error: upErr } = await supabaseAdmin.from('job_groups').upsert(upserts, { onConflict: 'id' });
-            if (upErr) console.error('upsert groups err', upErr);
+            const upsertResp: any = await (supabaseAdmin.from('job_groups') as any).upsert(upserts, { onConflict: 'id' });
+            if (upsertResp?.error) console.error('upsert groups err', upsertResp.error);
         }
 
         // 标记已分组
