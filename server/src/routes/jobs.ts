@@ -118,7 +118,7 @@ const RUNPOD_CALLBACK_SECRET = process.env.RUNPOD_CALLBACK_SECRET;
 const fetchJobFiles = async (jobId: string) => {
     const { data, error } = await supabaseAdmin
         .from('job_files')
-        .select('id, filename, r2_key_raw, exif_json')
+        .select('id, filename, r2_key, r2_bucket, exif_json')
         .eq('job_id', jobId);
     if (error) throw error;
     return data || [];
@@ -1809,7 +1809,8 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
             files: files.map((f: any) => ({
                 id: f.id,
                 filename: f.filename,
-                r2_key_raw: f.r2_key_raw,
+                r2_key_raw: f.r2_key,
+                r2_bucket: f.r2_bucket,
                 exif: f.exif_json,
             })),
             callbackUrl: RUNPOD_CALLBACK_URL,
