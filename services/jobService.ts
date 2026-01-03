@@ -7,6 +7,25 @@ const api = axios.create({
   baseURL: API_BASE_URL,
 });
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const withRetry = async <T>(fn: () => Promise<T>, attempts = 3, delayMs = 800): Promise<T> => {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      const isAxios = axios.isAxiosError(err);
+      const status = isAxios ? err.response?.status : undefined;
+      const retriable = !isAxios || status === 502 || status === 503 || status === 504 || err.code === 'ECONNABORTED';
+      if (i === attempts - 1 || !retriable) throw err;
+      await sleep(delayMs);
+    }
+  }
+  throw lastError as Error;
+};
+
 // 自动注入 Supabase Token
 api.interceptors.request.use(async (config) => {
   const { data: { session } } = await supabase.auth.getSession();
@@ -134,80 +153,80 @@ export const jobService = {
     return response.data;
   },
 
-  getProfile: async () => {
+  getProfile: async () => withRetry(async () => {
     const response = await api.get('/profile');
     return response.data;
-  },
+  }),
 
   getSettings: async () => {
     const response = await api.get('/settings');
     return response.data;
   },
 
-  adminGetWorkflows: async () => {
+  adminGetWorkflows: async () => withRetry(async () => {
     const response = await api.get('/admin/workflows');
     return response.data;
-  },
+  }),
 
-  adminCreateWorkflow: async (payload: Record<string, unknown>) => {
+  adminCreateWorkflow: async (payload: Record<string, unknown>) => withRetry(async () => {
     const response = await api.post('/admin/workflows', payload);
     return response.data;
-  },
+  }),
 
-  adminUpdateWorkflow: async (id: string, payload: Record<string, unknown>) => {
+  adminUpdateWorkflow: async (id: string, payload: Record<string, unknown>) => withRetry(async () => {
     const response = await api.patch(`/admin/workflows/${id}`, payload);
     return response.data;
-  },
+  }),
 
-  adminGetVersions: async (workflowId: string) => {
+  adminGetVersions: async (workflowId: string) => withRetry(async () => {
     const response = await api.get(`/admin/workflows/${workflowId}/versions`);
     return response.data;
-  },
+  }),
 
-  adminCreateVersion: async (workflowId: string, payload: Record<string, unknown>) => {
+  adminCreateVersion: async (workflowId: string, payload: Record<string, unknown>) => withRetry(async () => {
     const response = await api.post(`/admin/workflows/${workflowId}/versions`, payload);
     return response.data;
-  },
+  }),
 
-  adminUpdateVersion: async (workflowId: string, versionId: string, payload: Record<string, unknown>) => {
+  adminUpdateVersion: async (workflowId: string, versionId: string, payload: Record<string, unknown>) => withRetry(async () => {
     const response = await api.patch(`/admin/workflows/${workflowId}/versions/${versionId}`, payload);
     return response.data;
-  },
+  }),
 
-  adminPublishVersion: async (workflowId: string, versionId: string) => {
+  adminPublishVersion: async (workflowId: string, versionId: string) => withRetry(async () => {
     const response = await api.post(`/admin/workflows/${workflowId}/publish/${versionId}`);
     return response.data;
-  },
+  }),
 
-  adminTestRun: async (workflowId: string, payload: Record<string, unknown>) => {
+  adminTestRun: async (workflowId: string, payload: Record<string, unknown>) => withRetry(async () => {
     const response = await api.post(`/admin/workflows/${workflowId}/test-run`, payload);
     return response.data;
-  },
+  }),
 
-  adminGetCredits: async () => {
+  adminGetCredits: async () => withRetry(async () => {
     const response = await api.get('/admin/credits');
     return response.data;
-  },
+  }),
 
-  adminGetJobs: async (limit = 20) => {
+  adminGetJobs: async (limit = 20) => withRetry(async () => {
     const response = await api.get(`/admin/jobs?limit=${limit}`);
     return response.data;
-  },
+  }),
 
-  adminGetSettings: async () => {
+  adminGetSettings: async () => withRetry(async () => {
     const response = await api.get('/admin/settings');
     return response.data;
-  },
+  }),
 
-  adminUpdateSettings: async (payload: Record<string, unknown>) => {
+  adminUpdateSettings: async (payload: Record<string, unknown>) => withRetry(async () => {
     const response = await api.patch('/admin/settings', payload);
     return response.data;
-  },
+  }),
 
-  adminAdjustCredits: async (payload: Record<string, unknown>) => {
+  adminAdjustCredits: async (payload: Record<string, unknown>) => withRetry(async () => {
     const response = await api.post('/admin/credits/adjust', payload);
     return response.data;
-  },
+  }),
 
   recharge: async (amount: number) => {
     const response = await api.post('/recharge', { amount });
