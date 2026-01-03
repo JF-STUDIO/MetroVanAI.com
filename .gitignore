@@ -7,4 +7,5 @@ server/dist
 .env
 server/.env
 hdr-worker/.venv
+.github
 .vercel
