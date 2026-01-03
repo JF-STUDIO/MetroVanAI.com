@@ -1793,7 +1793,7 @@ router.get('/jobs/:jobId/events', authenticateSse, async (req: AuthRequest, res:
 });
 
 // === Runpod: trigger grouping/HDR ===
-router.post('/api/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest, res: Response) => {
+router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest, res: Response) => {
     try {
         if (!RUNPOD_ENDPOINT_ID || !RUNPOD_API_KEY || !RUNPOD_CALLBACK_URL || !RUNPOD_CALLBACK_SECRET) {
             return res.status(500).json({ error: 'Runpod env missing' });
@@ -1843,7 +1843,7 @@ router.post('/api/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthReq
 });
 
 // === Runpod 回调 ===
-router.post('/api/runpod/callback', async (req: Request, res: Response) => {
+router.post('/runpod/callback', async (req: Request, res: Response) => {
     try {
         const secret = (req.headers['x-runpod-secret'] as string) || (req.body && (req.body as any).callbackSecret) || (req.body && (req.body as any).secret);
         if (secret !== RUNPOD_CALLBACK_SECRET) {
