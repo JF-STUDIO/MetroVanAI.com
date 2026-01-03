@@ -6,6 +6,7 @@ import { requireAdmin } from '../middleware/admin.js';
 import { supabaseAdmin } from '../services/supabase.js';
 import { RAW_BUCKET, getPresignedGetUrl } from '../services/r2.js';
 import { createRunningHubTask, pollRunningHub } from '../services/runninghub.js';
+import { createRedis } from '../services/redis.js';
 
 const router = Router();
 
@@ -32,6 +33,53 @@ const resolveProvider = async (providerId?: string, providerName?: string) => {
     .single();
   return data;
 };
+
+// lightweight metrics for queue/eta
+const metricsRedis = (() => {
+  try {
+    return createRedis();
+  } catch (err) {
+    console.warn('metrics redis unavailable', (err as Error).message);
+    return null;
+  }
+})();
+
+const RUNPOD_HDR_EST_SEC = Number.parseInt(process.env.RUNPOD_HDR_EST_SEC || '180', 10);
+const RUNPOD_MAX_CONCURRENCY = Number.parseInt(process.env.RUNPOD_MAX_CONCURRENCY || '4', 10);
+
+router.get('/admin/metrics', async (_req: Request, res: Response) => {
+  let runpodPending = 0;
+  let runpodCount = 0;
+  let runpodTotalMs = 0;
+  let runpodFail = 0;
+  try {
+    if (metricsRedis) {
+      const [pending, totalMs, count, fail] = await metricsRedis.mget(
+        'runpod:queue:pending',
+        'runpod:hdr:total_ms',
+        'runpod:hdr:count',
+        'runpod:hdr:fail'
+      );
+      runpodPending = Math.max(Number(pending) || 0, 0);
+      runpodTotalMs = Math.max(Number(totalMs) || 0, 0);
+      runpodCount = Math.max(Number(count) || 0, 0);
+      runpodFail = Math.max(Number(fail) || 0, 0);
+    }
+  } catch (err) {
+    console.warn('metrics read failed', (err as Error).message);
+  }
+  const avgHdrSec = runpodCount > 0 && runpodTotalMs > 0 ? Math.round((runpodTotalMs / runpodCount) / 1000) : RUNPOD_HDR_EST_SEC;
+  const etaSeconds = Math.max(0, Math.ceil((runpodPending / Math.max(RUNPOD_MAX_CONCURRENCY, 1)) * avgHdrSec));
+  res.json({
+    runpod_pending: runpodPending,
+    runpod_hdr_count: runpodCount,
+    runpod_hdr_avg_seconds: avgHdrSec,
+    runpod_hdr_fail: runpodFail,
+    runpod_eta_seconds: etaSeconds,
+    runpod_max_concurrency: RUNPOD_MAX_CONCURRENCY,
+    runpod_hdr_est_sec: RUNPOD_HDR_EST_SEC
+  });
+});
 
 router.get('/admin/workflows', async (_req: Request, res: Response) => {
   const { data, error } = await (supabaseAdmin.from('workflows') as any)
@@ -388,7 +436,7 @@ router.get('/admin/credits', async (_req: Request, res: Response) => {
 router.get('/admin/jobs', async (req: Request, res: Response) => {
   const limit = Math.min(Number(req.query.limit || 20), 100);
   const { data: jobs, error } = await (supabaseAdmin.from('jobs') as any)
-    .select('id, user_id, project_name, status, error_message, workflow_id, created_at')
+    .select('id, user_id, project_name, status, error_message, workflow_id, created_at, estimated_units, settled_units, reserved_units, progress')
     .order('created_at', { ascending: false })
     .limit(limit);
 
@@ -396,6 +444,7 @@ router.get('/admin/jobs', async (req: Request, res: Response) => {
   if (!jobs || jobs.length === 0) return res.json([]);
 
   const jobIds = jobs.map((job: any) => job.id);
+  const userIds = Array.from(new Set(jobs.map((job: any) => job.user_id)));
   const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
     .select('job_id, group_index, last_error')
     .in('job_id', jobIds)
@@ -408,10 +457,60 @@ router.get('/admin/jobs', async (req: Request, res: Response) => {
     grouped.set(group.job_id, list);
   });
 
-  const payload = jobs.map((job: any) => ({
-    ...job,
-    group_errors: grouped.get(job.id) || []
-  }));
+  const { data: groupCounts } = await (supabaseAdmin.from('job_groups') as any)
+    .select('job_id, status, count:count(*)')
+    .in('job_id', jobIds)
+    .group('job_id, status');
+
+  const { data: fileCounts } = await (supabaseAdmin.from('job_files') as any)
+    .select('job_id, count:count(*)')
+    .in('job_id', jobIds)
+    .group('job_id');
+
+  const { data: workflows } = await (supabaseAdmin.from('workflows') as any)
+    .select('id, credit_per_unit');
+
+  const { data: profiles } = await (supabaseAdmin.from('profiles') as any)
+    .select('id, email')
+    .in('id', userIds);
+
+  const groupSummary = new Map<string, { total: number; done: number }>();
+  (groupCounts || []).forEach((row: any) => {
+    const current = groupSummary.get(row.job_id) || { total: 0, done: 0 };
+    current.total += Number(row.count) || 0;
+    if (row.status === 'ai_ok') current.done += Number(row.count) || 0;
+    groupSummary.set(row.job_id, current);
+  });
+
+  const fileSummary = new Map<string, number>();
+  (fileCounts || []).forEach((row: any) => {
+    fileSummary.set(row.job_id, Number(row.count) || 0);
+  });
+
+  const workflowMap = new Map<string, number>();
+  (workflows || []).forEach((wf: any) => {
+    workflowMap.set(wf.id, wf.credit_per_unit || 1);
+  });
+
+  const profileMap = new Map<string, string | null>();
+  (profiles || []).forEach((p: any) => {
+    profileMap.set(p.id, p.email || null);
+  });
+
+  const payload = jobs.map((job: any) => {
+    const summary = groupSummary.get(job.id) || { total: 0, done: 0 };
+    const creditPerUnit = job.workflow_id ? (workflowMap.get(job.workflow_id) || 1) : 1;
+    const creditsUsed = (job.settled_units || 0) * creditPerUnit;
+    return {
+      ...job,
+      group_errors: grouped.get(job.id) || [],
+      group_total: summary.total,
+      group_done: summary.done,
+      photo_count: fileSummary.get(job.id) || 0,
+      credits_used: creditsUsed,
+      user_email: profileMap.get(job.user_id) || null
+    };
+  });
   res.json(payload);
 });
 

@@ -47,6 +47,16 @@ export const jobService = {
     return response.data;
   },
 
+  createMultipartUpload: async (jobId: string, file: { name: string; type: string; size: number }) => {
+    const response = await api.post(`/jobs/${jobId}/presign-raw-multipart`, { file });
+    return response.data;
+  },
+
+  completeMultipartUpload: async (jobId: string, payload: { uploadId: string; key: string; parts: { partNumber: number; etag: string }[] }) => {
+    const response = await api.post(`/jobs/${jobId}/complete-raw-multipart`, payload);
+    return response.data;
+  },
+
   getPresignedUploadUrls: async (jobId: string, files: { name: string; type: string }[]) => {
     const response = await api.post(`/jobs/${jobId}/presign-upload`, { files });
     return response.data;
@@ -67,8 +77,13 @@ export const jobService = {
     return response.data;
   },
 
-  startJob: async (jobId: string) => {
-    const response = await api.post(`/jobs/${jobId}/start`);
+  startJob: async (jobId: string, payload?: { skipGroupIds?: string[] }) => {
+    const response = await api.post(`/jobs/${jobId}/start`, payload || {});
+    return response.data;
+  },
+
+  triggerRunpod: async (jobId: string, payload?: { skipGroupIds?: string[] }) => {
+    const response = await api.post(`/jobs/${jobId}/trigger-runpod`, payload || {});
     return response.data;
   },
 

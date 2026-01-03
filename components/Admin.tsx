@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AdminJobRow, AdminWorkflow, AppSettings, CreditRow, PricingPack, PricingSettings, User, WorkflowVersion } from '../types';
 import { jobService } from '../services/jobService';
 
@@ -35,6 +35,19 @@ type VersionDraft = {
 type CreditDraft = {
   delta: string;
   note: string;
+};
+
+type UserBucket = {
+  userId: string;
+  email: string | null;
+  jobCount: number;
+  photoTotal: number;
+  groupTotal: number;
+  groupDone: number;
+  creditsUsed: number;
+  avgProgress: number | null;
+  completion: number | null;
+  jobs: AdminJobRow[];
 };
 
 const DEFAULT_INPUT_NODE = 'image';
@@ -117,6 +130,7 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
   const [testResults, setTestResults] = useState<Record<string, any>>({});
   const [creditDrafts, setCreditDrafts] = useState<Record<string, CreditDraft>>({});
   const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | null>(null);
+  const [expandedUsers, setExpandedUsers] = useState<Record<string, boolean>>({});
 
   const loadWorkflows = async () => {
     setLoading(prev => ({ ...prev, workflows: true }));
@@ -186,6 +200,70 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
       loadSettings();
     }
   }, [user.isAdmin]);
+
+  const userBuckets = useMemo<UserBucket[]>(() => {
+    const map = new Map<string, {
+      userId: string;
+      email: string | null;
+      jobCount: number;
+      photoTotal: number;
+      groupTotal: number;
+      groupDone: number;
+      creditsUsed: number;
+      progressSum: number;
+      progressCount: number;
+      latestAt: number;
+      jobs: AdminJobRow[];
+    }>();
+
+    jobs.forEach(job => {
+      const bucket = map.get(job.user_id) || {
+        userId: job.user_id,
+        email: job.user_email || null,
+        jobCount: 0,
+        photoTotal: 0,
+        groupTotal: 0,
+        groupDone: 0,
+        creditsUsed: 0,
+        progressSum: 0,
+        progressCount: 0,
+        latestAt: 0,
+        jobs: []
+      };
+      bucket.jobCount += 1;
+      bucket.photoTotal += job.photo_count || 0;
+      bucket.groupTotal += job.group_total || 0;
+      bucket.groupDone += job.group_done || 0;
+      bucket.creditsUsed += job.credits_used || 0;
+      if (typeof job.progress === 'number') {
+        bucket.progressSum += job.progress;
+        bucket.progressCount += 1;
+      }
+      const createdAt = job.created_at ? new Date(job.created_at).getTime() : 0;
+      bucket.latestAt = Math.max(bucket.latestAt, createdAt);
+      bucket.jobs.push(job);
+      map.set(job.user_id, bucket);
+    });
+
+    const withMeta = Array.from(map.values()).sort((a, b) => b.latestAt - a.latestAt);
+    return withMeta.map(bucket => {
+      const { progressSum, progressCount, latestAt: _latestAt, ...rest } = bucket;
+      return {
+        ...rest,
+        avgProgress: progressCount ? Math.round(progressSum / progressCount) : null,
+        completion: rest.groupTotal > 0 ? Math.round((rest.groupDone / rest.groupTotal) * 100) : null,
+        jobs: rest.jobs.sort((a, b) => {
+          const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+          const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+          return bTime - aTime;
+        })
+      };
+    });
+  }, [jobs]);
+
+  const toggleUser = (userId: string) => {
+    setExpandedUsers(prev => ({ ...prev, [userId]: !prev[userId] }));
+  };
 
   const updateWorkflowField = (id: string, field: keyof AdminWorkflow, value: any) => {
     setWorkflows(prev => prev.map(workflow => (
@@ -900,32 +978,130 @@ const Admin: React.FC<{ user: User }> = ({ user }) => {
         </section>
 
         <section className="glass rounded-[2.5rem] p-8 border border-white/10">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-sm font-black uppercase tracking-widest text-gray-400">User Job Overview</h2>
+              <p className="text-xs text-gray-500">Per-user totals: photos, groups, credits, completion. Click to expand.</p>
+            </div>
+            {loading.jobs && <span className="text-xs text-gray-500">Loading...</span>}
+          </div>
+          {!loading.jobs && userBuckets.length === 0 && (
+            <div className="text-xs text-gray-500">No jobs yet.</div>
+          )}
+          <div className="space-y-3">
+            {userBuckets.map(bucket => {
+              const isOpen = !!expandedUsers[bucket.userId];
+              const completionLabel = bucket.completion != null ? `${bucket.completion}%` : '—';
+              const progressLabel = bucket.avgProgress != null ? `${bucket.avgProgress}%` : '—';
+              return (
+                <div key={bucket.userId} className="border border-white/10 rounded-2xl px-4 py-3 text-xs">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-gray-200">{bucket.email || bucket.userId}</div>
+                      <div className="text-[10px] uppercase tracking-widest text-gray-500">Jobs: {bucket.jobCount}</div>
+                    </div>
+                    <button
+                      onClick={() => toggleUser(bucket.userId)}
+                      className="px-3 py-2 rounded-xl bg-white/10 text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition"
+                    >
+                      {isOpen ? 'Hide' : 'Expand'}
+                    </button>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <div className="bg-white/5 rounded-xl px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-widest text-gray-500">Photos</div>
+                      <div className="text-gray-200">{bucket.photoTotal}</div>
+                    </div>
+                    <div className="bg-white/5 rounded-xl px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-widest text-gray-500">Groups</div>
+                      <div className="text-gray-200">{bucket.groupDone}/{bucket.groupTotal}</div>
+                    </div>
+                    <div className="bg-white/5 rounded-xl px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-widest text-gray-500">Completion</div>
+                      <div className="text-gray-200">{completionLabel}</div>
+                    </div>
+                    <div className="bg-white/5 rounded-xl px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-widest text-gray-500">Credits Used</div>
+                      <div className="text-gray-200">{bucket.creditsUsed}</div>
+                    </div>
+                    <div className="bg-white/5 rounded-xl px-3 py-2">
+                      <div className="text-[10px] uppercase tracking-widest text-gray-500">Avg Progress</div>
+                      <div className="text-gray-200">{progressLabel}</div>
+                    </div>
+                  </div>
+                  {isOpen && (
+                    <div className="mt-4 space-y-2">
+                      {bucket.jobs.map(job => {
+                        const jobGroupLabel = `${job.group_done || 0}/${job.group_total || 0}`;
+                        const jobProgress = typeof job.progress === 'number' ? `${job.progress}%` : '—';
+                        return (
+                          <div key={job.id} className="border border-white/10 rounded-xl px-3 py-2">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="text-gray-200">{job.project_name || job.id}</div>
+                              <div className="text-[10px] uppercase tracking-widest text-gray-500">{job.status}</div>
+                            </div>
+                            <div className="mt-2 grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] text-gray-300">
+                              <div className="flex justify-between"><span>Photos</span><span className="text-gray-100">{job.photo_count || 0}</span></div>
+                              <div className="flex justify-between"><span>Groups</span><span className="text-gray-100">{jobGroupLabel}</span></div>
+                              <div className="flex justify-between"><span>Progress</span><span className="text-gray-100">{jobProgress}</span></div>
+                              <div className="flex justify-between"><span>Credits</span><span className="text-gray-100">{job.credits_used || 0}</span></div>
+                              <div className="flex justify-between"><span>Units (set/res)</span><span className="text-gray-100">{job.settled_units ?? 0}/{job.reserved_units ?? 0}</span></div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="glass rounded-[2.5rem] p-8 border border-white/10">
           <h2 className="text-sm font-black uppercase tracking-widest text-gray-400 mb-6">Recent Jobs</h2>
           {loading.jobs && <div className="text-xs text-gray-500 mb-4">Loading...</div>}
           {!loading.jobs && jobs.length === 0 && (
             <div className="text-xs text-gray-500">No jobs found.</div>
           )}
           <div className="space-y-3">
-            {jobs.map(job => (
-              <div key={job.id} className="border border-white/10 rounded-2xl px-4 py-3 text-xs">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-gray-200">{job.project_name || job.id}</div>
-                  <div className="text-[10px] uppercase tracking-widest text-gray-500">{job.status}</div>
-                </div>
-                {job.error_message && (
-                  <div className="text-[10px] text-red-300 mt-2">Job Error: {job.error_message}</div>
-                )}
-                {job.group_errors && job.group_errors.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {job.group_errors.map((group) => (
-                      <div key={`${job.id}-${group.group_index}`} className="text-[10px] text-orange-200">
-                        Group {group.group_index}: {group.last_error || 'Unknown error'}
-                      </div>
-                    ))}
+            {jobs.map(job => {
+              const groupLabel = `${job.group_done || 0}/${job.group_total || 0}`;
+              const progressLabel = typeof job.progress === 'number' ? `${job.progress}%` : '—';
+              const createdLabel = job.created_at ? new Date(job.created_at).toLocaleString() : '—';
+              return (
+                <div key={job.id} className="border border-white/10 rounded-2xl px-4 py-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-gray-200">{job.project_name || job.id}</div>
+                      <div className="text-[10px] uppercase tracking-widest text-gray-500">{job.user_email || job.user_id} • {createdLabel}</div>
+                    </div>
+                    <div className="text-[10px] uppercase tracking-widest text-gray-300">{job.status}</div>
                   </div>
-                )}
-              </div>
-            ))}
+                  <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px] text-gray-300">
+                    <div className="flex justify-between"><span>Photos</span><span className="text-gray-100">{job.photo_count || 0}</span></div>
+                    <div className="flex justify-between"><span>Groups</span><span className="text-gray-100">{groupLabel}</span></div>
+                    <div className="flex justify-between"><span>Credits</span><span className="text-gray-100">{job.credits_used || 0}</span></div>
+                    <div className="flex justify-between"><span>Progress</span><span className="text-gray-100">{progressLabel}</span></div>
+                  </div>
+                  <div className="mt-1 text-[10px] text-gray-500">
+                    Units est/res/settled: {job.estimated_units ?? 0} / {job.reserved_units ?? 0} / {job.settled_units ?? 0}
+                  </div>
+                  {job.error_message && (
+                    <div className="text-[10px] text-red-300 mt-2">Job Error: {job.error_message}</div>
+                  )}
+                  {job.group_errors && job.group_errors.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {job.group_errors.map((group) => (
+                        <div key={`${job.id}-${group.group_index}`} className="text-[10px] text-orange-200">
+                          Group {group.group_index}: {group.last_error || 'Unknown error'}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
 

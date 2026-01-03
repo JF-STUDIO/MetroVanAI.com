@@ -77,6 +77,7 @@ export interface PipelineGroupItem {
   id: string;
   group_index: number;
   status: string;
+  is_skipped?: boolean;
   group_type?: string | null;
   output_filename?: string | null;
   hdr_url?: string | null;
@@ -97,7 +98,8 @@ export interface PipelineGroupItem {
 
 export interface PipelineStatusResponse {
   job: Job;
-  groups: { total: number; success: number; failed: number };
+  // skipped and total_all are optional to preserve backward compatibility
+  groups: { total: number; success: number; failed: number; skipped?: number; total_all?: number };
   items?: PipelineGroupItem[];
   progress?: number;
   previews?: { total: number; ready: number };
@@ -120,6 +122,15 @@ export interface AdminJobRow {
   workflow_id?: string | null;
   created_at?: string;
   group_errors?: { group_index: number; last_error: string | null }[];
+  user_email?: string | null;
+  photo_count?: number;
+  group_total?: number;
+  group_done?: number;
+  credits_used?: number;
+  estimated_units?: number | null;
+  settled_units?: number | null;
+  reserved_units?: number | null;
+  progress?: number | null;
 }
 
 export interface AppSettings {

@@ -78,10 +78,11 @@ const updateJobProgress = async (jobId: string) => {
     .select('status')
     .eq('job_id', jobId);
 
-  const total = groups?.length || 0;
+  const activeGroups = (groups || []).filter((group: any) => group.status !== 'skipped');
+  const total = activeGroups.length;
   if (total === 0) return;
 
-  const done = groups.filter((group: any) => group.status === 'ai_ok' || group.status === 'failed').length;
+  const done = activeGroups.filter((group: any) => group.status === 'ai_ok' || group.status === 'failed').length;
   const progress = Math.min(100, Math.floor((done / total) * 100));
 
   await (supabaseAdmin.from('jobs') as any)
@@ -314,15 +315,17 @@ const releaseCreditsForFailure = async (jobId: string, errorMessage: string) => 
     .select('status')
     .eq('job_id', jobId);
 
-  const totalGroups = groups?.length || (job.reserved_units ?? 0) || 0;
-  const successCount = groups ? groups.filter((group: any) => group.status === 'ai_ok').length : 0;
+  const activeGroups = (groups || []).filter((group: any) => group.status !== 'skipped');
+  const totalGroups = activeGroups.length || (job.reserved_units ?? 0) || 0;
+  const successCount = activeGroups.filter((group: any) => group.status === 'ai_ok').length;
   const finalFailureCount = Math.max(totalGroups - successCount, 0);
 
   if (groups && groups.length > 0) {
     await (supabaseAdmin.from('job_groups') as any)
       .update({ status: 'failed', last_error: errorMessage })
       .eq('job_id', jobId)
-      .neq('status', 'ai_ok');
+      .neq('status', 'ai_ok')
+      .neq('status', 'skipped');
   }
 
   if (totalGroups > 0) {
@@ -351,10 +354,11 @@ const finalizePipelineJob = async (
     .eq('job_id', job.id)
     .order('group_index', { ascending: true });
 
-  const totalGroups = groups?.length || 0;
+  const activeGroups = (groups || []).filter((group: any) => group.status !== 'skipped');
+  const totalGroups = activeGroups.length;
   if (!groups || totalGroups === 0) {
     await (supabaseAdmin.from('jobs') as any)
-      .update({ status: 'failed', error_message: 'No job groups found' })
+      .update({ status: 'failed', error_message: 'No active job groups found' })
       .eq('id', job.id);
     emitJobEventAll(job.id, { type: 'error', message: 'workflow failed' });
     return;
@@ -366,7 +370,7 @@ const finalizePipelineJob = async (
   const successful: { output_key: string; output_filename: string }[] = [];
 
   try {
-    for (const group of groups) {
+    for (const group of activeGroups) {
       if (group.status !== 'ai_ok' || !group.output_key) {
         continue;
       }
@@ -395,7 +399,9 @@ const finalizePipelineJob = async (
 
     const successCount = successful.length;
     const failedFinalCount = (refreshedGroups || []).filter((group: any) => (
-      group.status === 'failed' && (group.attempts || 0) >= maxAttempts
+      group.status !== 'skipped' &&
+      group.status === 'failed' &&
+      (group.attempts || 0) >= maxAttempts
     )).length;
 
     const creditUpdate = await applyCreditAdjustments(job, totalGroups, successCount, failedFinalCount);
@@ -701,13 +707,8 @@ const processPipelineJob = async (jobId: string) => {
   const hdrConcurrency = Number(context.runtimeConfig.hdr_concurrency ?? HDR_CONCURRENCY);
   const aiConcurrency = Number(context.runtimeConfig.ai_concurrency ?? AI_CONCURRENCY);
 
-  if (await isJobCanceled(jobId)) return;
-  await (supabaseAdmin.from('jobs') as any)
-    .update({ status: 'hdr_processing', error_message: null })
-    .eq('id', jobId);
-
   const { data: hdrGroups } = await (supabaseAdmin.from('job_groups') as any)
-    .select('id, status, attempts')
+    .select('id, status, attempts, group_index')
     .eq('job_id', jobId)
     .order('group_index', { ascending: true });
 
@@ -716,22 +717,30 @@ const processPipelineJob = async (jobId: string) => {
   }
 
   const pendingHdr = ((hdrGroups || []) as any[]).filter((group: any) => group.status === 'queued');
-  await runWithConcurrency(pendingHdr, hdrConcurrency, async (group) => {
+
+  if (pendingHdr.length > 0) {
     if (await isJobCanceled(jobId)) return;
-    try {
-      await processHdrGroup(jobId, group);
-      await updateJobProgress(jobId);
-    } catch (error) {
-      const attempts = (group.attempts || 0) + 1;
-      await (supabaseAdmin.from('job_groups') as any)
-        .update({ status: 'failed', attempts, last_error: (error as Error).message })
-        .eq('id', group.id);
-    }
-  });
+    await (supabaseAdmin.from('jobs') as any)
+      .update({ status: 'hdr_processing', error_message: null })
+      .eq('id', jobId);
+
+    await runWithConcurrency(pendingHdr, hdrConcurrency, async (group) => {
+      if (await isJobCanceled(jobId)) return;
+      try {
+        await processHdrGroup(jobId, group);
+        await updateJobProgress(jobId);
+      } catch (error) {
+        const attempts = (group.attempts || 0) + 1;
+        await (supabaseAdmin.from('job_groups') as any)
+          .update({ status: 'failed', attempts, last_error: (error as Error).message })
+          .eq('id', group.id);
+      }
+    });
+  }
 
   if (await isJobCanceled(jobId)) return;
   await (supabaseAdmin.from('jobs') as any)
-    .update({ status: 'ai_processing' })
+    .update({ status: 'ai_processing', error_message: null })
     .eq('id', jobId);
 
   const { data: aiGroups } = await (supabaseAdmin.from('job_groups') as any)

@@ -21,8 +21,12 @@ s3 = boto3.client(
 )
 
 
-def download_files(files, input_dir):
+def download_files(files, input_dir, skip_ids=None):
+    skip_ids = set(skip_ids or [])
     for f in files:
+        file_id = f.get("id")
+        if file_id and file_id in skip_ids:
+            continue
         key = f.get("r2_key_raw")
         if not key:
             continue
@@ -48,6 +52,7 @@ def handler(job):
     files = data.get("files") or []
     callback_url = data.get("callbackUrl")
     callback_secret = data.get("callbackSecret")
+    skip_file_ids = set(data.get("skipFileIds") or [])
 
     print("📦 Job input:", json.dumps(data))
 
@@ -58,7 +63,7 @@ def handler(job):
         os.makedirs(output_dir, exist_ok=True)
 
         # 下载 R2 原图
-        download_files(files, input_dir)
+        download_files(files, input_dir, skip_file_ids)
 
         # 跑分组+HDR（保持原脚本逻辑）
         try:

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Workflow, User, Job, JobAsset, PipelineGroupItem } from '../types';
 import { jobService } from '../services/jobService';
 import { supabase } from '../services/supabaseClient';
@@ -36,6 +36,7 @@ type GalleryItem = {
   groupType?: string | null;
   groupSize?: number | null;
   representativeIndex?: number | null;
+  isSkipped?: boolean;
   frames?: {
     id: string;
     filename: string;
@@ -110,6 +111,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [downloadType, setDownloadType] = useState<'zip' | 'jpg' | null>(null);
   const [pipelineItems, setPipelineItems] = useState<PipelineGroupItem[]>([]);
   const [pipelineProgress, setPipelineProgress] = useState<number | null>(null);
+  const [excludedGroupIds, setExcludedGroupIds] = useState<Set<string>>(new Set());
   const [images, setImages] = useState<Array<{ status: 'pending' | 'ready'; url?: string }>>([]);
   const [previewSummary, setPreviewSummary] = useState<{ total: number; ready: number } | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
@@ -126,6 +128,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [uploadComplete, setUploadComplete] = useState(false);
   const editorStateKey = 'mvai:editor_state';
   const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
+  const [runpodQueue, setRunpodQueue] = useState<{ pending: number; etaSeconds: number } | null>(null);
   const [notice, setNotice] = useState<{ type: 'error' | 'info' | 'success'; message: string } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
     title?: string;
@@ -151,6 +154,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
     return ext ? rawExtensions.has(ext) : false;
   };
+  const multipartThreshold = 50 * 1024 * 1024; // 50MB
   const resetStreamState = () => {
     setImages([]);
   };
@@ -238,9 +242,17 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             const next = [...prev];
             const item = next[data.index];
             if (!item) return prev;
-            next[data.index] = { ...item, status: data.status || item.status, error: data.error || item.error };
+            next[data.index] = {
+              ...item,
+              status: data.status || item.status,
+              last_error: data.error || item.last_error,
+              is_skipped: data.status === 'skipped' ? true : item.is_skipped
+            };
             return next;
           });
+          if (data.status && typeof data.status === 'string') {
+            setJobStatus(data.status);
+          }
         }
 
         if (data.type === 'group_done' && typeof data.index === 'number') {
@@ -249,7 +261,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             const next = [...prev];
             const item = next[data.index];
             if (!item) return prev;
-            next[data.index] = { ...item, status: 'ai_ok', error: null };
+            next[data.index] = { ...item, status: 'ai_ok', last_error: null };
             return next;
           });
         }
@@ -260,7 +272,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             const next = [...prev];
             const item = next[data.index];
             if (!item) return prev;
-            next[data.index] = { ...item, status: 'failed', error: data.error || item.error };
+            next[data.index] = { ...item, status: 'failed', last_error: data.error || item.last_error };
             return next;
           });
           pushNotice('error', data.error || '分组处理失败');
@@ -321,6 +333,35 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       return next.slice(0, pipelineItems.length);
     });
   }, [pipelineItems.length, job?.id]);
+
+  useEffect(() => {
+    if (pipelineItems.length === 0) {
+      setExcludedGroupIds(new Set());
+    }
+  }, [pipelineItems.length]);
+
+  useEffect(() => {
+    if (pipelineItems.length === 0) return;
+    setExcludedGroupIds((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      const ids = new Set(pipelineItems.map((item) => item.id));
+      for (const id of Array.from(next)) {
+        if (!ids.has(id)) {
+          next.delete(id);
+          changed = true;
+        }
+      }
+      pipelineItems.forEach((item) => {
+        const isSkipped = item.status === 'skipped' || item.is_skipped;
+        if (isSkipped && !next.has(item.id)) {
+          next.add(item.id);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [pipelineItems]);
 
   const loadHistory = async (page = 1) => {
     setHistoryLoading(true);
@@ -708,6 +749,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setNotice(null);
       setJobStatus('uploading');
       setUploadComplete(false);
+      setRunpodQueue(null);
       setPipelineItems([]);
       setPipelineProgress(null);
       setPreviewSummary(null);
@@ -718,10 +760,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       );
 
       const uploadedFiles: { r2_key: string; filename: string }[] = [];
-      await Promise.all(uploadImages.map(async (img) => {
+
+      const uploadSingle = async (img: ImageItem) => {
         const presignInfo = presignedData.find((p) => p.fileName === img.file.name);
         if (!presignInfo) return;
-
         img.status = 'uploading';
         await axios.put(presignInfo.putUrl, img.file, {
           headers: { 'Content-Type': img.file.type || 'application/octet-stream' },
@@ -731,42 +773,96 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             setUploadImages(prev => [...prev]);
           }
         });
-
         uploadedFiles.push({ r2_key: presignInfo.r2Key, filename: img.file.name });
         img.status = 'processing';
         img.statusText = 'Uploaded';
         img.progress = 100;
         setUploadImages(prev => [...prev]);
+      };
+
+      const uploadMultipart = async (img: ImageItem) => {
+        img.status = 'uploading';
+        const init = await jobService.createMultipartUpload(job.id, {
+          name: img.file.name,
+          type: img.file.type || 'application/octet-stream',
+          size: img.file.size
+        });
+        const parts: { partNumber: number; etag: string }[] = [];
+        let loadedTotal = 0;
+        const maxParallel = 3;
+        const queue = [...init.partUrls];
+
+        const uploadPart = async (part: any, attempt = 1): Promise<void> => {
+          const start = (part.partNumber - 1) * init.partSize;
+          const end = Math.min(start + init.partSize, img.file.size);
+          const chunk = img.file.slice(start, end);
+          try {
+            const response = await axios.put(part.url, chunk, {
+              headers: { 'Content-Type': img.file.type || 'application/octet-stream' }
+            });
+            const etag = (response.headers?.etag || response.headers?.ETag || '').replace(/"/g, '');
+            if (!etag) throw new Error('Missing ETag for multipart part');
+            parts.push({ partNumber: part.partNumber, etag });
+            loadedTotal += (end - start);
+            img.progress = Math.min(99, Math.round((loadedTotal / img.file.size) * 100));
+            setUploadImages(prev => [...prev]);
+          } catch (error) {
+            if (attempt < 3) {
+              await uploadPart(part, attempt + 1);
+              return;
+            }
+            throw error;
+          }
+        };
+
+        const workers = Array.from({ length: Math.min(maxParallel, queue.length) }, async () => {
+          while (queue.length) {
+            const part = queue.shift();
+            if (!part) break;
+            await uploadPart(part);
+          }
+        });
+
+        await Promise.all(workers);
+        await jobService.completeMultipartUpload(job.id, { uploadId: init.uploadId, key: init.key, parts });
+        uploadedFiles.push({ r2_key: init.key, filename: img.file.name });
+        img.status = 'processing';
+        img.statusText = 'Uploaded';
+        img.progress = 100;
+        setUploadImages(prev => [...prev]);
+      };
+
+      await Promise.all(uploadImages.map(async (img) => {
+        try {
+          if (img.file.size >= multipartThreshold) {
+            await uploadMultipart(img);
+          } else {
+            await uploadSingle(img);
+          }
+        } catch (error) {
+          img.status = 'failed';
+          img.statusText = 'Failed';
+          setUploadImages(prev => [...prev]);
+          throw error;
+        }
       }));
 
       await jobService.uploadComplete(job.id, uploadedFiles);
       setUploadComplete(true);
       setPreviewSummary({ total: uploadedFiles.length, ready: 0 });
-      setJobStatus('analyzing');
-      const analysis = await jobService.analyzeJob(job.id);
-      const estimatedUnits = analysis?.estimated_units || 0;
-      setJob(prev => (prev ? { ...prev, estimated_units: estimatedUnits } : prev));
-      setJobStatus('input_resolved');
-      const hydratePipeline = async () => {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          const previewResponse = await jobService.getJobStatus(job.id);
-          if (Array.isArray(previewResponse.items)) {
-            setPipelineItems(previewResponse.items);
-          }
-          if (previewResponse?.previews) {
-            setPreviewSummary(previewResponse.previews);
-          }
-          if (Array.isArray(previewResponse.items) && previewResponse.items.length > 0) {
-            break;
-          }
-          await new Promise(resolve => setTimeout(resolve, 600));
-        }
-      };
-      await hydratePipeline();
+      setJobStatus('grouping');
+      // 触发 RunPod 分组 + HDR
+      const runpodResp = await jobService.triggerRunpod(job.id);
+      if (runpodResp?.queue_pending !== undefined) {
+        setRunpodQueue({
+          pending: Math.max(Number(runpodResp.queue_pending) || 0, 0),
+          etaSeconds: Math.max(Number(runpodResp.eta_seconds) || 0, 0)
+        });
+      }
+      // 生成 RAW 内嵌 JPG 预览（异步，不阻塞）
       jobService.generatePreviews(job.id).catch((error) => {
         console.warn('Failed to enqueue previews', error);
       });
-      // keep local placeholders until pipeline previews arrive
     } catch (err) {
       if (err instanceof Error) {
         pushNotice('error', `Upload failed: ${err.message}`);
@@ -817,11 +913,28 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           setPreviewSummary(response.previews);
         }
       }
-      const placeholderCount = currentItems.length || job.estimated_units || previewSummary?.total || 0;
+      const serverSkipped = currentItems.filter((item) => item.status === 'skipped' || item.is_skipped).map((item) => item.id);
+      const selectedSkips = jobStatus === 'input_resolved' ? Array.from(excludedGroupIds) : [];
+      const skipIds = Array.from(new Set([...serverSkipped, ...selectedSkips]));
+      const activeCountFromItems = currentItems.length > 0
+        ? currentItems.filter((item) => !skipIds.includes(item.id)).length
+        : Math.max((job.estimated_units || 0) - skipIds.length, 0);
+      if (activeCountFromItems <= 0) {
+        pushNotice('error', 'Keep at least one group selected for HDR processing.');
+        return;
+      }
+      const placeholderCount = activeCountFromItems || previewSummary?.total || 0;
       if (placeholderCount > 0) {
         setImages(Array.from({ length: placeholderCount }, () => ({ status: 'pending' })));
       }
-      const startResponse = await jobService.startJob(job.id);
+      const startResponse = await jobService.startJob(job.id, skipIds.length > 0 ? { skipGroupIds: skipIds } : undefined);
+      if (skipIds.length > 0) {
+        setPipelineItems((prev) => prev.map((item) => (
+          skipIds.includes(item.id) ? { ...item, status: 'skipped', is_skipped: true } : item
+        )));
+        setExcludedGroupIds(new Set(skipIds));
+      }
+      setJob((prev) => (prev ? { ...prev, estimated_units: activeCountFromItems } : prev));
       setJobStatus('reserved');
       const profile = await jobService.getProfile();
       onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
@@ -867,6 +980,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPreviewSummary(null);
       setLightboxUrl(null);
       resetStreamState();
+      setRunpodQueue(null);
       saveLastJob(newJob.id, activeTool.id);
       saveEditorState({ mode: 'studio', workflowId: activeTool.id, jobId: newJob.id, activeIndex: null });
       setHistory(prev => [{
@@ -882,6 +996,28 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         pushNotice('error', 'An unknown error occurred while creating the project.');
       }
     }
+  };
+
+  const toggleGroupExclusion = (groupId: string) => {
+    if (jobStatus !== 'input_resolved') return;
+    const willExclude = !excludedGroupIds.has(groupId);
+    setExcludedGroupIds((prev) => {
+      const next = new Set(prev);
+      if (willExclude) {
+        next.add(groupId);
+      } else {
+        next.delete(groupId);
+      }
+      return next;
+    });
+    setPipelineItems((prev) => prev.map((item) => {
+      if (item.id !== groupId) return item;
+      if (willExclude) return { ...item, status: 'skipped', is_skipped: true };
+      if (item.status === 'skipped' || item.is_skipped) {
+        return { ...item, status: 'queued', is_skipped: false };
+      }
+      return item;
+    }));
   };
 
   const mapUploadItem = (item: ImageItem): GalleryItem => ({
@@ -918,29 +1054,47 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const previewInProgress = previewTotal > 0 && previewReady < previewTotal;
   const processingActive = (pipelineStages.has(jobStatus) || jobStatus === 'analyzing') && jobStatus !== 'input_resolved';
   const hideGalleryUntilPreviewsDone = false;
+  const serverSkippedIds = useMemo(() => {
+    const ids = pipelineItems
+      .filter((item) => item.status === 'skipped' || item.is_skipped)
+      .map((item) => item.id);
+    return new Set(ids);
+  }, [pipelineItems]);
+  const effectiveSkippedIds = useMemo(() => {
+    const combined = new Set<string>(Array.from(serverSkippedIds));
+    if (jobStatus === 'input_resolved') {
+      excludedGroupIds.forEach((id) => combined.add(id));
+    }
+    return combined;
+  }, [serverSkippedIds, excludedGroupIds, jobStatus]);
+  const totalGroups = pipelineItems.length;
+  const activeGroupsCount = Math.max(totalGroups - effectiveSkippedIds.size, 0);
+  const skippedGroupCount = Math.min(effectiveSkippedIds.size, totalGroups);
+  const selectedGroupCount = activeGroupsCount;
+  const uploadedCount = previewSummary?.total ?? job?.original_filenames?.length ?? uploadImages.length;
+  const pipelineIdSet = useMemo(() => new Set(pipelineItems.map((item) => item.id)), [pipelineItems]);
   const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
   const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
   const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
-  const totalGroups = pipelineItems.length;
-  const hdrReadyCount = pipelineItems.filter((item) => isHdrReady(item) || item.status === 'failed').length;
-  const hdrProgressValue = totalGroups ? Math.round((hdrReadyCount / totalGroups) * 100) : 0;
-  const hdrProcessing = totalGroups > 0 && hdrReadyCount < totalGroups && processingActive;
+  const hdrReadyCount = pipelineItems.filter((item) => (
+    !effectiveSkippedIds.has(item.id) && (isHdrReady(item) || item.status === 'failed')
+  )).length;
+  const hdrProgressValue = activeGroupsCount ? Math.round((hdrReadyCount / activeGroupsCount) * 100) : 0;
+  const hdrProcessing = activeGroupsCount > 0 && hdrReadyCount < activeGroupsCount && processingActive;
 
   const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
     const streamIndex = Math.max((item.group_index ?? 1) - 1, 0);
     const streamImage = images[streamIndex];
     const outputOverride = streamImage?.status === 'ready' ? streamImage.url : null;
     const outputReady = Boolean(outputOverride) || isOutputReady(item);
-    const hdrReady = isHdrReady(item);
+    const isSkipped = effectiveSkippedIds.has(item.id) || item.status === 'skipped' || item.is_skipped;
     const groupType = item.group_type ?? null;
     const preview = outputOverride || item.output_url || item.hdr_url || item.preview_url || '';
-    const frameTotal = item.frames?.length || 0;
-    const previewReadyCount = (item.frames || []).filter((frame) => frame.preview_ready || frame.preview_url).length;
-    const previewTotal = frameTotal || 1;
-    const previewPercent = previewTotal ? Math.round((previewReadyCount / previewTotal) * 100) : 0;
     const stage: GalleryItem['stage'] = outputReady
       ? 'output'
-      : item.status === 'ai_processing' || item.status === 'ai_ok'
+      : isSkipped
+        ? 'input'
+        : item.status === 'ai_processing' || item.status === 'ai_ok'
         ? 'ai'
         : item.status === 'hdr_processing' || item.status === 'hdr_ok' || item.status === 'preprocess_ok'
           ? 'hdr'
@@ -948,7 +1102,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const status: GalleryItem['status'] =
       item.status === 'failed'
         ? 'failed'
-        : outputReady
+        : outputReady || isSkipped
           ? 'done'
           : 'processing';
     const progress = status === 'done' || status === 'failed' ? 100 : 0;
@@ -963,7 +1117,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       groupType,
       groupSize: item.group_size ?? null,
       representativeIndex: item.representative_index ?? null,
-      frames: item.frames
+      frames: item.frames,
+      isSkipped
     };
   };
 
@@ -1085,6 +1240,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       activeIndex
     });
   }, [activeIndex, job?.id, showProjectInput, activeTool?.id, job?.workflow_id]);
+
+  useEffect(() => {
+    if (!jobStatus || jobStatus === 'grouping') return;
+    if (runpodQueue) setRunpodQueue(null);
+  }, [jobStatus]);
 
   // VIEW 1: Tool Selector
   if (!activeTool) {
@@ -1290,12 +1450,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && uploadImages.length === 0;
   const hasHiddenUploads = uploadImages.length > 0 && galleryItems.length === 0 && showRawPreviews;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
-  const canEnhance = jobStatus === 'input_resolved' && !hasPendingUploads;
+  const canEnhance = jobStatus === 'input_resolved' && !hasPendingUploads && selectedGroupCount > 0;
   const canUploadBatch = hasPendingUploads && ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
   const canAddMore = ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved'].includes(jobStatus);
   const downloadLabel = downloadType === 'jpg' ? 'Download JPG' : 'Download ZIP';
   const showReadyToEnhanceNotice = uploadComplete && jobStatus === 'input_resolved' && !processingActive;
   const showProcessingNotice = uploadComplete && (processingActive || previewInProgress || jobStatus === 'analyzing');
+  const runpodEtaMinutes = runpodQueue ? Math.ceil(runpodQueue.etaSeconds / 60) : null;
   const handleGallerySelect = (item: GalleryItem, index: number) => {
     setActiveIndex(index);
     if (item.preview) {
@@ -1328,6 +1489,19 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               {showHdrProgress && (
                 <span className="text-[9px] text-gray-400 font-bold">| HDR {hdrProgressValue}%</span>
               )}
+              {runpodQueue && jobStatus === 'grouping' && (
+                <span className="text-[9px] text-amber-300 font-bold">
+                  | RunPod Queue {runpodQueue.pending}{runpodEtaMinutes !== null ? ` (~${runpodEtaMinutes}m)` : ''}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-3 mt-1 text-[10px] uppercase tracking-widest text-gray-500">
+              <span className="text-gray-400">Photos: <span className="text-white">{uploadedCount}</span></span>
+              <span className="text-gray-400">Groups: <span className="text-white">{totalGroups}</span></span>
+              <span className="text-gray-400">RunPod Queue: <span className="text-emerald-300">{selectedGroupCount}</span></span>
+              {skippedGroupCount > 0 && (
+                <span className="text-gray-400">Skipped: <span className="text-amber-300">{skippedGroupCount}</span></span>
+              )}
             </div>
             {(jobStatus === 'uploading' || showHdrProgress) && (
               <div className="mt-2 h-1.5 w-48 rounded-full bg-white/10 overflow-hidden">
@@ -1339,12 +1513,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             )}
             {showProcessingNotice && (
               <div className="mt-2 text-[10px] text-emerald-300 uppercase tracking-widest">
-                Upload complete. You can close this page while we finish processing.
+                Upload complete. RunPod HDR/AI is running (typically under 10 minutes). You can close this page while we finish.
               </div>
             )}
             {showReadyToEnhanceNotice && (
               <div className="mt-2 text-[10px] text-gray-400 uppercase tracking-widest">
-                Upload complete. Review previews, then click Enhance to start processing.
+                Upload complete. Review groups and deselect any mis-grouped shots, then click Enhance to start processing.
               </div>
             )}
           </div>
@@ -1460,11 +1634,24 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                 Generating previews… {previewReady} of {previewTotal} processed
               </div>
             )}
+            {pipelineItems.length > 0 && (
+              <div className="text-[10px] uppercase tracking-widest text-gray-400 flex flex-wrap items-center gap-2">
+                <span className="text-white font-black">{selectedGroupCount}</span>
+                <span>of {totalGroups} groups will go to RunPod HDR.</span>
+                {jobStatus === 'input_resolved' && (
+                  <span className="text-gray-500">Uncheck any mis-grouped stacks before submitting.</span>
+                )}
+              </div>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
               {galleryItems.map((img, idx) => {
                 const groupSize = img.groupSize ?? 0;
                 const repIndex = img.representativeIndex ?? 1;
                 const showBadge = groupSize > 1;
+                const fromPipeline = pipelineIdSet.has(img.id);
+                const isExcluded = effectiveSkippedIds.has(img.id);
+                const canToggleSkip = fromPipeline && jobStatus === 'input_resolved';
+                const showCheck = img.status === 'done' && !isExcluded;
                 return (
                   <div
                     key={img.id || idx}
@@ -1535,11 +1722,31 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                     <div className="absolute bottom-3 left-3 right-3 text-[10px] uppercase tracking-widest text-white drop-shadow-sm">
                       {img.label}
                     </div>
-                    {img.status === 'done' && (
-                      <div className="absolute top-3 right-3 w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] shadow">
-                        <i className="fa-solid fa-check"></i>
-                      </div>
-                    )}
+                    <div className="absolute top-3 right-3 flex flex-col items-end gap-2">
+                      {fromPipeline && (
+                        <button
+                          type="button"
+                          disabled={!canToggleSkip}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (!canToggleSkip) return;
+                            toggleGroupExclusion(img.id);
+                          }}
+                          className={`px-2.5 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition ${
+                            isExcluded
+                              ? 'bg-amber-500/30 border-amber-400 text-amber-100'
+                              : 'bg-black/60 border-white/10 text-white/80 hover:border-white/40'
+                          } ${!canToggleSkip ? 'opacity-40 cursor-not-allowed' : ''}`}
+                        >
+                          {isExcluded ? 'Skipped' : 'RunPod HDR'}
+                        </button>
+                      )}
+                      {showCheck && (
+                        <div className="w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] shadow">
+                          <i className="fa-solid fa-check"></i>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               })}

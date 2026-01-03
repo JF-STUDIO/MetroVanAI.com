@@ -3,6 +3,7 @@ node_modules
 dist
 server/node_modules
 server/dist
+.env.local
 .env
 server/.env
 hdr-worker/.venv

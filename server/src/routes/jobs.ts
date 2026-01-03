@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate, authenticateSse } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
-import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl, deletePrefix } from '../services/r2.js';
+import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl, deletePrefix, createMultipartUpload, getPresignedUploadPartUrl, completeMultipartUpload, abortMultipartUpload } from '../services/r2.js';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { AuthRequest } from '../types/auth.js';
 import { createRedis } from '../services/redis.js';
+import { sendAlert } from '../services/alerts.js';
 import { extractExifFromR2 } from '../services/exif.js';
 import { getFreeTrialPoints } from '../services/settings.js';
 import { attachTaskStream, emitTaskEvent } from '../services/taskStream.js';
@@ -34,6 +35,101 @@ const runWithConcurrency = async <T>(
         }
     });
     await Promise.all(workers);
+};
+
+const createLimiter = (limit: number) => {
+    let active = 0;
+    const queue: Array<() => void> = [];
+    const acquire = () => new Promise<() => void>((resolve) => {
+        const tryAcquire = () => {
+            if (active < limit) {
+                active += 1;
+                resolve(() => {
+                    active -= 1;
+                    const next = queue.shift();
+                    if (next) next();
+                });
+                return;
+            }
+            queue.push(tryAcquire);
+        };
+        tryAcquire();
+    });
+    return { acquire };
+};
+
+const RUNPOD_MAX_CONCURRENCY = Number.parseInt(process.env.RUNPOD_MAX_CONCURRENCY || '4', 10);
+const runpodLimiter = createLimiter(Math.max(RUNPOD_MAX_CONCURRENCY, 1));
+const RUNPOD_HDR_EST_SEC = Number.parseInt(process.env.RUNPOD_HDR_EST_SEC || '180', 10);
+const metricsRedis = (() => {
+    try {
+        return createRedis();
+    } catch (err) {
+        console.warn('metrics redis unavailable', (err as Error).message);
+        return null;
+    }
+})();
+
+const ALERT_QUEUE_THRESHOLD = Number.parseInt(process.env.ALERT_QUEUE_THRESHOLD || '100', 10);
+const ALERT_HDR_SLA_SEC = Number.parseInt(process.env.ALERT_HDR_SLA_SEC || '600', 10);
+
+const bumpRunpodPending = async (delta: number) => {
+    if (!metricsRedis) return null;
+    const key = 'runpod:queue:pending';
+    const next = await metricsRedis.incrby(key, delta);
+    await metricsRedis.expire(key, 3600);
+    return next;
+};
+
+const recordRunpodStart = async (jobId: string) => {
+    if (!metricsRedis) return;
+    const key = `runpod:start:${jobId}`;
+    await metricsRedis.set(key, Date.now(), 'EX', 24 * 3600);
+};
+
+const recordRunpodFinish = async (jobId: string, success: boolean) => {
+    if (!metricsRedis) return;
+    const startKey = `runpod:start:${jobId}`;
+    const startedAt = await metricsRedis.get(startKey);
+    if (startedAt) {
+        const delta = Math.max(0, Date.now() - Number(startedAt));
+        await metricsRedis.incrby('runpod:hdr:total_ms', delta);
+        await metricsRedis.incr('runpod:hdr:count');
+        await metricsRedis.del(startKey);
+    }
+    if (!success) {
+        await metricsRedis.incr('runpod:hdr:fail');
+    }
+};
+
+const getHdrEstimateSeconds = async () => {
+    if (!metricsRedis) return RUNPOD_HDR_EST_SEC;
+    try {
+        const [totalMsRaw, countRaw] = await metricsRedis.mget('runpod:hdr:total_ms', 'runpod:hdr:count');
+        const totalMs = Number(totalMsRaw) || 0;
+        const count = Number(countRaw) || 0;
+        if (count > 0 && totalMs > 0) {
+            return Math.max(30, Math.round((totalMs / count) / 1000));
+        }
+    } catch {
+        // ignore and fallback
+    }
+    return RUNPOD_HDR_EST_SEC;
+};
+
+const maybeAlertQueue = async (pending: number, etaSeconds: number) => {
+    if (pending > ALERT_QUEUE_THRESHOLD) {
+        await sendAlert(
+            `[RunPod] Queue high: ${pending}`,
+            `RunPod queue pending ${pending}, eta ${etaSeconds}s`
+        );
+    }
+    if (etaSeconds > ALERT_HDR_SLA_SEC) {
+        await sendAlert(
+            `[RunPod] ETA slow: ${etaSeconds}s`,
+            `RunPod HDR ETA ${etaSeconds}s with pending ${pending}`
+        );
+    }
 };
 
 const HDR_GROUP_MIN_SHOTS = Number.parseInt(process.env.HDR_GROUP_MIN_SHOTS || '2', 10);
@@ -118,7 +214,7 @@ const RUNPOD_CALLBACK_SECRET = process.env.RUNPOD_CALLBACK_SECRET;
 const fetchJobFiles = async (jobId: string) => {
     const { data, error } = await supabaseAdmin
         .from('job_files')
-        .select('id, filename, r2_key, r2_bucket, exif_json')
+        .select('id, filename, r2_key, r2_bucket, exif_json, group_id')
         .eq('job_id', jobId);
     if (error) throw error;
     return data || [];
@@ -909,6 +1005,69 @@ router.post('/jobs/:jobId/presign-raw', authenticate, async (req: AuthRequest, r
     res.json(results);
 });
 
+// Multipart upload presign (large files)
+router.post('/jobs/:jobId/presign-raw-multipart', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const { file } = req.body || {};
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!file?.name || typeof file?.size !== 'number') return res.status(400).json({ error: 'file with name and size required' });
+
+    const { data: job } = await (supabaseAdmin.from('jobs') as any)
+        .select('id')
+        .eq('id', jobId)
+        .eq('user_id', userId)
+        .single();
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    const assetId = uuidv4();
+    const ext = file.name.split('.').pop() || '';
+    const key = `u/${userId}/jobs/${jobId}/raw/${assetId}.${ext}`;
+    const contentType = file.type || 'application/octet-stream';
+    const minPart = 5 * 1024 * 1024;
+    const targetPart = Number(process.env.MULTIPART_CHUNK_BYTES || 8 * 1024 * 1024);
+    const partSize = Math.max(minPart, targetPart);
+    const partCount = Math.ceil(file.size / partSize);
+
+    const { uploadId } = await createMultipartUpload(RAW_BUCKET, key, contentType);
+    if (!uploadId) return res.status(500).json({ error: 'Failed to create multipart upload' });
+
+    const partUrls: { partNumber: number; url: string }[] = [];
+    for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
+        const url = await getPresignedUploadPartUrl(RAW_BUCKET, key, uploadId, partNumber);
+        partUrls.push({ partNumber, url });
+    }
+
+    res.json({ uploadId, key, partSize, partUrls });
+});
+
+router.post('/jobs/:jobId/complete-raw-multipart', authenticate, async (req: AuthRequest, res: Response) => {
+    const { jobId } = req.params;
+    const { uploadId, key, parts } = req.body || {};
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!uploadId || !key || !Array.isArray(parts) || parts.length === 0) {
+        return res.status(400).json({ error: 'uploadId, key, parts required' });
+    }
+
+    try {
+        const normalizedParts = parts.map((p: any) => ({
+            ETag: (p.etag || p.ETag || '').replace(/"/g, ''),
+            PartNumber: p.partNumber || p.PartNumber
+        })).filter((p: any) => p.ETag && p.PartNumber);
+        if (normalizedParts.length === 0) {
+            return res.status(400).json({ error: 'invalid parts' });
+        }
+        await completeMultipartUpload(RAW_BUCKET, key, uploadId, normalizedParts);
+        res.json({ ok: true, r2_key: key });
+    } catch (error) {
+        console.error('complete multipart failed', (error as Error).message);
+        try { await abortMultipartUpload(RAW_BUCKET, key, uploadId); } catch { /* ignore */ }
+        res.status(500).json({ error: 'complete failed' });
+    }
+});
+
 // New pipeline: confirm upload and register raw files
 router.post('/jobs/:jobId/upload-complete', authenticate, async (req: AuthRequest, res: Response) => {
     const { jobId } = req.params;
@@ -1312,6 +1471,10 @@ router.post('/jobs/:jobId/groups/:groupId/representative', authenticate, async (
 router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Response) => {
     const { jobId } = req.params;
     const userId = req.user?.id;
+    const { skipGroupIds } = req.body || {};
+    const skipSet = new Set<string>(
+        Array.isArray(skipGroupIds) ? skipGroupIds.filter((id: any) => typeof id === 'string') : []
+    );
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -1331,7 +1494,56 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
         .single();
     if (workflowError || !workflow) return res.status(400).json({ error: 'Workflow not found' });
 
-    const creditsToReserve = job.estimated_units * workflow.credit_per_unit;
+    const { data: groupRows, error: groupError } = await (supabaseAdmin.from('job_groups') as any)
+        .select('id, group_index, status')
+        .eq('job_id', jobId)
+        .order('group_index', { ascending: true });
+    if (groupError) return res.status(500).json({ error: groupError.message });
+
+    const normalizedGroups = groupRows || [];
+    const validSkipIds = normalizedGroups
+        .filter((group: any) => skipSet.has(group.id) && (group.status === 'queued' || group.status === 'skipped' || group.status === 'hdr_ok'))
+        .map((group: any) => group.id);
+    const resumeIds = normalizedGroups
+        .filter((group: any) => group.status === 'skipped' && !skipSet.has(group.id))
+        .map((group: any) => group.id);
+
+    if (validSkipIds.length > 0) {
+        await (supabaseAdmin.from('job_groups') as any)
+            .update({ status: 'skipped', last_error: null })
+            .in('id', validSkipIds);
+        for (const id of validSkipIds) {
+            const match = normalizedGroups.find((group: any) => group.id === id);
+            const idx = Math.max(((match?.group_index as number | undefined) ?? 1) - 1, 0);
+            await emitJobEvent(jobId, { type: 'group_status_changed', index: idx, status: 'skipped', group_id: id });
+        }
+    }
+
+    if (resumeIds.length > 0) {
+        await (supabaseAdmin.from('job_groups') as any)
+            .update({ status: 'queued', last_error: null })
+            .in('id', resumeIds);
+        for (const id of resumeIds) {
+            const match = normalizedGroups.find((group: any) => group.id === id);
+            const idx = Math.max(((match?.group_index as number | undefined) ?? 1) - 1, 0);
+            await emitJobEvent(jobId, { type: 'group_status_changed', index: idx, status: 'queued', group_id: id });
+        }
+    }
+
+    const finalGroups = normalizedGroups.map((group: any) => {
+        if (validSkipIds.includes(group.id)) return { ...group, status: 'skipped' };
+        if (resumeIds.includes(group.id)) return { ...group, status: 'queued' };
+        return group;
+    });
+
+    const activeGroups = finalGroups.filter((group: any) => group.status !== 'skipped');
+    const activeGroupCount = activeGroups.length;
+
+    if (activeGroupCount === 0) {
+        return res.status(400).json({ error: 'No groups selected for processing' });
+    }
+
+    const creditsToReserve = activeGroupCount * workflow.credit_per_unit;
     const idempotencyKey = `reserve:${jobId}`;
 
     const { data: balance, error: reserveError } = await (supabaseAdmin as any)
@@ -1352,7 +1564,9 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
     await (supabaseAdmin.from('jobs') as any)
         .update({
             status: 'reserved',
-            reserved_units: job.estimated_units
+            reserved_units: activeGroupCount,
+            estimated_units: activeGroupCount,
+            error_message: null
         })
         .eq('id', jobId)
         .eq('user_id', userId);
@@ -1381,7 +1595,13 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
         return res.status(503).json({ error: 'Queue unavailable, please retry' });
     }
 
-    res.json({ reserved_units: job.estimated_units, credits_reserved: creditsToReserve, balance });
+    res.json({
+        reserved_units: activeGroupCount,
+        credits_reserved: creditsToReserve,
+        balance,
+        skipped_groups: validSkipIds.length,
+        total_groups: normalizedGroups.length
+    });
 });
 
 // New pipeline: cancel job
@@ -1584,16 +1804,22 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
         .single();
     if (error || !job) return null;
 
-    const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
-        .select('status')
-        .eq('job_id', jobId);
+  const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
+    .select('status')
+    .eq('job_id', jobId);
 
-    const summary = (groups || []).reduce((acc: any, group: any) => {
-        acc.total += 1;
-        if (group.status === 'ai_ok') acc.success += 1;
-        if (group.status === 'failed') acc.failed += 1;
-        return acc;
-    }, { total: 0, success: 0, failed: 0 });
+  const summary = (groups || []).reduce((acc: any, group: any) => {
+    const isSkipped = group.status === 'skipped';
+    acc.total_all += 1;
+    if (isSkipped) {
+      acc.skipped += 1;
+      return acc;
+    }
+    acc.total += 1;
+    if (group.status === 'ai_ok') acc.success += 1;
+    if (group.status === 'failed') acc.failed += 1;
+    return acc;
+  }, { total: 0, success: 0, failed: 0, skipped: 0, total_all: 0 });
 
     const { data: groupRows } = await (supabaseAdmin.from('job_groups') as any)
         .select('id, group_index, status, hdr_bucket, hdr_key, output_bucket, output_key, output_filename, last_error, representative_file_id, group_type')
@@ -1637,7 +1863,7 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
     const items = await Promise.all((groupRows || []).map(async (group: any) => {
         const hdrUrl = group.hdr_key
             ? await getPresignedGetUrl(group.hdr_bucket || HDR_BUCKET, group.hdr_key, 900)
-            : null;
+        : null;
         const outputUrl = group.output_key
             ? await getPresignedGetUrl(group.output_bucket || OUTPUT_BUCKET, group.output_key, 900)
             : null;
@@ -1665,6 +1891,7 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
             id: group.id,
             group_index: group.group_index,
             status: group.status,
+            is_skipped: group.status === 'skipped',
             group_type: group.group_type || null,
             output_filename: group.output_filename,
             hdr_url: hdrUrl,
@@ -1800,13 +2027,32 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
         }
         const { jobId } = req.params;
 
-        const files = await fetchJobFiles(jobId);
+        const [files, groupResp, pendingBefore] = await Promise.all([
+            fetchJobFiles(jobId),
+            (supabaseAdmin.from('job_groups') as any)
+                .select('id, status')
+                .eq('job_id', jobId),
+            bumpRunpodPending(1)
+        ]);
         if (!files.length) return res.status(400).json({ error: 'no files' });
 
+        const skippedGroups = new Set(
+            (groupResp?.data || []).filter((g: any) => g.status === 'skipped').map((g: any) => g.id)
+        );
+        const skippedFileIds = files
+            .filter((f: any) => f.group_id && skippedGroups.has(f.group_id))
+            .map((f: any) => f.id);
+        const filteredFiles = files.filter((f: any) => !f.group_id || !skippedGroups.has(f.group_id));
+        if (filteredFiles.length === 0) {
+            await bumpRunpodPending(-1);
+            return res.status(400).json({ error: 'all files are skipped, nothing to send to RunPod' });
+        }
+
         // 触发 Runpod
+        const release = await runpodLimiter.acquire();
         const payload = {
             jobId,
-            files: files.map((f: any) => ({
+            files: filteredFiles.map((f: any) => ({
                 id: f.id,
                 filename: f.filename,
                 r2_key_raw: f.r2_key,
@@ -1815,30 +2061,52 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
             })),
             callbackUrl: RUNPOD_CALLBACK_URL,
             callbackSecret: RUNPOD_CALLBACK_SECRET,
+            skipFileIds: skippedFileIds
         };
 
-        const rpResp: any = await fetch(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${RUNPOD_API_KEY}`,
-            },
-            body: JSON.stringify({ input: payload }),
-        });
+        let rpResp: any;
+        try {
+            rpResp = await fetch(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${RUNPOD_API_KEY}`,
+                },
+                body: JSON.stringify({ input: payload }),
+            });
+        } finally {
+            release();
+        }
 
         if (!rpResp.ok) {
             const text = await rpResp.text();
+            await bumpRunpodPending(-1);
+            await recordRunpodFinish(jobId, false);
+            await sendAlert(
+                '[RunPod] API returned error',
+                `Job ${jobId} RunPod API failed: ${text || rpResp.status}`
+            );
             return res.status(500).json({ error: 'runpod failed', detail: text });
         }
         const data: any = await rpResp.json();
+        await recordRunpodStart(jobId);
 
         // 更新状态 & SSE
         await updateJobStatus(jobId, 'grouping');
         emitJobEvent(jobId, { type: 'grouping_progress', progress: 0 });
 
-        res.json({ ok: true, requestId: data.id });
+        const queuePending = Math.max((pendingBefore ?? 0), 0);
+        const hdrEstSec = await getHdrEstimateSeconds();
+        const etaSeconds = Math.max(0, Math.ceil((queuePending / Math.max(RUNPOD_MAX_CONCURRENCY, 1)) * hdrEstSec));
+        await maybeAlertQueue(queuePending, etaSeconds);
+        res.json({ ok: true, requestId: data.id, queue_pending: queuePending, eta_seconds: etaSeconds });
     } catch (err: any) {
+        await bumpRunpodPending(-1);
         console.error(err);
+        await sendAlert(
+            '[RunPod] Trigger failed',
+            `Job ${req.params.jobId || ''} trigger failed: ${err?.message || err}`
+        );
         res.status(500).json({ error: err.message || 'internal error' });
     }
 });
@@ -1860,17 +2128,22 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
             return res.json({ ok: true });
         }
 
-        // 将回调结果写入 job_groups
+        // 将回调结果写入 job_groups，并将 hdr 输出填入
+        let totalGroups = 0;
         if (Array.isArray(groups) && groups.length) {
+            totalGroups = groups.length;
             const upserts = groups.map((g: any, idx: number) => ({
                 id: g.id || uuidv4(),
                 job_id: jobId,
                 group_index: g.groupIndex ?? g.index ?? idx + 1,
                 representative_file_id: g.representativeId || null,
-                result_r2_key: g.resultKey || null,
-                preview_r2_key: g.previewKey || null,
-                status: 'processing',
+                hdr_bucket: HDR_BUCKET,
+                hdr_key: g.resultKey || g.hdrKey || null,
+                preview_bucket: HDR_BUCKET,
+                preview_key: g.previewKey || g.resultKey || null,
+                status: g.resultKey ? 'hdr_ok' : 'processing',
                 runninghub_task_id: null,
+                group_type: g.groupType || 'hdr',
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
             }));
@@ -1878,13 +2151,35 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
             if (upsertResp?.error) console.error('upsert groups err', upsertResp.error);
         }
 
-        // 标记已分组
-        await updateJobStatus(jobId, 'grouped');
-        emitJobEvent(jobId, { type: 'grouped', groups, uploads });
+        await bumpRunpodPending(-1);
+
+        // 标记已分组，准备 AI 阶段
+        await (supabaseAdmin.from('jobs') as any)
+            .update({
+                status: 'input_resolved',
+                estimated_units: totalGroups || null,
+                progress: 0,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', jobId);
+
+        try {
+            emitJobEvent(jobId, { type: 'grouped', groups, uploads });
+            emitJobEvent(jobId, { type: 'group_status_changed', status: 'input_resolved' });
+            emitJobEvent(jobId, { type: 'grouping_progress', progress: 100 });
+        } catch (e) {
+            console.warn('emit grouped after runpod callback failed', (e as Error).message);
+        }
+        await recordRunpodFinish(jobId, true);
 
         res.json({ ok: true });
     } catch (err: any) {
         console.error(err);
+        await recordRunpodFinish(req.body?.jobId || '', false);
+        await sendAlert(
+            '[RunPod] Callback error',
+            `Job ${req.body?.jobId || ''} callback failed: ${err?.message || err}`
+        );
         res.status(500).json({ error: err.message || 'internal error' });
     }
 });

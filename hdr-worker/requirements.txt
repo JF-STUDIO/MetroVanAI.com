@@ -1,1 +1,4 @@
 runpod
+boto3
+requests
+pandas

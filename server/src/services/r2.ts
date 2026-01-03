@@ -8,6 +8,12 @@ import {
   DeleteObjectsCommand
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import {
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand
+} from '@aws-sdk/client-s3';
 
 const defaultBucket = process.env.R2_BUCKET_NAME || '';
 export const BUCKET_NAME = defaultBucket || 'wangzhan';
@@ -39,6 +45,56 @@ export const getPresignedPutUrl = async (
     ContentType: contentType
   });
   return getSignedUrl(r2Client, command, { expiresIn });
+};
+
+export const createMultipartUpload = async (bucket: string, key: string, contentType: string) => {
+  const command = new CreateMultipartUploadCommand({
+    Bucket: bucket,
+    Key: key,
+    ContentType: contentType
+  });
+  const response = await r2Client.send(command);
+  return { uploadId: response.UploadId, key: response.Key };
+};
+
+export const getPresignedUploadPartUrl = async (
+  bucket: string,
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  expiresIn = 3600
+) => {
+  const command = new UploadPartCommand({
+    Bucket: bucket,
+    Key: key,
+    UploadId: uploadId,
+    PartNumber: partNumber
+  });
+  return getSignedUrl(r2Client, command, { expiresIn });
+};
+
+export const completeMultipartUpload = async (
+  bucket: string,
+  key: string,
+  uploadId: string,
+  parts: { ETag: string; PartNumber: number }[]
+) => {
+  const command = new CompleteMultipartUploadCommand({
+    Bucket: bucket,
+    Key: key,
+    UploadId: uploadId,
+    MultipartUpload: { Parts: parts }
+  });
+  return r2Client.send(command);
+};
+
+export const abortMultipartUpload = async (bucket: string, key: string, uploadId: string) => {
+  const command = new AbortMultipartUploadCommand({
+    Bucket: bucket,
+    Key: key,
+    UploadId: uploadId
+  });
+  return r2Client.send(command);
 };
 
 export const getPresignedGetUrl = async (
