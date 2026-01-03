@@ -45,7 +45,17 @@ app.use(cors({
       return callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  // Explicitly allow auth headers used by Supabase/axios to avoid preflight failure.
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'apikey',
+    'x-client-info',
+    'x-supabase-auth',
+    'x-supabase-api-version'
+  ],
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE']
 }));
 app.use(morgan('dev'));
 app.use(express.json());
