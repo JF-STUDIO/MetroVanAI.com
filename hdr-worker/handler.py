@@ -65,15 +65,11 @@ def handler(job):
         # 下载 R2 原图
         download_files(files, input_dir, skip_file_ids)
 
-        # 跑分组+HDR（保持原脚本逻辑）
-        try:
-            subprocess.check_call([
-                "/app/one_click_group_align_hdr.sh",
-                input_dir,
-                output_dir,
-            ])
-        except subprocess.CalledProcessError as e:
-            # 失败也回调
+        # 如果没有任何文件，直接返回错误，避免脚本无输出退出
+        downloaded = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        if not downloaded:
+            msg = "no input files downloaded from R2 (check r2_key_raw and R2_* envs)"
+            print("❌", msg)
             if callback_url:
                 headers = {
                     "x-runpod-secret": callback_secret or "",
@@ -81,9 +77,36 @@ def handler(job):
                 }
                 requests.post(callback_url, headers=headers, data=json.dumps({
                     "jobId": job_id,
-                    "error": f"hdr failed: {e}"
+                    "error": msg,
                 }))
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": msg}
+
+        # 跑分组+HDR（保持原脚本逻辑）
+        cmd = ["/app/one_click_group_align_hdr.sh", input_dir, output_dir]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        print("HDR stdout:\n", result.stdout)
+        print("HDR stderr:\n", result.stderr)
+
+        if result.returncode != 0:
+            err_msg = f"hdr failed rc={result.returncode}"
+            # 失败也回调，附带 stderr 方便排查
+            if callback_url:
+                headers = {
+                    "x-runpod-secret": callback_secret or "",
+                    "Content-Type": "application/json",
+                }
+                requests.post(callback_url, headers=headers, data=json.dumps({
+                    "jobId": job_id,
+                    "error": err_msg,
+                    "stderr": result.stderr,
+                    "stdout": result.stdout,
+                }))
+            return {
+                "ok": False,
+                "error": err_msg,
+                "stderr": result.stderr,
+                "stdout": result.stdout,
+            }
 
         # 上传结果
         uploads = upload_folder(output_dir, f"jobs/{job_id}")

@@ -12,7 +12,8 @@ fi
 # === 可执行依赖（走 PATH，不写死） ===
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ALIGN_BIN="$(command -v align_image_stack || true)"
-GROUP_SCRIPT="$(dirname "$0")/../group_raw_brackets_exiftool.py"
+# 直接使用绝对路径，避免 ../ 计算错误
+GROUP_SCRIPT="/app/group_raw_brackets_exiftool.py"
 
 GROUPED_DIR="$OUT_DIR/RAW_GROUPED"
 FINAL_DIR="$OUT_DIR/HDR_FINAL"
