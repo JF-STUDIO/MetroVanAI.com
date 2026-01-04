@@ -225,7 +225,7 @@ const triggerCloudRunJob = async (jobId: string, mode: RunpodMode) => {
     const [files, groupResp, jobRow] = await Promise.all([
         fetchJobFiles(jobId),
         (supabaseAdmin.from('job_groups') as any)
-            .select('id, status')
+            .select('id, status, group_index, output_filename, group_type')
             .eq('job_id', jobId),
         (supabaseAdmin.from('jobs') as any)
             .select('id, status, current_manifest_key, current_manifest_hash, current_execution_name')
@@ -239,10 +239,11 @@ const triggerCloudRunJob = async (jobId: string, mode: RunpodMode) => {
         throw new Error('no files');
     }
 
+    const groupRows = (groupResp?.data || []) as any[];
     const skippedGroups = mode === 'group'
         ? new Set<string>()
         : new Set(
-            (groupResp?.data || [])
+            groupRows
                 .filter((g: any) => g.status === 'skipped')
                 .map((g: any) => g.id)
         );
@@ -260,7 +261,44 @@ const triggerCloudRunJob = async (jobId: string, mode: RunpodMode) => {
         .filter((key: any) => typeof key === 'string');
     fileKeys.sort();
 
-    const manifestBody = JSON.stringify({ files: fileKeys, mode });
+    let groupedPayload: any[] = [];
+    const hasUngrouped = filteredFiles.some((f: any) => !f.group_id);
+    if (mode === 'full' && groupRows.length && !hasUngrouped) {
+        const fileKeysByGroup = new Map<string, string[]>();
+        filteredFiles.forEach((file: any) => {
+            if (!file.group_id || skippedGroups.has(file.group_id)) return;
+            const list = fileKeysByGroup.get(file.group_id) || [];
+            if (typeof file.r2_key === 'string') {
+                list.push(file.r2_key);
+            }
+            fileKeysByGroup.set(file.group_id, list);
+        });
+
+        groupedPayload = groupRows
+            .filter((g: any) => !skippedGroups.has(g.id))
+            .map((g: any, idx: number) => {
+                const groupIndex = g.group_index ?? idx + 1;
+                const outputName = g.output_filename || `group_${groupIndex}.jpg`;
+                const groupName = path.basename(outputName, path.extname(outputName));
+                const rawKeys = fileKeysByGroup.get(g.id) || [];
+                const groupedKeys = rawKeys.map((key: string) => {
+                    return `jobs/${jobId}/RAW_GROUPED/${groupName}/${path.basename(key)}`;
+                });
+                return {
+                    groupIndex,
+                    groupName,
+                    groupType: g.group_type || 'group',
+                    fileKeys: groupedKeys
+                };
+            })
+            .filter((g: any) => Array.isArray(g.fileKeys) && g.fileKeys.length > 0);
+    }
+
+    const manifestPayload = (mode === 'full' && groupedPayload.length > 0)
+        ? { mode, groups: groupedPayload }
+        : { mode, files: fileKeys };
+
+    const manifestBody = JSON.stringify(manifestPayload);
     const manifestHash = crypto.createHash('sha256').update(manifestBody).digest('hex');
 
     if (
@@ -287,7 +325,12 @@ const triggerCloudRunJob = async (jobId: string, mode: RunpodMode) => {
     console.log('[HDR] manifestKey =', manifestKey);
     console.log('[HDR] manifestHash =', manifestHash);
     console.log('[HDR] mode =', mode);
-    console.log('[HDR] fileKeys sample =', fileKeys.slice(0, 3));
+    if (mode === 'full' && groupedPayload.length > 0) {
+        console.log('[HDR] groups count =', groupedPayload.length);
+        console.log('[HDR] grouped key sample =', groupedPayload[0]?.fileKeys?.slice(0, 3));
+    } else {
+        console.log('[HDR] fileKeys sample =', fileKeys.slice(0, 3));
+    }
 
     await r2Client.send(new PutObjectCommand({
         Bucket: RAW_BUCKET,

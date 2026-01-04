@@ -1066,7 +1066,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   const hasPendingUploads = uploadImages.some((img) => img.status === 'pending' || img.status === 'uploading');
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
-  const showUploadOnly = jobStatus === 'uploading';
+  const showGroupingOnly = jobStatus === 'grouping' && pipelineItems.length === 0;
+  const showUploadOnly = jobStatus === 'uploading' || showGroupingOnly;
   const showUploadNotice = jobStatus === 'uploading' && uploadImages.length > 0;
 
   const uploadProgress = uploadImages.length
@@ -1081,6 +1082,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     : typeof job?.progress === 'number'
       ? job.progress
       : null;
+  const groupingProgressValue = typeof pipelineProgressValue === 'number' ? pipelineProgressValue : 0;
 
   const previewTotal = previewSummary?.total ?? 0;
   const previewReady = previewSummary?.ready ?? 0;
@@ -1109,6 +1111,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const skippedGroupCount = Math.min(effectiveSkippedIds.size, totalGroups);
   const selectedGroupCount = activeGroupsCount;
   const uploadedCount = previewSummary?.total ?? job?.original_filenames?.length ?? uploadImages.length;
+  const uploadTotalCount = uploadImages.length;
   const pipelineIdSet = useMemo(() => new Set(pipelineItems.map((item) => item.id)), [pipelineItems]);
   const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
   const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
@@ -1549,6 +1552,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                   | {isFinalizingUpload ? 'Finalizing upload' : `Upload ${uploadedReadyCount}/${uploadImages.length} (${displayUploadProgress}%)`}
                 </span>
               )}
+              {showGroupingOnly && (
+                <span className="text-[9px] text-amber-300 font-bold">| Grouping… {groupingProgressValue}%</span>
+              )}
               {uploadComplete && jobStatus !== 'uploading' && (
                 <span className="text-[9px] text-emerald-400 font-bold">| Upload Complete</span>
               )}
@@ -1568,18 +1574,26 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               )}
             </div>
             <div className="flex flex-wrap items-center gap-3 mt-1 text-[10px] uppercase tracking-widest text-gray-500">
-              <span className="text-gray-400">Photos: <span className="text-white">{uploadedCount}</span></span>
+              {jobStatus === 'uploading' || showGroupingOnly ? (
+                <span className="text-gray-400">
+                  Photos: <span className="text-white">{uploadTotalCount}</span>
+                  <span className="text-gray-500"> | Uploaded </span>
+                  <span className="text-white">{uploadedReadyCount}</span>
+                </span>
+              ) : (
+                <span className="text-gray-400">Photos: <span className="text-white">{uploadedCount}</span></span>
+              )}
               <span className="text-gray-400">Groups: <span className="text-white">{totalGroups}</span></span>
               <span className="text-gray-400">Selected Groups: <span className="text-emerald-300">{selectedGroupCount}</span></span>
               {skippedGroupCount > 0 && (
                 <span className="text-gray-400">Skipped: <span className="text-amber-300">{skippedGroupCount}</span></span>
               )}
             </div>
-            {(jobStatus === 'uploading' || showHdrProgress) && (
+            {(jobStatus === 'uploading' || showGroupingOnly || showHdrProgress) && (
               <div className="mt-2 h-1.5 w-48 rounded-full bg-white/10 overflow-hidden">
                 <div
                   className="h-full bg-indigo-500 transition-all"
-                  style={{ width: `${jobStatus === 'uploading' ? displayUploadProgress : hdrProgressValue}%` }}
+                  style={{ width: `${jobStatus === 'uploading' ? displayUploadProgress : showGroupingOnly ? groupingProgressValue : hdrProgressValue}%` }}
                 ></div>
               </div>
             )}
@@ -1625,17 +1639,30 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         {showUploadOnly ? (
           <div className="flex flex-col items-center justify-center glass rounded-[3rem] border border-white/5 min-h-[480px]">
             <div className="w-full max-w-md text-center space-y-4">
-              <div className="text-lg font-black uppercase tracking-widest text-white">Uploading</div>
+              <div className="text-lg font-black uppercase tracking-widest text-white">
+                {showGroupingOnly ? 'Grouping' : 'Uploading'}
+              </div>
               <div className="text-xs text-gray-500">
-                {isFinalizingUpload ? 'Finalizing upload…' : `Uploading ${uploadImages.length} files...`}
+                {showGroupingOnly
+                  ? `Grouping ${uploadTotalCount} files...`
+                  : isFinalizingUpload
+                    ? 'Finalizing upload…'
+                    : `Uploading ${uploadedReadyCount}/${uploadTotalCount} files...`}
               </div>
               <div className="text-[10px] text-gray-500 uppercase tracking-widest">
-                Please keep this page open until upload finishes.
+                {showGroupingOnly
+                  ? 'Grouping in progress. Groups will appear shortly.'
+                  : 'Please keep this page open until upload finishes.'}
               </div>
               <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
-                <div className="h-full bg-indigo-500 transition-all" style={{ width: `${displayUploadProgress}%` }}></div>
+                <div
+                  className="h-full bg-indigo-500 transition-all"
+                  style={{ width: `${showGroupingOnly ? groupingProgressValue : displayUploadProgress}%` }}
+                ></div>
               </div>
-              <div className="text-xs text-gray-400">{displayUploadProgress}%</div>
+              <div className="text-xs text-gray-400">
+                {showGroupingOnly ? `${groupingProgressValue}%` : `${displayUploadProgress}%`}
+              </div>
             </div>
           </div>
         ) : showGeneratingPreviews ? (
