@@ -119,6 +119,36 @@ const getHdrEstimateSeconds = async () => {
     return RUNPOD_HDR_EST_SEC;
 };
 
+const syncLegacyCredits = async (userId: string) => {
+    const { data: balance } = await (supabaseAdmin.from('credit_balances') as any)
+        .select('available_credits, reserved_credits')
+        .eq('user_id', userId)
+        .maybeSingle();
+    const { data: profile } = await (supabaseAdmin.from('profiles') as any)
+        .select('points')
+        .eq('id', userId)
+        .maybeSingle();
+
+    const legacyPoints = Number(profile?.points ?? 0);
+    const available = Number(balance?.available_credits ?? 0);
+    const reserved = Number(balance?.reserved_credits ?? 0);
+    const creditTotal = available + reserved;
+    const delta = legacyPoints - creditTotal;
+
+    if (legacyPoints > 0 && delta > 0) {
+        const idempotencyKey = `sync:profile:${userId}:${creditTotal}:${legacyPoints}`;
+        const { error } = await (supabaseAdmin as any).rpc('credit_purchase', {
+            p_user_id: userId,
+            p_units: delta,
+            p_idempotency_key: idempotencyKey,
+            p_note: 'Sync legacy profile points'
+        });
+        if (error) {
+            console.warn('credit sync failed', error.message);
+        }
+    }
+};
+
 const maybeAlertQueue = async (pending: number, etaSeconds: number) => {
     if (pending > ALERT_QUEUE_THRESHOLD) {
         await sendAlert(
@@ -1199,14 +1229,26 @@ router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => 
 // 9. 充值积分 (模拟实现)
 router.post('/recharge', authenticate, async (req: AuthRequest, res: Response) => {
     const userId = req.user?.id;
-    const { amount } = req.body;
+    const { amount, idempotencyKey } = req.body;
 
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
 
-    const { data: profile } = await (supabaseAdmin
-        .from('profiles') as any).select('points').eq('id', userId).single();
-    
-    const newPoints = (profile?.points || 0) + amount;
+    const reserveKey = typeof idempotencyKey === 'string' && idempotencyKey.length > 0
+        ? idempotencyKey
+        : `recharge:${userId}:${Date.now()}`;
+
+    const purchase = await (supabaseAdmin as any).rpc('credit_purchase', {
+        p_user_id: userId,
+        p_units: amount,
+        p_idempotency_key: reserveKey,
+        p_note: 'Recharge credits'
+    });
+    if (purchase.error) {
+        return res.status(500).json({ error: purchase.error.message || 'Recharge failed' });
+    }
+
+    const purchaseRow = Array.isArray(purchase.data) ? purchase.data[0] : purchase.data;
+    const newPoints = Number(purchaseRow?.available_credits ?? amount);
 
     await (supabaseAdmin.from('profiles') as any).update({ points: newPoints }).eq('id', userId);
     
@@ -1797,6 +1839,8 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
         return res.status(400).json({ error: 'No groups selected for processing' });
     }
 
+    await syncLegacyCredits(userId);
+
     const creditsToReserve = activeGroupCount * workflow.credit_per_unit;
     const idempotencyKey = `reserve:${jobId}`;
 
@@ -1969,6 +2013,7 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
     let creditsReserved = 0;
     let balance = null;
     if (!job.reserved_units || job.reserved_units <= 0) {
+        await syncLegacyCredits(userId);
         const { data: workflow, error: workflowError } = await (supabaseAdmin
             .from('workflows') as any)
             .select('credit_per_unit')
