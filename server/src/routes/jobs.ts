@@ -14,6 +14,7 @@ import { extractExifFromR2 } from '../services/exif.js';
 import { getFreeTrialPoints } from '../services/settings.js';
 import { attachTaskStream, emitTaskEvent } from '../services/taskStream.js';
 import { attachJobStream, emitJobEvent, sendInitialJobEvents } from '../services/jobEvents.js';
+import { GoogleAuth } from 'google-auth-library';
 
 const router = Router();
 
@@ -206,10 +207,20 @@ const normalizeOutputFilename = (filename?: string | null, fallback = 'image') =
 };
 
 // == Runpod helpers ==
-const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID;
-const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY;
-const RUNPOD_CALLBACK_URL = process.env.RUNPOD_CALLBACK_URL;
 const RUNPOD_CALLBACK_SECRET = process.env.RUNPOD_CALLBACK_SECRET;
+
+const CLOUD_RUN_PROJECT = process.env.CLOUD_RUN_PROJECT;
+const CLOUD_RUN_REGION = process.env.CLOUD_RUN_REGION;
+const CLOUD_RUN_JOB = process.env.CLOUD_RUN_JOB;
+const cloudRunAuth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+
+const getCloudRunToken = async () => {
+    const client = await cloudRunAuth.getClient();
+    const tokenResponse = await client.getAccessToken();
+    const token = typeof tokenResponse === 'string' ? tokenResponse : tokenResponse?.token;
+    if (!token) throw new Error('Failed to get Cloud Run access token');
+    return token;
+};
 
 const fetchJobFiles = async (jobId: string) => {
     const { data, error } = await supabaseAdmin
@@ -2022,8 +2033,8 @@ router.get('/jobs/:jobId/events', authenticateSse, async (req: AuthRequest, res:
 // === Runpod: trigger grouping/HDR ===
 router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest, res: Response) => {
     try {
-        if (!RUNPOD_ENDPOINT_ID || !RUNPOD_API_KEY || !RUNPOD_CALLBACK_URL || !RUNPOD_CALLBACK_SECRET) {
-            return res.status(500).json({ error: 'Runpod env missing' });
+        if (!CLOUD_RUN_PROJECT || !CLOUD_RUN_REGION || !CLOUD_RUN_JOB) {
+            return res.status(500).json({ error: 'Cloud Run env missing' });
         }
         const { jobId } = req.params;
 
@@ -2048,31 +2059,43 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
             return res.status(400).json({ error: 'all files are skipped, nothing to send to RunPod' });
         }
 
-        // 触发 Runpod
-        const release = await runpodLimiter.acquire();
-        const payload = {
-            jobId,
-            files: filteredFiles.map((f: any) => ({
-                id: f.id,
-                filename: f.filename,
-                r2_key_raw: f.r2_key,
-                r2_bucket: f.r2_bucket,
-                exif: f.exif_json,
-            })),
-            callbackUrl: RUNPOD_CALLBACK_URL,
-            callbackSecret: RUNPOD_CALLBACK_SECRET,
-            skipFileIds: skippedFileIds
-        };
+        const manifestKey = `jobs/${jobId}/manifest.json`;
+        const manifestBody = JSON.stringify({
+            files: filteredFiles.map((f: any) => f.r2_key)
+        });
 
+        await r2Client.send(new PutObjectCommand({
+            Bucket: RAW_BUCKET,
+            Key: manifestKey,
+            Body: manifestBody,
+            ContentType: 'application/json'
+        }));
+
+        // 触发 Cloud Run Job
+        const release = await runpodLimiter.acquire();
         let rpResp: any;
         try {
-            rpResp = await fetch(`https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}/run`, {
+            const token = await getCloudRunToken();
+            const body = {
+                overrides: {
+                    containerOverrides: [
+                        {
+                            env: [
+                                { name: 'RUNPOD_MANIFEST_KEY', value: manifestKey },
+                                { name: 'JOB_ID_OVERRIDE', value: `job-${jobId}` },
+                                { name: 'RUN_ON_RUNPOD', value: 'false' }
+                            ]
+                        }
+                    ]
+                }
+            };
+            rpResp = await fetch(`https://run.googleapis.com/v2/projects/${CLOUD_RUN_PROJECT}/locations/${CLOUD_RUN_REGION}/jobs/${CLOUD_RUN_JOB}:run`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: `Bearer ${RUNPOD_API_KEY}`,
+                    Authorization: `Bearer ${token}`,
                 },
-                body: JSON.stringify({ input: payload }),
+                body: JSON.stringify(body),
             });
         } finally {
             release();
@@ -2099,7 +2122,7 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
         const hdrEstSec = await getHdrEstimateSeconds();
         const etaSeconds = Math.max(0, Math.ceil((queuePending / Math.max(RUNPOD_MAX_CONCURRENCY, 1)) * hdrEstSec));
         await maybeAlertQueue(queuePending, etaSeconds);
-        res.json({ ok: true, requestId: data.id, queue_pending: queuePending, eta_seconds: etaSeconds });
+        res.json({ ok: true, requestId: data.name, queue_pending: queuePending, eta_seconds: etaSeconds, manifestKey });
     } catch (err: any) {
         await bumpRunpodPending(-1);
         console.error(err);
