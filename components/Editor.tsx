@@ -282,14 +282,24 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         if (data.type === 'job_done') {
           closed = true;
           es?.close();
-          setJob(prev => (prev ? { ...prev, status: 'completed', progress: 100 } : prev));
-          setJobStatus('completed');
+          const failed = data.status === 'FAILED' || Boolean(data.error);
+          if (failed) {
+            setJobStatus('failed');
+            pushNotice('error', data.error || 'workflow failed');
+            return;
+          }
           try {
-            const download = await jobService.getPresignedDownloadUrl(job.id);
-            setZipUrl(download?.url || null);
-            setDownloadType(download?.type || null);
+            const latest = await jobService.getJobStatus(job.id);
+            setJob(latest);
+            setJobStatus(latest.status);
+            if (latest.status === 'completed' || latest.status === 'partial') {
+              const download = await jobService.getPresignedDownloadUrl(job.id);
+              setZipUrl(download?.url || null);
+              setDownloadType(download?.type || null);
+            }
           } catch {
-            // ignore
+            setJob(prev => (prev ? { ...prev, status: 'completed', progress: 100 } : prev));
+            setJobStatus('completed');
           }
           try {
             const profile = await jobService.getProfile();
@@ -1455,6 +1465,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const canUploadBatch = hasPendingUploads && ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
   const canAddMore = ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved'].includes(jobStatus);
   const downloadLabel = downloadType === 'jpg' ? 'Download JPG' : 'Download ZIP';
+  const canDownload = (jobStatus === 'completed' || jobStatus === 'partial') && Boolean(zipUrl);
   const showReadyToEnhanceNotice = uploadComplete && jobStatus === 'input_resolved' && !processingActive;
   const showProcessingNotice = uploadComplete && (processingActive || previewInProgress || jobStatus === 'analyzing');
   const runpodEtaMinutes = runpodQueue ? Math.ceil(runpodQueue.etaSeconds / 60) : null;
@@ -1525,7 +1536,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          {(jobStatus === 'completed' || jobStatus === 'partial') && (
+          {canDownload && (
             <button onClick={() => { if(zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
               {downloadLabel} <i className="fa-solid fa-file-zipper"></i>
             </button>

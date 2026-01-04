@@ -945,7 +945,7 @@ router.get('/jobs/:jobId', authenticate, async (req: AuthRequest, res: Response)
 const buildDownloadResponse = async (jobId: string, userId: string) => {
     const { data: job } = await (supabaseAdmin
         .from('jobs') as any)
-        .select('id, workflow_id, zip_key, output_zip_key, output_file_key, output_file_name')
+        .select('id, status, workflow_id, zip_key, output_zip_key, output_file_key, output_file_name')
         .eq('id', jobId)
         .eq('user_id', userId)
         .single();
@@ -955,13 +955,15 @@ const buildDownloadResponse = async (jobId: string, userId: string) => {
     const bucket = job.workflow_id ? OUTPUT_BUCKET : BUCKET_NAME;
     if (job.output_file_key) {
         const url = await getPresignedGetUrl(bucket, job.output_file_key, 900, job.output_file_name || null);
-        return { url, type: 'jpg' };
+        return { url, type: 'jpg', ready: true };
     }
 
     const zipKey = job.output_zip_key || job.zip_key;
-    if (!zipKey) return null;
+    if (!zipKey) {
+        return { ready: false, status: job.status || 'processing' };
+    }
     const url = await getPresignedGetUrl(bucket, zipKey, 900);
-    return { url, type: 'zip' };
+    return { url, type: 'zip', ready: true };
 };
 
 router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthRequest, res: Response) => {
@@ -970,7 +972,8 @@ router.post('/jobs/:jobId/presign-download', authenticate, async (req: AuthReque
 
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const payload = await buildDownloadResponse(jobId, userId);
-    if (!payload) return res.status(400).json({ error: 'Output not ready or job not found' });
+    if (!payload) return res.status(404).json({ error: 'Job not found' });
+    if (!payload.ready) return res.status(202).json(payload);
     res.json(payload);
 });
 
@@ -979,7 +982,8 @@ router.get('/jobs/:jobId/download', authenticate, async (req: AuthRequest, res: 
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     const payload = await buildDownloadResponse(jobId, userId);
-    if (!payload) return res.status(400).json({ error: 'Output not ready or job not found' });
+    if (!payload) return res.status(404).json({ error: 'Job not found' });
+    if (!payload.ready) return res.status(202).json(payload);
     res.json(payload);
 });
 

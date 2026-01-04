@@ -141,6 +141,9 @@ export const jobService = {
 
   getPresignedDownloadUrl: async (jobId: string) => {
     const response = await api.post(`/jobs/${jobId}/presign-download`);
+    if (response.data?.ready === false) {
+      return null;
+    }
     return response.data;
   },
 
