@@ -2461,18 +2461,22 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
 
             const upserts = groups.map((g: any, idx: number) => {
                 const groupIndex = g.groupIndex ?? g.index ?? idx + 1;
+                const resultKey = g.resultKey || g.hdrKey || null;
+                const groupError = g.error || null;
+                const status = groupError ? 'failed' : (resultKey ? 'hdr_ok' : 'processing');
                 return {
                     job_id: jobId,
                     group_index: groupIndex,
                     representative_file_id: g.representativeId || null,
                     hdr_bucket: HDR_BUCKET,
-                    hdr_key: g.resultKey || g.hdrKey || null,
+                    hdr_key: resultKey,
                     preview_bucket: HDR_BUCKET,
-                    preview_key: g.previewKey || g.resultKey || null,
-                    status: g.resultKey ? 'hdr_ok' : 'processing',
+                    preview_key: g.previewKey || resultKey || null,
+                    status,
                     runninghub_task_id: null,
                     group_type: g.groupType || typeByIndex.get(groupIndex) || 'hdr',
-                    output_filename: g.outputFilename || nameByIndex.get(groupIndex) || (g.resultKey ? path.basename(g.resultKey) : null)
+                    output_filename: g.outputFilename || nameByIndex.get(groupIndex) || (resultKey ? path.basename(resultKey) : null),
+                    last_error: groupError
                 };
             });
             const upsertResp: any = await (supabaseAdmin.from('job_groups') as any)
