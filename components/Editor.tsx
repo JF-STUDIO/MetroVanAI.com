@@ -235,6 +235,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           setPipelineItems(items);
           setPipelineProgress(0);
           setImages(() => items.map(() => ({ status: 'pending' })));
+          if (job?.id) {
+            void refreshPipelineStatus(job.id);
+          }
         }
 
         if (data.type === 'group_status_changed' && typeof data.index === 'number') {
@@ -1031,6 +1034,27 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }));
   };
 
+  const selectAllGroups = () => {
+    if (!canSelectGroups) return;
+    setExcludedGroupIds(new Set());
+    setPipelineItems((prev) => prev.map((item) => (
+      item.status === 'skipped' || item.is_skipped
+        ? { ...item, status: 'queued', is_skipped: false }
+        : item
+    )));
+  };
+
+  const deselectAllGroups = () => {
+    if (!canSelectGroups) return;
+    const allIds = pipelineItems.map((item) => item.id);
+    setExcludedGroupIds(new Set(allIds));
+    setPipelineItems((prev) => prev.map((item) => ({
+      ...item,
+      status: 'skipped',
+      is_skipped: true
+    })));
+  };
+
   const mapUploadItem = (item: ImageItem): GalleryItem => ({
     id: item.id,
     label: item.file.name,
@@ -1043,10 +1067,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const hasPendingUploads = uploadImages.some((img) => img.status === 'pending' || img.status === 'uploading');
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
   const showUploadOnly = jobStatus === 'uploading';
+  const showUploadNotice = jobStatus === 'uploading' && uploadImages.length > 0;
 
   const uploadProgress = uploadImages.length
     ? Math.round(uploadImages.reduce((sum, img) => sum + img.progress, 0) / uploadImages.length)
     : 0;
+  const uploadedReadyCount = uploadImages.filter((img) => img.progress >= 100).length;
   const isFinalizingUpload = jobStatus === 'uploading' && uploadImages.length > 0 && uploadProgress >= 100 && !uploadComplete;
   const displayUploadProgress = isFinalizingUpload ? 99 : uploadProgress;
 
@@ -1092,6 +1118,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   )).length;
   const hdrProgressValue = activeGroupsCount ? Math.round((hdrReadyCount / activeGroupsCount) * 100) : 0;
   const hdrProcessing = activeGroupsCount > 0 && hdrReadyCount < activeGroupsCount && processingActive;
+  const canSelectGroups = jobStatus === 'input_resolved' && pipelineItems.length > 0;
 
   const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
     const streamIndex = Math.max((item.group_index ?? 1) - 1, 0);
@@ -1132,6 +1159,36 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       isSkipped
     };
   };
+
+  const refreshPipelineStatus = async (jobId: string) => {
+    try {
+      const response = await jobService.getPipelineStatus(jobId);
+      if (response?.job) {
+        setJob(response.job);
+        setJobStatus(response.job.status);
+      }
+      if (Array.isArray(response?.items)) {
+        setPipelineItems(response.items);
+      }
+      if (typeof response?.progress === 'number') {
+        setPipelineProgress(response.progress);
+      }
+      if (response?.previews) {
+        setPreviewSummary(response.previews);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (!job?.id) return;
+    if (!previewInProgress) return;
+    const interval = window.setInterval(() => {
+      void refreshPipelineStatus(job.id);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [job?.id, previewInProgress]);
 
   const cycleRepresentative = async (item: GalleryItem, direction: 1 | -1 = 1) => {
     if (!job || !item.frames || item.frames.length < 2) return;
@@ -1489,11 +1546,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               <span className="text-[9px] text-gray-600 font-bold">| Balance: {user.points} Pts</span>
               {jobStatus === 'uploading' && uploadImages.length > 0 && (
                 <span className="text-[9px] text-gray-400 font-bold">
-                  | {isFinalizingUpload ? 'Finalizing upload' : `Upload ${displayUploadProgress}%`}
+                  | {isFinalizingUpload ? 'Finalizing upload' : `Upload ${uploadedReadyCount}/${uploadImages.length} (${displayUploadProgress}%)`}
                 </span>
               )}
               {uploadComplete && jobStatus !== 'uploading' && (
                 <span className="text-[9px] text-emerald-400 font-bold">| Upload Complete</span>
+              )}
+              {showUploadNotice && (
+                <span className="text-[9px] text-amber-300 font-bold">| Uploading… please keep this page open</span>
               )}
               {previewInProgress && (
                 <span className="text-[9px] text-rose-300 font-bold">| Previews {previewReady}/{previewTotal}</span>
@@ -1510,7 +1570,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             <div className="flex flex-wrap items-center gap-3 mt-1 text-[10px] uppercase tracking-widest text-gray-500">
               <span className="text-gray-400">Photos: <span className="text-white">{uploadedCount}</span></span>
               <span className="text-gray-400">Groups: <span className="text-white">{totalGroups}</span></span>
-              <span className="text-gray-400">RunPod Queue: <span className="text-emerald-300">{selectedGroupCount}</span></span>
+              <span className="text-gray-400">Selected Groups: <span className="text-emerald-300">{selectedGroupCount}</span></span>
               {skippedGroupCount > 0 && (
                 <span className="text-gray-400">Skipped: <span className="text-amber-300">{skippedGroupCount}</span></span>
               )}
@@ -1525,7 +1585,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             )}
             {showProcessingNotice && (
               <div className="mt-2 text-[10px] text-emerald-300 uppercase tracking-widest">
-                Upload complete. RunPod HDR/AI is running (typically under 10 minutes). You can close this page while we finish.
+                HDR merge + workflow running (typically under 10 minutes). You can close this page while we finish.
               </div>
             )}
             {showReadyToEnhanceNotice && (
@@ -1608,7 +1668,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               )}
               {showProcessingNotice && (
                 <div className="text-[10px] text-emerald-300 uppercase tracking-widest">
-                  Upload complete. You can close this page while we finish.
+                  HDR merge + workflow running. You can close this page while we finish.
                 </div>
               )}
             </div>
@@ -1647,10 +1707,28 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
               </div>
             )}
             {pipelineItems.length > 0 && (
-              <div className="text-[10px] uppercase tracking-widest text-gray-400 flex flex-wrap items-center gap-2">
+              <div className="text-[10px] uppercase tracking-widest text-gray-400 flex flex-wrap items-center gap-3">
                 <span className="text-white font-black">{selectedGroupCount}</span>
-                <span>of {totalGroups} groups will go to RunPod HDR.</span>
-                {jobStatus === 'input_resolved' && (
+                <span>of {totalGroups} groups selected for HDR.</span>
+                {canSelectGroups && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={selectAllGroups}
+                      className="px-3 py-1 rounded-full border border-white/10 text-[10px] text-white/80 hover:border-white/30 transition"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={deselectAllGroups}
+                      className="px-3 py-1 rounded-full border border-white/10 text-[10px] text-white/80 hover:border-white/30 transition"
+                    >
+                      Deselect All
+                    </button>
+                  </>
+                )}
+                {canSelectGroups && (
                   <span className="text-gray-500">Uncheck any mis-grouped stacks before submitting.</span>
                 )}
               </div>
@@ -1663,14 +1741,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                 const fromPipeline = pipelineIdSet.has(img.id);
                 const isExcluded = effectiveSkippedIds.has(img.id);
                 const canToggleSkip = fromPipeline && jobStatus === 'input_resolved';
-                const showCheck = img.status === 'done' && !isExcluded;
+                const showCheck = fromPipeline && jobStatus === 'input_resolved' && !isExcluded;
                 return (
                   <div
                     key={img.id || idx}
                     role="button"
                     tabIndex={0}
                     onClick={() => handleGallerySelect(img, idx)}
-                    className={`relative overflow-hidden rounded-2xl border transition-all bg-black/40 ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-white/5 hover:border-white/15'}`}
+                    className={`relative overflow-hidden rounded-2xl border transition-all bg-black/40 ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-white/5 hover:border-white/15'} ${isExcluded ? 'opacity-60' : ''}`}
                   >
                     {img.preview ? (
                       <img src={img.preview} className="w-full h-48 object-cover" />
@@ -1736,22 +1814,28 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                     </div>
                     <div className="absolute top-3 right-3 flex flex-col items-end gap-2">
                       {fromPipeline && (
-                        <button
-                          type="button"
-                          disabled={!canToggleSkip}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            if (!canToggleSkip) return;
-                            toggleGroupExclusion(img.id);
-                          }}
-                          className={`px-2.5 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition ${
+                        <label
+                          className={`flex items-center gap-2 px-2.5 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition ${
                             isExcluded
                               ? 'bg-amber-500/30 border-amber-400 text-amber-100'
                               : 'bg-black/60 border-white/10 text-white/80 hover:border-white/40'
                           } ${!canToggleSkip ? 'opacity-40 cursor-not-allowed' : ''}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                          }}
                         >
-                          {isExcluded ? 'Skipped' : 'RunPod HDR'}
-                        </button>
+                          <input
+                            type="checkbox"
+                            checked={!isExcluded}
+                            disabled={!canToggleSkip}
+                            onChange={() => {
+                              if (!canToggleSkip) return;
+                              toggleGroupExclusion(img.id);
+                            }}
+                            className="h-3 w-3 accent-emerald-400"
+                          />
+                          {isExcluded ? 'Skipped' : 'Selected'}
+                        </label>
                       )}
                       {showCheck && (
                         <div className="w-6 h-6 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] shadow">
