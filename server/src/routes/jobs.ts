@@ -2437,6 +2437,16 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
             return res.json({ ok: true, stale: true });
         }
 
+        const progressValue = Number((req.body as any)?.progress);
+        if ((req.body as any)?.type === 'grouping_progress' && Number.isFinite(progressValue)) {
+            const safeProgress = Math.min(100, Math.max(0, Math.round(progressValue)));
+            await (supabaseAdmin.from('jobs') as any)
+                .update({ progress: safeProgress, updated_at: new Date().toISOString() })
+                .eq('id', jobId);
+            emitJobEvent(jobId, { type: 'grouping_progress', progress: safeProgress });
+            return res.json({ ok: true, progress: safeProgress });
+        }
+
         if (error) {
             if (!isGroupMode) {
                 // Mark unfinished groups as failed so retry-missing can pick them up.
