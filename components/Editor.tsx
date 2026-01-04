@@ -526,6 +526,15 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setNotice({ type, message });
   };
 
+  const getApiErrorMessage = (err: unknown, fallback: string) => {
+    if (axios.isAxiosError(err)) {
+      const data = err.response?.data as { error?: string; message?: string } | undefined;
+      if (typeof data?.error === 'string') return data.error;
+      if (typeof data?.message === 'string') return data.message;
+    }
+    return err instanceof Error ? err.message : fallback;
+  };
+
   const openConfirm = (payload: {
     title?: string;
     message: string;
@@ -957,7 +966,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         onUpdateUser({ ...user, points: balanceRow.available_credits });
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to start processing.';
+      const message = getApiErrorMessage(err, 'Failed to start processing.');
       pushNotice('error', message);
     }
   };

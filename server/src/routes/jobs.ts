@@ -1811,8 +1811,13 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
 
     if (reserveError) {
         const message = reserveError.message || 'Failed to reserve credits';
-        const status = message.includes('insufficient credits') ? 402 : 500;
-        return res.status(status).json({ error: message });
+        const insufficient = message.includes('insufficient credits');
+        const status = insufficient ? 400 : 500;
+        const userMessage = insufficient ? '积分不足' : message;
+        return res.status(status).json({
+            error: userMessage,
+            code: insufficient ? 'INSUFFICIENT_CREDITS' : 'CREDIT_RESERVE_FAILED'
+        });
     }
 
     await (supabaseAdmin.from('jobs') as any)
@@ -1985,8 +1990,13 @@ router.post('/jobs/:jobId/retry-missing', authenticate, async (req: AuthRequest,
             });
         if (reserveResult.error) {
             const message = reserveResult.error.message || 'Failed to reserve credits';
-            const status = message.includes('insufficient credits') ? 402 : 500;
-            return res.status(status).json({ error: message });
+            const insufficient = message.includes('insufficient credits');
+            const status = insufficient ? 400 : 500;
+            const userMessage = insufficient ? '积分不足' : message;
+            return res.status(status).json({
+                error: userMessage,
+                code: insufficient ? 'INSUFFICIENT_CREDITS' : 'CREDIT_RESERVE_FAILED'
+            });
         }
         creditsReserved = creditsToReserve;
         balance = reserveResult.data;
