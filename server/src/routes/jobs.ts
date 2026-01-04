@@ -2339,6 +2339,18 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
         }
 
         if (error) {
+            if (!isGroupMode) {
+                // Mark unfinished groups as failed so retry-missing can pick them up.
+                const { error: groupFailError } = await (supabaseAdmin.from('job_groups') as any)
+                    .update({ status: 'failed', last_error: error })
+                    .eq('job_id', jobId)
+                    .neq('status', 'hdr_ok')
+                    .neq('status', 'ai_ok')
+                    .neq('status', 'skipped');
+                if (groupFailError) {
+                    console.warn('[HDR] failed to mark groups as failed', groupFailError.message);
+                }
+            }
             await updateJobStatus(jobId, 'failed');
             emitJobEvent(jobId, { type: 'job_done', status: 'FAILED', error });
             await bumpRunpodPending(-1);
