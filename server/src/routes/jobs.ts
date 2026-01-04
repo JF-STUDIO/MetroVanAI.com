@@ -288,7 +288,8 @@ const triggerCloudRunJob = async (jobId: string, mode: RunpodMode) => {
                     groupIndex,
                     groupName,
                     groupType: g.group_type || 'group',
-                    fileKeys: groupedKeys
+                    fileKeys: groupedKeys,
+                    r2_bucket: HDR_BUCKET
                 };
             })
             .filter((g: any) => Array.isArray(g.fileKeys) && g.fileKeys.length > 0);
