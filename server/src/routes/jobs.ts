@@ -2376,9 +2376,7 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
                     status: 'queued',
                     group_type: g.groupType || 'group',
                     output_filename: outputName,
-                    representative_file_id: representativeId,
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
+                    representative_file_id: representativeId
                 };
             });
 
@@ -2470,9 +2468,7 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
                     status: g.resultKey ? 'hdr_ok' : 'processing',
                     runninghub_task_id: null,
                     group_type: g.groupType || typeByIndex.get(groupIndex) || 'hdr',
-                    output_filename: g.outputFilename || nameByIndex.get(groupIndex) || (g.resultKey ? path.basename(g.resultKey) : null),
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
+                    output_filename: g.outputFilename || nameByIndex.get(groupIndex) || (g.resultKey ? path.basename(g.resultKey) : null)
                 };
             });
             const upsertResp: any = await (supabaseAdmin.from('job_groups') as any)
