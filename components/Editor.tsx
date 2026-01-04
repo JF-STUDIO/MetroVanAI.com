@@ -450,7 +450,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     resetStreamState();
     setUploadComplete(true);
     setPendingActiveIndex(typeof editorState?.activeIndex === 'number' ? editorState.activeIndex : null);
-    jobService.getJobStatus(jobId)
+    jobService.getPipelineStatus(jobId)
       .then(async (response) => {
         const pipelineJob = response.job;
         setJob(pipelineJob);
@@ -561,7 +561,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     try {
       if (item.workflow_id) {
-        const response = await jobService.getJobStatus(item.id);
+        const response = await jobService.getPipelineStatus(item.id);
         const pipelineJob = response.job;
         setJob(pipelineJob);
         setJobStatus(pipelineJob.status);
@@ -905,7 +905,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setNotice(null);
       let currentItems = pipelineItems;
       if (currentItems.length === 0) {
-        const response = await jobService.getJobStatus(job.id);
+        const response = await jobService.getPipelineStatus(job.id);
         if (Array.isArray(response?.items)) {
           setPipelineItems(response.items);
           currentItems = response.items;
