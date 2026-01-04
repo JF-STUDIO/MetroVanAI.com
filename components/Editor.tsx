@@ -155,7 +155,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
     return ext ? rawExtensions.has(ext) : false;
   };
-  const multipartThreshold = 50 * 1024 * 1024; // 50MB
+  const multipartThreshold = Number(import.meta.env.VITE_MULTIPART_THRESHOLD_MB || 50) * 1024 * 1024;
+  const uploadParallel = Math.max(1, Number(import.meta.env.VITE_UPLOAD_PARALLEL || 4));
+  const multipartParallel = Math.max(1, Number(import.meta.env.VITE_MULTIPART_PARALLEL || 3));
   const resetStreamState = () => {
     setImages([]);
   };
@@ -781,11 +783,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         job.id,
         uploadImages.map(img => ({ name: img.file.name, type: img.file.type || 'application/octet-stream', size: img.file.size }))
       );
+      const presignMap = new Map(presignedData.map((item) => [item.fileName, item]));
 
       const uploadedFiles: { r2_key: string; filename: string }[] = [];
 
       const uploadSingle = async (img: ImageItem) => {
-        const presignInfo = presignedData.find((p) => p.fileName === img.file.name);
+        const presignInfo = presignMap.get(img.file.name);
         if (!presignInfo) return;
         img.status = 'uploading';
         await axios.put(presignInfo.putUrl, img.file, {
@@ -812,7 +815,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         });
         const parts: { partNumber: number; etag: string }[] = [];
         let loadedTotal = 0;
-        const maxParallel = 3;
+        const maxParallel = Math.max(1, Math.min(multipartParallel, init.partUrls.length));
         const queue = [...init.partUrls];
 
         const uploadPart = async (part: any, attempt = 1): Promise<void> => {
@@ -855,20 +858,30 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setUploadImages(prev => [...prev]);
       };
 
-      await Promise.all(uploadImages.map(async (img) => {
-        try {
-          if (img.file.size >= multipartThreshold) {
-            await uploadMultipart(img);
-          } else {
-            await uploadSingle(img);
+      const uploadQueue = [...uploadImages];
+      const uploadErrors: Error[] = [];
+      const workers = Array.from({ length: Math.min(uploadParallel, uploadQueue.length) }, async () => {
+        while (uploadQueue.length) {
+          const img = uploadQueue.shift();
+          if (!img) break;
+          try {
+            if (img.file.size >= multipartThreshold) {
+              await uploadMultipart(img);
+            } else {
+              await uploadSingle(img);
+            }
+          } catch (error) {
+            img.status = 'failed';
+            img.statusText = 'Failed';
+            setUploadImages(prev => [...prev]);
+            uploadErrors.push(error as Error);
           }
-        } catch (error) {
-          img.status = 'failed';
-          img.statusText = 'Failed';
-          setUploadImages(prev => [...prev]);
-          throw error;
         }
-      }));
+      });
+      await Promise.all(workers);
+      if (uploadErrors.length > 0) {
+        throw uploadErrors[0];
+      }
 
       await jobService.uploadComplete(job.id, uploadedFiles);
       setUploadComplete(true);
