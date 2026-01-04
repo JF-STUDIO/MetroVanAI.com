@@ -2064,6 +2064,10 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
             files: filteredFiles.map((f: any) => f.r2_key)
         });
 
+        console.log("[HDR] jobId =", jobId);
+        console.log("[HDR] manifestKey =", manifestKey);
+        console.log("[HDR] fileKeys sample =", filteredFiles?.slice(0, 3)?.map((f: any) => f.r2_key));
+
         await r2Client.send(new PutObjectCommand({
             Bucket: RAW_BUCKET,
             Key: manifestKey,
@@ -2101,17 +2105,25 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
             release();
         }
 
+        const rpText = await rpResp.text();
+        console.log("[HDR] Cloud Run status =", rpResp.status);
+        console.log("[HDR] Cloud Run resp =", rpText);
+
         if (!rpResp.ok) {
-            const text = await rpResp.text();
             await bumpRunpodPending(-1);
             await recordRunpodFinish(jobId, false);
             await sendAlert(
                 '[RunPod] API returned error',
-                `Job ${jobId} RunPod API failed: ${text || rpResp.status}`
+                `Job ${jobId} RunPod API failed: ${rpText || rpResp.status}`
             );
-            return res.status(500).json({ error: 'runpod failed', detail: text });
+            return res.status(500).json({ error: 'runpod failed', detail: rpText });
         }
-        const data: any = await rpResp.json();
+        let data: any = {};
+        try {
+            data = rpText ? JSON.parse(rpText) : {};
+        } catch (err) {
+            data = {};
+        }
         await recordRunpodStart(jobId);
 
         // 更新状态 & SSE
