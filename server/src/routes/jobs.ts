@@ -2163,25 +2163,30 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
         }
 
         const rpText = await rpResp.text();
+        let rpJson: any = {};
+        try {
+            rpJson = rpText ? JSON.parse(rpText) : {};
+        } catch {
+            rpJson = {};
+        }
+        const executionName = typeof rpJson?.name === 'string' ? rpJson.name : null;
         console.log("[HDR] Cloud Run status =", rpResp.status);
-        console.log("[HDR] Cloud Run resp =", rpText);
+        if (executionName) {
+            console.log("[HDR] Cloud Run execution =", executionName);
+        }
 
         if (!rpResp.ok) {
+            const errorMessage = typeof rpJson?.error?.message === 'string'
+                ? rpJson.error.message
+                : 'Cloud Run run failed';
             await bumpRunpodPending(-1);
             await recordRunpodFinish(jobId, false);
             await sendAlert(
                 '[RunPod] API returned error',
-                `Job ${jobId} RunPod API failed: ${rpText || rpResp.status}`
+                `Job ${jobId} RunPod API failed: ${errorMessage}`
             );
-            return res.status(500).json({ error: 'runpod failed', detail: rpText });
+            return res.status(500).json({ error: 'runpod failed', detail: errorMessage });
         }
-        let data: any = {};
-        try {
-            data = rpText ? JSON.parse(rpText) : {};
-        } catch (err) {
-            data = {};
-        }
-        const executionName = typeof data?.name === 'string' ? data.name : null;
         if (executionName) {
             const { error: execUpdateError } = await (supabaseAdmin.from('jobs') as any)
                 .update({ current_execution_name: executionName, updated_at: new Date().toISOString() })
@@ -2222,6 +2227,9 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
 });
 
 // === Runpod 回调 ===
+router.get('/runpod/callback', (req: Request, res: Response) => {
+    res.json({ ok: true });
+});
 router.post('/runpod/callback', async (req: Request, res: Response) => {
     try {
         const secret = (req.headers['x-runpod-secret'] as string) || (req.body && (req.body as any).callbackSecret) || (req.body && (req.body as any).secret);
