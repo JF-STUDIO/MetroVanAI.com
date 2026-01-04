@@ -853,7 +853,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPreviewSummary({ total: uploadedFiles.length, ready: 0 });
       setJobStatus('grouping');
       // 触发 RunPod 分组 + HDR
-      const runpodResp = await jobService.triggerRunpod(job.id);
+      const runpodResp = await jobService.triggerRunpod(job.id, { mode: 'group' });
       if (runpodResp?.queue_pending !== undefined) {
         setRunpodQueue({
           pending: Math.max(Number(runpodResp.queue_pending) || 0, 0),
@@ -935,8 +935,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         )));
         setExcludedGroupIds(new Set(skipIds));
       }
-      setJob((prev) => (prev ? { ...prev, estimated_units: activeCountFromItems } : prev));
-      setJobStatus('reserved');
+      setJob((prev) => (prev ? { ...prev, estimated_units: activeCountFromItems, status: 'hdr_processing' } : prev));
+      setJobStatus('hdr_processing');
       const profile = await jobService.getProfile();
       onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
       const balanceRow = Array.isArray(startResponse?.balance) ? startResponse.balance[0] : startResponse?.balance;

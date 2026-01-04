@@ -102,7 +102,7 @@ export const jobService = {
     return response.data;
   },
 
-  triggerRunpod: async (jobId: string, payload?: { skipGroupIds?: string[] }) => {
+  triggerRunpod: async (jobId: string, payload?: { skipGroupIds?: string[]; mode?: 'group' | 'full' }) => {
     const response = await api.post(`/jobs/${jobId}/trigger-runpod`, payload || {});
     return response.data;
   },

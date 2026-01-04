@@ -215,6 +215,184 @@ const CLOUD_RUN_REGION = process.env.CLOUD_RUN_REGION;
 const CLOUD_RUN_JOB = process.env.CLOUD_RUN_JOB;
 const cloudRunAuth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
 
+type RunpodMode = 'group' | 'full';
+
+const normalizeRunpodMode = (value?: string | null): RunpodMode => {
+    return value === 'group' ? 'group' : 'full';
+};
+
+const triggerCloudRunJob = async (jobId: string, mode: RunpodMode) => {
+    const [files, groupResp, jobRow] = await Promise.all([
+        fetchJobFiles(jobId),
+        (supabaseAdmin.from('job_groups') as any)
+            .select('id, status')
+            .eq('job_id', jobId),
+        (supabaseAdmin.from('jobs') as any)
+            .select('id, status, current_manifest_key, current_manifest_hash, current_execution_name')
+            .eq('id', jobId)
+            .maybeSingle()
+    ]);
+    if (!jobRow) {
+        throw new Error('Job not found');
+    }
+    if (!files.length) {
+        throw new Error('no files');
+    }
+
+    const skippedGroups = mode === 'group'
+        ? new Set<string>()
+        : new Set(
+            (groupResp?.data || [])
+                .filter((g: any) => g.status === 'skipped')
+                .map((g: any) => g.id)
+        );
+
+    const filteredFiles = mode === 'group'
+        ? files
+        : files.filter((f: any) => !f.group_id || !skippedGroups.has(f.group_id));
+
+    if (filteredFiles.length === 0) {
+        throw new Error('all files are skipped, nothing to send to RunPod');
+    }
+
+    const fileKeys = filteredFiles
+        .map((f: any) => f.r2_key)
+        .filter((key: any) => typeof key === 'string');
+    fileKeys.sort();
+
+    const manifestBody = JSON.stringify({ files: fileKeys, mode });
+    const manifestHash = crypto.createHash('sha256').update(manifestBody).digest('hex');
+
+    if (
+        jobRow.current_manifest_hash === manifestHash
+        && jobRow.current_execution_name
+        && isHdrInProgressStatus(jobRow.status)
+    ) {
+        console.log('[HDR] idempotent trigger hit', {
+            jobId,
+            manifestHash,
+            executionName: jobRow.current_execution_name
+        });
+        return {
+            idempotent: true,
+            executionName: jobRow.current_execution_name,
+            manifestKey: jobRow.current_manifest_key,
+            manifestHash
+        };
+    }
+
+    const manifestKey = `jobs/${jobId}/manifests/${Date.now()}-${uuidv4()}.json`;
+
+    console.log('[HDR] jobId =', jobId);
+    console.log('[HDR] manifestKey =', manifestKey);
+    console.log('[HDR] manifestHash =', manifestHash);
+    console.log('[HDR] mode =', mode);
+    console.log('[HDR] fileKeys sample =', fileKeys.slice(0, 3));
+
+    await r2Client.send(new PutObjectCommand({
+        Bucket: RAW_BUCKET,
+        Key: manifestKey,
+        Body: manifestBody,
+        ContentType: 'application/json'
+    }));
+
+    const { error: manifestUpdateError } = await (supabaseAdmin.from('jobs') as any)
+        .update({
+            current_manifest_key: manifestKey,
+            current_manifest_hash: manifestHash,
+            current_execution_name: null,
+            updated_at: new Date().toISOString()
+        })
+        .eq('id', jobId);
+    if (manifestUpdateError) {
+        console.warn('[HDR] failed to store manifest metadata', manifestUpdateError.message);
+    }
+
+    const pendingBefore = await bumpRunpodPending(1);
+
+    const release = await runpodLimiter.acquire();
+    let rpResp: any;
+    try {
+        const token = await getCloudRunToken();
+        const body = {
+            overrides: {
+                containerOverrides: [
+                    {
+                        env: [
+                            { name: 'RUNPOD_MANIFEST_KEY', value: manifestKey },
+                            { name: 'JOB_ID_OVERRIDE', value: `job-${jobId}` },
+                            { name: 'RUN_ON_RUNPOD', value: 'false' },
+                            { name: 'RUN_MODE', value: mode }
+                        ]
+                    }
+                ]
+            }
+        };
+        rpResp = await fetch(`https://run.googleapis.com/v2/projects/${CLOUD_RUN_PROJECT}/locations/${CLOUD_RUN_REGION}/jobs/${CLOUD_RUN_JOB}:run`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(body),
+        });
+    } finally {
+        release();
+    }
+
+    const rpText = await rpResp.text();
+    let rpJson: any = {};
+    try {
+        rpJson = rpText ? JSON.parse(rpText) : {};
+    } catch {
+        rpJson = {};
+    }
+    const executionName = typeof rpJson?.name === 'string' ? rpJson.name : null;
+    console.log('[HDR] Cloud Run status =', rpResp.status);
+    if (executionName) {
+        console.log('[HDR] Cloud Run execution =', executionName);
+    }
+
+    if (!rpResp.ok) {
+        const errorMessage = typeof rpJson?.error?.message === 'string'
+            ? rpJson.error.message
+            : 'Cloud Run run failed';
+        await bumpRunpodPending(-1);
+        await recordRunpodFinish(jobId, false);
+        await sendAlert(
+            '[RunPod] API returned error',
+            `Job ${jobId} RunPod API failed: ${errorMessage}`
+        );
+        throw new Error(errorMessage);
+    }
+
+    if (executionName) {
+        const { error: execUpdateError } = await (supabaseAdmin.from('jobs') as any)
+            .update({ current_execution_name: executionName, updated_at: new Date().toISOString() })
+            .eq('id', jobId)
+            .eq('current_manifest_hash', manifestHash);
+        if (execUpdateError) {
+            console.warn('[HDR] failed to store execution name', execUpdateError.message);
+        }
+    }
+
+    await recordRunpodStart(jobId);
+
+    const queuePending = Math.max((pendingBefore ?? 0), 0);
+    const hdrEstSec = await getHdrEstimateSeconds();
+    const etaSeconds = Math.max(0, Math.ceil((queuePending / Math.max(RUNPOD_MAX_CONCURRENCY, 1)) * hdrEstSec));
+    await maybeAlertQueue(queuePending, etaSeconds);
+
+    return {
+        idempotent: false,
+        executionName,
+        manifestKey,
+        manifestHash,
+        queue_pending: queuePending,
+        eta_seconds: etaSeconds
+    };
+};
+
 const getCloudRunToken = async () => {
     const client = await cloudRunAuth.getClient();
     const tokenResponse = await client.getAccessToken();
@@ -1565,6 +1743,7 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
 
     const activeGroups = finalGroups.filter((group: any) => group.status !== 'skipped');
     const activeGroupCount = activeGroups.length;
+    const activeGroupIds = activeGroups.map((group: any) => group.id);
 
     if (activeGroupCount === 0) {
         return res.status(400).json({ error: 'No groups selected for processing' });
@@ -1598,36 +1777,55 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
         .eq('id', jobId)
         .eq('user_id', userId);
 
+    if (activeGroupIds.length > 0) {
+        await (supabaseAdmin.from('job_groups') as any)
+            .update({
+                status: 'queued',
+                hdr_bucket: null,
+                hdr_key: null,
+                output_bucket: null,
+                output_key: null,
+                last_error: null,
+                attempts: 0
+            })
+            .in('id', activeGroupIds);
+    }
+
+    let runResult: any;
     try {
-        await jobQueue.add('pipeline-job', { jobId }, {
-            jobId: `pipeline:${jobId}`,
-            attempts: 1,
-            removeOnComplete: true,
-            removeOnFail: true
-        });
+        runResult = await triggerCloudRunJob(jobId, 'full');
     } catch (error) {
-        console.warn('Failed to enqueue pipeline job:', (error as Error).message);
-        const releaseKey = `release:${jobId}:enqueue_failed`;
+        console.warn('Failed to trigger HDR merge:', (error as Error).message);
+        const releaseKey = `release:${jobId}:hdr_trigger_failed`;
         await (supabaseAdmin as any).rpc('credit_release', {
             p_user_id: userId,
             p_job_id: jobId,
             p_units: creditsToReserve,
             p_idempotency_key: releaseKey,
-            p_note: 'Release credits after queue failure'
+            p_note: 'Release credits after HDR trigger failure'
         });
         await (supabaseAdmin.from('jobs') as any)
             .update({ status: 'input_resolved', reserved_units: 0 })
             .eq('id', jobId)
             .eq('user_id', userId);
-        return res.status(503).json({ error: 'Queue unavailable, please retry' });
+        return res.status(503).json({ error: 'HDR trigger failed, please retry' });
     }
+
+    await updateJobStatus(jobId, 'hdr_processing');
+    emitJobEvent(jobId, { type: 'group_status_changed', status: 'hdr_processing' });
 
     res.json({
         reserved_units: activeGroupCount,
         credits_reserved: creditsToReserve,
         balance,
         skipped_groups: validSkipIds.length,
-        total_groups: normalizedGroups.length
+        total_groups: normalizedGroups.length,
+        executionName: runResult.executionName,
+        manifestKey: runResult.manifestKey,
+        manifestHash: runResult.manifestHash,
+        queue_pending: runResult.queue_pending,
+        eta_seconds: runResult.eta_seconds,
+        idempotent: runResult.idempotent
     });
 });
 
@@ -2053,170 +2251,29 @@ router.post('/jobs/:jobId/trigger-runpod', authenticate, async (req: AuthRequest
             return res.status(500).json({ error: 'Cloud Run env missing' });
         }
         const { jobId } = req.params;
+        const mode = normalizeRunpodMode(req.body?.mode);
+        const result = await triggerCloudRunJob(jobId, mode);
 
-        const [files, groupResp, jobRow] = await Promise.all([
-            fetchJobFiles(jobId),
-            (supabaseAdmin.from('job_groups') as any)
-                .select('id, status')
-                .eq('job_id', jobId),
-            (supabaseAdmin.from('jobs') as any)
-                .select('id, status, current_manifest_key, current_manifest_hash, current_execution_name')
-                .eq('id', jobId)
-                .maybeSingle()
-        ]);
-        if (!jobRow) return res.status(404).json({ error: 'Job not found' });
-        if (!files.length) return res.status(400).json({ error: 'no files' });
-
-        const skippedGroups = new Set(
-            (groupResp?.data || []).filter((g: any) => g.status === 'skipped').map((g: any) => g.id)
-        );
-        const skippedFileIds = files
-            .filter((f: any) => f.group_id && skippedGroups.has(f.group_id))
-            .map((f: any) => f.id);
-        const filteredFiles = files.filter((f: any) => !f.group_id || !skippedGroups.has(f.group_id));
-        if (filteredFiles.length === 0) {
-            return res.status(400).json({ error: 'all files are skipped, nothing to send to RunPod' });
+        if (mode === 'group') {
+            await updateJobStatus(jobId, 'grouping');
+            emitJobEvent(jobId, { type: 'grouping_progress', progress: 0 });
+        } else {
+            await updateJobStatus(jobId, 'hdr_processing');
+            emitJobEvent(jobId, { type: 'group_status_changed', status: 'hdr_processing' });
         }
 
-        const fileKeys = filteredFiles
-            .map((f: any) => f.r2_key)
-            .filter((key: any) => typeof key === 'string');
-        fileKeys.sort();
-        // Stable hash used for idempotent trigger checks.
-        const manifestBody = JSON.stringify({ files: fileKeys });
-        const manifestHash = crypto.createHash('sha256').update(manifestBody).digest('hex');
-
-        if (
-            jobRow.current_manifest_hash === manifestHash
-            && jobRow.current_execution_name
-            && isHdrInProgressStatus(jobRow.status)
-        ) {
-            console.log('[HDR] idempotent trigger hit', {
-                jobId,
-                manifestHash,
-                executionName: jobRow.current_execution_name
-            });
-            return res.json({
-                ok: true,
-                executionName: jobRow.current_execution_name,
-                manifestKey: jobRow.current_manifest_key,
-                manifestHash
-            });
-        }
-
-        const manifestKey = `jobs/${jobId}/manifests/${Date.now()}-${uuidv4()}.json`;
-
-        console.log("[HDR] jobId =", jobId);
-        console.log("[HDR] manifestKey =", manifestKey);
-        console.log("[HDR] manifestHash =", manifestHash);
-        console.log("[HDR] fileKeys sample =", fileKeys.slice(0, 3));
-
-        await r2Client.send(new PutObjectCommand({
-            Bucket: RAW_BUCKET,
-            Key: manifestKey,
-            Body: manifestBody,
-            ContentType: 'application/json'
-        }));
-
-        const { error: manifestUpdateError } = await (supabaseAdmin.from('jobs') as any)
-            .update({
-                current_manifest_key: manifestKey,
-                current_manifest_hash: manifestHash,
-                current_execution_name: null,
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', jobId);
-        if (manifestUpdateError) {
-            console.warn('[HDR] failed to store manifest metadata', manifestUpdateError.message);
-        }
-
-        const pendingBefore = await bumpRunpodPending(1);
-
-        // 触发 Cloud Run Job
-        const release = await runpodLimiter.acquire();
-        let rpResp: any;
-        try {
-            const token = await getCloudRunToken();
-            const body = {
-                overrides: {
-                    containerOverrides: [
-                        {
-                            env: [
-                                { name: 'RUNPOD_MANIFEST_KEY', value: manifestKey },
-                                { name: 'JOB_ID_OVERRIDE', value: `job-${jobId}` },
-                                { name: 'RUN_ON_RUNPOD', value: 'false' }
-                            ]
-                        }
-                    ]
-                }
-            };
-            rpResp = await fetch(`https://run.googleapis.com/v2/projects/${CLOUD_RUN_PROJECT}/locations/${CLOUD_RUN_REGION}/jobs/${CLOUD_RUN_JOB}:run`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify(body),
-            });
-        } finally {
-            release();
-        }
-
-        const rpText = await rpResp.text();
-        let rpJson: any = {};
-        try {
-            rpJson = rpText ? JSON.parse(rpText) : {};
-        } catch {
-            rpJson = {};
-        }
-        const executionName = typeof rpJson?.name === 'string' ? rpJson.name : null;
-        console.log("[HDR] Cloud Run status =", rpResp.status);
-        if (executionName) {
-            console.log("[HDR] Cloud Run execution =", executionName);
-        }
-
-        if (!rpResp.ok) {
-            const errorMessage = typeof rpJson?.error?.message === 'string'
-                ? rpJson.error.message
-                : 'Cloud Run run failed';
-            await bumpRunpodPending(-1);
-            await recordRunpodFinish(jobId, false);
-            await sendAlert(
-                '[RunPod] API returned error',
-                `Job ${jobId} RunPod API failed: ${errorMessage}`
-            );
-            return res.status(500).json({ error: 'runpod failed', detail: errorMessage });
-        }
-        if (executionName) {
-            const { error: execUpdateError } = await (supabaseAdmin.from('jobs') as any)
-                .update({ current_execution_name: executionName, updated_at: new Date().toISOString() })
-                .eq('id', jobId)
-                .eq('current_manifest_hash', manifestHash);
-            if (execUpdateError) {
-                console.warn('[HDR] failed to store execution name', execUpdateError.message);
-            }
-        }
-        await recordRunpodStart(jobId);
-
-        // 更新状态 & SSE
-        await updateJobStatus(jobId, 'grouping');
-        emitJobEvent(jobId, { type: 'grouping_progress', progress: 0 });
-
-        const queuePending = Math.max((pendingBefore ?? 0), 0);
-        const hdrEstSec = await getHdrEstimateSeconds();
-        const etaSeconds = Math.max(0, Math.ceil((queuePending / Math.max(RUNPOD_MAX_CONCURRENCY, 1)) * hdrEstSec));
-        await maybeAlertQueue(queuePending, etaSeconds);
-        console.log('[HDR] executionName =', executionName);
         res.json({
             ok: true,
-            requestId: executionName,
-            queue_pending: queuePending,
-            eta_seconds: etaSeconds,
-            manifestKey,
-            manifestHash
+            mode,
+            requestId: result.executionName,
+            executionName: result.executionName,
+            manifestKey: result.manifestKey,
+            manifestHash: result.manifestHash,
+            queue_pending: result.queue_pending,
+            eta_seconds: result.eta_seconds,
+            idempotent: result.idempotent
         });
     } catch (err: any) {
-        await bumpRunpodPending(-1);
         console.error(err);
         await sendAlert(
             '[RunPod] Trigger failed',
@@ -2238,6 +2295,8 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
         }
 
         const { jobId, groups, error, uploads } = (req.body || {}) as any;
+        const mode = normalizeRunpodMode((req.body as any)?.mode);
+        const isGroupMode = mode === 'group';
         if (!jobId) return res.status(400).json({ error: 'missing jobId' });
 
         const manifestKey =
@@ -2252,7 +2311,7 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
             null;
 
         const { data: jobRow } = await (supabaseAdmin.from('jobs') as any)
-            .select('id, status, current_manifest_key, current_execution_name')
+            .select('id, status, workflow_id, current_manifest_key, current_execution_name')
             .eq('id', jobId)
             .maybeSingle();
         if (!jobRow) return res.status(404).json({ error: 'Job not found' });
@@ -2268,7 +2327,8 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
             manifestKey,
             executionName,
             groupsCount: Array.isArray(groups) ? groups.length : 0,
-            stale: isStale
+            stale: isStale,
+            mode
         });
         if (isStale) {
             return res.json({ ok: true, stale: true });
@@ -2282,24 +2342,139 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
             return res.json({ ok: true });
         }
 
-        // 将回调结果写入 job_groups，并将 hdr 输出填入
+        if (isGroupMode) {
+            if (!Array.isArray(groups) || groups.length === 0) {
+                return res.status(400).json({ error: 'groups missing' });
+            }
+
+            const { data: fileRows } = await (supabaseAdmin.from('job_files') as any)
+                .select('id, r2_key')
+                .eq('job_id', jobId);
+            const fileIdByKey = new Map<string, string>(
+                (fileRows || []).map((row: any) => [row.r2_key, row.id])
+            );
+
+            await (supabaseAdmin.from('job_groups') as any)
+                .delete()
+                .eq('job_id', jobId);
+            await (supabaseAdmin.from('job_files') as any)
+                .update({ group_id: null, group_order: null })
+                .eq('job_id', jobId);
+
+            const groupRows = groups.map((g: any, idx: number) => {
+                const groupIndex = g.groupIndex ?? g.index ?? idx + 1;
+                const fileKeys = Array.isArray(g.fileKeys) ? g.fileKeys : [];
+                const repKey = fileKeys[Math.floor((fileKeys.length - 1) / 2)];
+                const representativeId = repKey ? fileIdByKey.get(repKey) || null : null;
+                const outputName = g.outputFilename
+                    || (g.groupName ? `${g.groupName}.jpg` : `group_${groupIndex}.jpg`);
+                return {
+                    id: uuidv4(),
+                    job_id: jobId,
+                    group_index: groupIndex,
+                    raw_count: fileKeys.length,
+                    status: 'queued',
+                    group_type: g.groupType || 'group',
+                    output_filename: outputName,
+                    representative_file_id: representativeId,
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                };
+            });
+
+            const { error: groupInsertError } = await (supabaseAdmin.from('job_groups') as any)
+                .insert(groupRows);
+            if (groupInsertError) {
+                return res.status(500).json({ error: groupInsertError.message });
+            }
+
+            const fileUpdates: { id: string; group_id: string; group_order: number }[] = [];
+            groups.forEach((g: any, idx: number) => {
+                const groupIndex = g.groupIndex ?? g.index ?? idx + 1;
+                const row = groupRows.find((r: any) => r.group_index === groupIndex);
+                if (!row) return;
+                const fileKeys = Array.isArray(g.fileKeys) ? g.fileKeys : [];
+                fileKeys.forEach((key: string, orderIndex: number) => {
+                    const fileId = fileIdByKey.get(key);
+                    if (!fileId) return;
+                    fileUpdates.push({
+                        id: fileId,
+                        group_id: row.id,
+                        group_order: orderIndex + 1
+                    });
+                });
+            });
+
+            await runWithConcurrency(fileUpdates, 4, async (update) => {
+                await (supabaseAdmin.from('job_files') as any)
+                    .update({ group_id: update.group_id, group_order: update.group_order })
+                    .eq('id', update.id);
+            });
+
+            await bumpRunpodPending(-1);
+
+            const { data: statusUpdate } = await (supabaseAdmin.from('jobs') as any)
+                .update({
+                    status: 'input_resolved',
+                    estimated_units: groupRows.length,
+                    progress: 0,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', jobId)
+                .eq('status', 'grouping')
+                .select('id');
+            if (!statusUpdate || (Array.isArray(statusUpdate) && statusUpdate.length === 0)) {
+                console.log('[HDR] status update skipped (not in grouping)', { jobId });
+            }
+
+            const groupPayload = groups.map((g: any) => ({
+                ...g,
+                groupSize: g.groupSize ?? g.fileCount ?? (Array.isArray(g.fileKeys) ? g.fileKeys.length : null)
+            }));
+            try {
+                emitJobEvent(jobId, { type: 'grouped', groups: groupPayload, uploads });
+                emitJobEvent(jobId, { type: 'group_status_changed', status: 'input_resolved' });
+                emitJobEvent(jobId, { type: 'grouping_progress', progress: 100 });
+            } catch (e) {
+                console.warn('emit grouped after runpod callback failed', (e as Error).message);
+            }
+            await recordRunpodFinish(jobId, true);
+
+            return res.json({ ok: true, mode: 'group' });
+        }
+
+        // HDR merge callback: update outputs and hand off to workflow
         let totalGroups = 0;
         if (Array.isArray(groups) && groups.length) {
             totalGroups = groups.length;
-            const upserts = groups.map((g: any, idx: number) => ({
-                job_id: jobId,
-                group_index: g.groupIndex ?? g.index ?? idx + 1,
-                representative_file_id: g.representativeId || null,
-                hdr_bucket: HDR_BUCKET,
-                hdr_key: g.resultKey || g.hdrKey || null,
-                preview_bucket: HDR_BUCKET,
-                preview_key: g.previewKey || g.resultKey || null,
-                status: g.resultKey ? 'hdr_ok' : 'processing',
-                runninghub_task_id: null,
-                group_type: g.groupType || 'hdr',
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString(),
-            }));
+            const { data: existingGroups } = await (supabaseAdmin.from('job_groups') as any)
+                .select('id, group_index, group_type, output_filename')
+                .eq('job_id', jobId);
+            const typeByIndex = new Map<number, string>(
+                (existingGroups || []).map((row: any) => [row.group_index, row.group_type])
+            );
+            const nameByIndex = new Map<number, string>(
+                (existingGroups || []).map((row: any) => [row.group_index, row.output_filename])
+            );
+
+            const upserts = groups.map((g: any, idx: number) => {
+                const groupIndex = g.groupIndex ?? g.index ?? idx + 1;
+                return {
+                    job_id: jobId,
+                    group_index: groupIndex,
+                    representative_file_id: g.representativeId || null,
+                    hdr_bucket: HDR_BUCKET,
+                    hdr_key: g.resultKey || g.hdrKey || null,
+                    preview_bucket: HDR_BUCKET,
+                    preview_key: g.previewKey || g.resultKey || null,
+                    status: g.resultKey ? 'hdr_ok' : 'processing',
+                    runninghub_task_id: null,
+                    group_type: g.groupType || typeByIndex.get(groupIndex) || 'hdr',
+                    output_filename: g.outputFilename || nameByIndex.get(groupIndex) || (g.resultKey ? path.basename(g.resultKey) : null),
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                };
+            });
             const upsertResp: any = await (supabaseAdmin.from('job_groups') as any)
                 .upsert(upserts, { onConflict: 'job_id,group_index', defaultToNull: false });
             if (upsertResp?.error) console.error('upsert groups err', upsertResp.error);
@@ -2307,31 +2482,27 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
 
         await bumpRunpodPending(-1);
 
-        // 标记已分组，准备 AI 阶段
-        const { data: statusUpdate } = await (supabaseAdmin.from('jobs') as any)
-            .update({
-                status: 'input_resolved',
-                estimated_units: totalGroups || null,
-                progress: 0,
-                updated_at: new Date().toISOString()
-            })
-            .eq('id', jobId)
-            .eq('status', 'grouping')
-            .select('id');
-        if (!statusUpdate || (Array.isArray(statusUpdate) && statusUpdate.length === 0)) {
-            console.log('[HDR] status update skipped (not in grouping)', { jobId });
-        }
-
         try {
             emitJobEvent(jobId, { type: 'grouped', groups, uploads });
-            emitJobEvent(jobId, { type: 'group_status_changed', status: 'input_resolved' });
-            emitJobEvent(jobId, { type: 'grouping_progress', progress: 100 });
         } catch (e) {
             console.warn('emit grouped after runpod callback failed', (e as Error).message);
         }
         await recordRunpodFinish(jobId, true);
 
-        res.json({ ok: true });
+        if (jobRow.workflow_id) {
+            try {
+                await jobQueue.add('pipeline-job', { jobId }, {
+                    jobId: `pipeline:${jobId}:after-hdr`,
+                    attempts: 1,
+                    removeOnComplete: true,
+                    removeOnFail: true
+                });
+            } catch (queueError) {
+                console.warn('Failed to enqueue pipeline after HDR:', (queueError as Error).message);
+            }
+        }
+
+        res.json({ ok: true, mode: 'full' });
     } catch (err: any) {
         console.error(err);
         await recordRunpodFinish(req.body?.jobId || '', false);
