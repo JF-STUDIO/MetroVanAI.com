@@ -67,7 +67,7 @@ export const jobService = {
     return response.data;
   },
 
-  createMultipartUpload: async (jobId: string, file: { name: string; type: string; size: number }) => {
+  createMultipartUpload: async (jobId: string, file: { id?: string; name: string; type: string; size: number }) => {
     const response = await api.post(`/jobs/${jobId}/presign-raw-multipart`, { file });
     return response.data;
   },
@@ -84,6 +84,16 @@ export const jobService = {
 
   uploadComplete: async (jobId: string, files: { r2_key: string; filename?: string; size?: number; exif_time?: string | null }[]) => {
     const response = await api.post(`/jobs/${jobId}/upload-complete`, { files });
+    return response.data;
+  },
+
+  registerGroups: async (jobId: string, payload: { files: any[]; groups: any[] }) => {
+    const response = await api.post(`/jobs/${jobId}/groups`, payload);
+    return response.data;
+  },
+
+  fileUploaded: async (jobId: string, payload: { files?: { id?: string; r2_key?: string }[]; file?: { id?: string; r2_key?: string } }) => {
+    const response = await api.post(`/jobs/${jobId}/file_uploaded`, payload);
     return response.data;
   },
 

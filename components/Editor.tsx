@@ -23,6 +23,8 @@ interface ImageItem {
   progress: number;
   statusText?: string;
   isRaw?: boolean;
+  groupId?: string;
+  groupIndex?: number;
 }
 
 type HistoryJob = Job & { photo_tools?: { name?: string } | null; workflows?: { display_name?: string } | null };
@@ -127,6 +129,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [showNewProjectForm, setShowNewProjectForm] = useState(false);
   const [autoUploadQueued, setAutoUploadQueued] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
+  const [groupingComplete, setGroupingComplete] = useState(false);
   const editorStateKey = 'mvai:editor_state';
   const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
   const [runpodQueue, setRunpodQueue] = useState<{ pending: number; etaSeconds: number } | null>(null);
@@ -155,9 +158,28 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
     return ext ? rawExtensions.has(ext) : false;
   };
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
   const multipartThreshold = Number(import.meta.env.VITE_MULTIPART_THRESHOLD_MB || 50) * 1024 * 1024;
-  const uploadParallel = Math.max(1, Number(import.meta.env.VITE_UPLOAD_PARALLEL || 4));
-  const multipartParallel = Math.max(1, Number(import.meta.env.VITE_MULTIPART_PARALLEL || 3));
+  const uploadParallel = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL || 10), 6, 16);
+  const multipartParallel = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL || 4), 2, 8);
+  const uploadRetryAttempts = Math.max(3, Number(import.meta.env.VITE_UPLOAD_RETRY || 3));
+  const uploadRetryBaseMs = Math.max(300, Number(import.meta.env.VITE_UPLOAD_RETRY_BASE_MS || 800));
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const withUploadRetry = async <T,>(fn: () => Promise<T>, label: string) => {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= uploadRetryAttempts; attempt += 1) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastError = err;
+        if (attempt >= uploadRetryAttempts) break;
+        const delay = uploadRetryBaseMs * Math.pow(2, attempt - 1);
+        console.warn(`Upload retry ${attempt}/${uploadRetryAttempts} (${label})`);
+        await sleep(delay);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`Upload failed (${label})`);
+  };
   const resetStreamState = () => {
     setImages([]);
   };
@@ -256,9 +278,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             };
             return next;
           });
-          if (data.status && typeof data.status === 'string') {
-            setJobStatus(data.status);
-          }
         }
 
         if (data.type === 'group_done' && typeof data.index === 'number') {
@@ -437,7 +456,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setPipelineProgress(null);
         setPreviewSummary(null);
         resetStreamState();
-        setUploadComplete(true);
+        setUploadComplete(false);
+        setGroupingComplete(false);
       }
       setResumeAttempted(true);
       return;
@@ -463,7 +483,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setPipelineProgress(null);
     setPreviewSummary(null);
     resetStreamState();
-    setUploadComplete(true);
+    setUploadComplete(false);
+    setGroupingComplete(false);
     setPendingActiveIndex(typeof editorState?.activeIndex === 'number' ? editorState.activeIndex : null);
     jobService.getPipelineStatus(jobId)
       .then(async (response) => {
@@ -473,6 +494,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setJobStatus(pipelineJob.status);
         if (Array.isArray(response.items)) {
           setPipelineItems(response.items);
+          setGroupingComplete(response.items.length > 0);
         }
         if (typeof response.progress === 'number') {
           setPipelineProgress(response.progress);
@@ -530,7 +552,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   const getApiErrorMessage = (err: unknown, fallback: string) => {
     if (axios.isAxiosError(err)) {
-      const data = err.response?.data as { error?: string; message?: string } | undefined;
+      const data = err.response?.data as { error?: string; message?: string; code?: string } | undefined;
+      if (err.response?.status === 402 || data?.code === 'INSUFFICIENT_CREDITS') {
+        return '积分不足';
+      }
       if (typeof data?.error === 'string') return data.error;
       if (typeof data?.message === 'string') return data.message;
     }
@@ -576,7 +601,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setJobStatus(item.status);
     setJob(item as Job);
     setShowProjectInput(false);
-    setUploadComplete(true);
+    setUploadComplete(false);
+    setGroupingComplete(false);
     setShowNewProjectForm(false);
     if (item.workflow_id) {
       saveLastJob(item.id, item.workflow_id);
@@ -591,6 +617,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setJobStatus(pipelineJob.status);
         if (Array.isArray(response.items)) {
           setPipelineItems(response.items);
+          setGroupingComplete(response.items.length > 0);
         }
         if (typeof response.progress === 'number') {
           setPipelineProgress(response.progress);
@@ -609,6 +636,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setPipelineProgress(null);
         setPreviewSummary(null);
         resetStreamState();
+        setGroupingComplete(false);
         const jobData = await jobService.getJobStatus(item.id);
         setJob(jobData);
         setJobStatus(jobData.status);
@@ -639,6 +667,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setPipelineItems([]);
         setPipelineProgress(null);
         setPreviewSummary(null);
+        setGroupingComplete(false);
         resetStreamState();
         localStorage.removeItem('mvai:last_job');
       }
@@ -701,8 +730,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     const newItems: ImageItem[] = files.map(file => {
       const raw = isRawFile(file);
+      const id = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       return {
-        id: Math.random().toString(36).substring(2, 9),
+        id,
         file,
         preview: raw ? '' : URL.createObjectURL(file),
         status: 'pending',
@@ -717,6 +747,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPreviewSummary(null);
       resetStreamState();
     }
+    setGroupingComplete(false);
     setUploadImages(prev => [...prev, ...newItems]);
     if (activeIndex === null) setActiveIndex(uploadImages.length - 1 + newItems.length);
     if (uploadAllowedStatuses.has(jobStatus)) {
@@ -763,6 +794,20 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
+  const updateUploadItem = (id: string, updates: Partial<ImageItem>) => {
+    setUploadImages((prev) => prev.map((item) => (
+      item.id === id ? { ...item, ...updates } : item
+    )));
+  };
+
+  const markUploadFailed = (id: string, message?: string) => {
+    updateUploadItem(id, {
+      status: 'failed',
+      progress: 0,
+      statusText: message ? `Error: ${message}` : 'Upload failed'
+    });
+  };
+
   // Main batch processing logic
   const startBatchProcess = async () => {
     if (!activeTool || uploadImages.length === 0 || !job) {
@@ -772,141 +817,86 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     try {
       setNotice(null);
-      setJobStatus('uploading');
+      setJobStatus('grouping');
       setUploadComplete(false);
+      setGroupingComplete(false);
       setRunpodQueue(null);
       setPipelineItems([]);
-      setPipelineProgress(null);
+      setPipelineProgress(0);
       setPreviewSummary(null);
       resetStreamState();
-      const presignedData: { r2Key: string; putUrl: string; fileName: string }[] = await jobService.getPresignedRawUploadUrls(
-        job.id,
-        uploadImages.map(img => ({ name: img.file.name, type: img.file.type || 'application/octet-stream', size: img.file.size }))
-      );
-      const presignMap = new Map(presignedData.map((item) => [item.fileName, item]));
-
-      const uploadedFiles: { r2_key: string; filename: string }[] = [];
-
-      const uploadSingle = async (img: ImageItem) => {
-        const presignInfo = presignMap.get(img.file.name);
-        if (!presignInfo) return;
-        img.status = 'uploading';
-        await axios.put(presignInfo.putUrl, img.file, {
-          headers: { 'Content-Type': img.file.type || 'application/octet-stream' },
-          onUploadProgress: (progressEvent) => {
-            const total = progressEvent.total || 1;
-            img.progress = Math.round((progressEvent.loaded * 100) / total);
-            setUploadImages(prev => [...prev]);
+      const worker = new Worker(new URL('../workers/groupingWorker.ts', import.meta.url), { type: 'module' });
+      const groupingResult = await new Promise<{ groups: any[]; files: any[]; total: number }>((resolve, reject) => {
+        worker.onmessage = (event) => {
+          const data = event.data;
+          if (data?.type === 'progress' && data.total) {
+            const progress = Math.round((data.processed / data.total) * 100);
+            setPipelineProgress(Math.min(100, Math.max(0, progress)));
+            return;
           }
-        });
-        uploadedFiles.push({ r2_key: presignInfo.r2Key, filename: img.file.name });
-        img.status = 'processing';
-        img.statusText = 'Uploaded';
-        img.progress = 100;
-        setUploadImages(prev => [...prev]);
-      };
-
-      const uploadMultipart = async (img: ImageItem) => {
-        img.status = 'uploading';
-        const init = await jobService.createMultipartUpload(job.id, {
-          name: img.file.name,
-          type: img.file.type || 'application/octet-stream',
-          size: img.file.size
-        });
-        const parts: { partNumber: number; etag: string }[] = [];
-        let loadedTotal = 0;
-        const maxParallel = Math.max(1, Math.min(multipartParallel, init.partUrls.length));
-        const queue = [...init.partUrls];
-
-        const uploadPart = async (part: any, attempt = 1): Promise<void> => {
-          const start = (part.partNumber - 1) * init.partSize;
-          const end = Math.min(start + init.partSize, img.file.size);
-          const chunk = img.file.slice(start, end);
-          try {
-            const response = await axios.put(part.url, chunk, {
-              headers: { 'Content-Type': img.file.type || 'application/octet-stream' }
-            });
-            const etag = (response.headers?.etag || response.headers?.ETag || '').replace(/"/g, '');
-            if (!etag) throw new Error('Missing ETag for multipart part');
-            parts.push({ partNumber: part.partNumber, etag });
-            loadedTotal += (end - start);
-            img.progress = Math.min(99, Math.round((loadedTotal / img.file.size) * 100));
-            setUploadImages(prev => [...prev]);
-          } catch (error) {
-            if (attempt < 3) {
-              await uploadPart(part, attempt + 1);
-              return;
-            }
-            throw error;
+          if (data?.type === 'done') {
+            resolve(data);
           }
         };
-
-        const workers = Array.from({ length: Math.min(maxParallel, queue.length) }, async () => {
-          while (queue.length) {
-            const part = queue.shift();
-            if (!part) break;
-            await uploadPart(part);
-          }
+        worker.onerror = (event) => reject(event);
+        worker.postMessage({
+          items: uploadImages.map(({ id, file }) => ({ id, file })),
+          options: { timeThresholdMs: 3500 }
         });
-
-        await Promise.all(workers);
-        await jobService.completeMultipartUpload(job.id, { uploadId: init.uploadId, key: init.key, parts });
-        uploadedFiles.push({ r2_key: init.key, filename: img.file.name });
-        img.status = 'processing';
-        img.statusText = 'Uploaded';
-        img.progress = 100;
-        setUploadImages(prev => [...prev]);
-      };
-
-      const uploadQueue = [...uploadImages];
-      const uploadErrors: Error[] = [];
-      const workers = Array.from({ length: Math.min(uploadParallel, uploadQueue.length) }, async () => {
-        while (uploadQueue.length) {
-          const img = uploadQueue.shift();
-          if (!img) break;
-          try {
-            if (img.file.size >= multipartThreshold) {
-              await uploadMultipart(img);
-            } else {
-              await uploadSingle(img);
-            }
-          } catch (error) {
-            img.status = 'failed';
-            img.statusText = 'Failed';
-            setUploadImages(prev => [...prev]);
-            uploadErrors.push(error as Error);
-          }
-        }
       });
-      await Promise.all(workers);
-      if (uploadErrors.length > 0) {
-        throw uploadErrors[0];
+      worker.terminate();
+
+      const { groups, files } = groupingResult;
+      if (!Array.isArray(groups) || groups.length === 0) {
+        throw new Error('No groups detected. Check the file timestamps and try again.');
+      }
+      if (!Array.isArray(files) || files.length === 0) {
+        throw new Error('No files processed. Please re-select your uploads.');
       }
 
-      await jobService.uploadComplete(job.id, uploadedFiles);
-      setUploadComplete(true);
-      setPreviewSummary({ total: uploadedFiles.length, ready: 0 });
-      setJobStatus('grouping');
-      // 触发 RunPod 分组 + HDR
-      const runpodResp = await jobService.triggerRunpod(job.id, { mode: 'group' });
-      if (runpodResp?.queue_pending !== undefined) {
-        setRunpodQueue({
-          pending: Math.max(Number(runpodResp.queue_pending) || 0, 0),
-          etaSeconds: Math.max(Number(runpodResp.eta_seconds) || 0, 0)
-        });
+      const pipelineGroups: PipelineGroupItem[] = groups.map((group: any) => ({
+        id: group.id,
+        group_index: group.index,
+        status: 'waiting_upload',
+        group_type: group.groupType,
+        group_size: Array.isArray(group.fileIds) ? group.fileIds.length : 0,
+        representative_index: Array.isArray(group.fileIds)
+          ? Math.max(Math.ceil(group.fileIds.length / 2), 1)
+          : null,
+        frames: Array.isArray(group.fileMetas)
+          ? group.fileMetas.map((meta: any, idx: number) => ({
+            id: meta.id,
+            filename: meta.name,
+            order: idx + 1
+          }))
+          : []
+      }));
+
+      setPipelineItems(pipelineGroups);
+      setImages(() => pipelineGroups.map(() => ({ status: 'pending' })));
+      setPipelineProgress(100);
+      setGroupingComplete(true);
+      setJobStatus('input_resolved');
+      setJob(prev => (prev ? { ...prev, status: 'input_resolved', estimated_units: pipelineGroups.length } : prev));
+
+      try {
+        await jobService.registerGroups(job.id, { files, groups });
+      } catch (err) {
+        setPipelineItems([]);
+        setPipelineProgress(null);
+        setGroupingComplete(false);
+        setJobStatus('idle');
+        throw err;
       }
-      // 生成 RAW 内嵌 JPG 预览（异步，不阻塞）
-      jobService.generatePreviews(job.id).catch((error) => {
-        console.warn('Failed to enqueue previews', error);
-      });
     } catch (err) {
       if (err instanceof Error) {
-        pushNotice('error', `Upload failed: ${err.message}`);
+        pushNotice('error', `Grouping failed: ${err.message}`);
       } else {
-        pushNotice('error', 'An unknown upload error occurred.');
+        pushNotice('error', 'An unknown grouping error occurred.');
       }
       setJobStatus('idle');
       setUploadComplete(false);
+      setGroupingComplete(false);
     }
   };
 
@@ -936,6 +926,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       pushNotice('error', 'Missing job details. Select a project first.');
       return;
     }
+    if (!groupingComplete) {
+      pushNotice('error', 'Grouping not finished yet. Please wait for groups to appear.');
+      return;
+    }
+    if (uploadImages.length === 0) {
+      pushNotice('error', 'No files available for upload.');
+      return;
+    }
     try {
       setNotice(null);
       let currentItems = pipelineItems;
@@ -963,15 +961,152 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       if (placeholderCount > 0) {
         setImages(Array.from({ length: placeholderCount }, () => ({ status: 'pending' })));
       }
-      const startResponse = await jobService.startJob(job.id, skipIds.length > 0 ? { skipGroupIds: skipIds } : undefined);
+
+      const startResponse = await jobService.startJob(
+        job.id,
+        skipIds.length > 0 ? { skipGroupIds: skipIds } : undefined
+      );
       if (skipIds.length > 0) {
         setPipelineItems((prev) => prev.map((item) => (
           skipIds.includes(item.id) ? { ...item, status: 'skipped', is_skipped: true } : item
         )));
         setExcludedGroupIds(new Set(skipIds));
       }
-      setJob((prev) => (prev ? { ...prev, estimated_units: activeCountFromItems, status: 'hdr_processing' } : prev));
+      setJob((prev) => (prev ? { ...prev, estimated_units: activeCountFromItems, status: 'uploading' } : prev));
+      setJobStatus('uploading');
+      setUploadComplete(false);
+
+      const activeGroups = currentItems.filter((item) => !skipIds.includes(item.id));
+      const fileMap = new Map(uploadImages.map((item) => [item.id, item]));
+      const groupQueue = [...activeGroups].sort((a, b) => (a.group_index || 0) - (b.group_index || 0));
+
+      const allFiles = new Map<string, ImageItem>();
+      for (const group of groupQueue) {
+        const fileIds = group.frames?.map((frame) => frame.id).filter(Boolean) || [];
+        if (fileIds.length === 0) {
+          throw new Error(`Group ${group.group_index} has no files. Please regroup and try again.`);
+        }
+        for (const fileId of fileIds) {
+          const fileItem = fileMap.get(fileId);
+          if (!fileItem) {
+            throw new Error(`Missing local file for group ${group.group_index}. Please reselect uploads.`);
+          }
+          allFiles.set(fileId, fileItem);
+        }
+      }
+
+      const simpleUploads = Array.from(allFiles.values())
+        .filter((item) => item.file.size <= multipartThreshold)
+        .map((item) => ({
+          id: item.id,
+          name: item.file.name,
+          type: item.file.type || 'application/octet-stream',
+          size: item.file.size
+        }));
+
+      const presignedList = simpleUploads.length > 0
+        ? await jobService.getPresignedRawUploadUrls(job.id, simpleUploads)
+        : [];
+      const presignMap = new Map<string, { putUrl: string; r2Key: string }>(
+        Array.isArray(presignedList)
+          ? presignedList.filter((row) => row?.fileId && row?.putUrl).map((row) => [row.fileId, { putUrl: row.putUrl, r2Key: row.r2Key }])
+          : []
+      );
+
+      const runWithConcurrency = async <T,>(items: T[], limit: number, handler: (item: T) => Promise<void>) => {
+        const queue = [...items];
+        const workers = Array.from({ length: Math.max(1, limit) }, async () => {
+          while (queue.length) {
+            const next = queue.shift();
+            if (!next) return;
+            await handler(next);
+          }
+        });
+        await Promise.all(workers);
+      };
+
+      const uploadSimple = async (item: ImageItem) => {
+        const target = presignMap.get(item.id);
+        if (!target?.putUrl) {
+          throw new Error(`Missing presigned URL for ${item.file.name}`);
+        }
+        updateUploadItem(item.id, { status: 'uploading', progress: 0, statusText: 'Uploading' });
+        await withUploadRetry(() => (
+          axios.put(target.putUrl, item.file, {
+            headers: { 'Content-Type': item.file.type || 'application/octet-stream' },
+            onUploadProgress: (evt) => {
+              const total = evt.total || item.file.size;
+              if (!total) return;
+              const percent = Math.min(99, Math.round((evt.loaded / total) * 100));
+              updateUploadItem(item.id, { progress: percent });
+            }
+          })
+        ), `simple:${item.file.name}`);
+        updateUploadItem(item.id, { status: 'done', progress: 100, statusText: 'Uploaded' });
+      };
+
+      const uploadMultipart = async (item: ImageItem) => {
+        updateUploadItem(item.id, { status: 'uploading', progress: 0, statusText: 'Uploading' });
+        const init = await jobService.createMultipartUpload(job.id, {
+          id: item.id,
+          name: item.file.name,
+          type: item.file.type || 'application/octet-stream',
+          size: item.file.size
+        });
+        const { uploadId, key, partSize, partUrls } = init || {};
+        if (!uploadId || !key || !Array.isArray(partUrls) || !partSize) {
+          throw new Error(`Multipart init failed for ${item.file.name}`);
+        }
+        let uploadedBytes = 0;
+        const parts: { partNumber: number; etag: string }[] = [];
+        await runWithConcurrency(partUrls, multipartParallel, async (part: any) => {
+          const start = (part.partNumber - 1) * partSize;
+          const end = Math.min(start + partSize, item.file.size);
+          const blob = item.file.slice(start, end);
+          await withUploadRetry(async () => {
+            const resp = await fetch(part.url, { method: 'PUT', body: blob });
+            if (!resp.ok) {
+              throw new Error(`Part ${part.partNumber} failed for ${item.file.name}`);
+            }
+            const etag = (resp.headers.get('ETag') || '').replace(/"/g, '');
+            parts.push({ partNumber: part.partNumber, etag });
+            uploadedBytes += (end - start);
+            const percent = Math.min(99, Math.round((uploadedBytes / item.file.size) * 100));
+            updateUploadItem(item.id, { progress: percent });
+          }, `part:${part.partNumber}:${item.file.name}`);
+        });
+        parts.sort((a, b) => a.partNumber - b.partNumber);
+        await jobService.completeMultipartUpload(job.id, { uploadId, key, parts });
+        updateUploadItem(item.id, { status: 'done', progress: 100, statusText: 'Uploaded' });
+      };
+
+      for (const group of groupQueue) {
+        const fileIds = group.frames?.map((frame) => frame.id).filter(Boolean) || [];
+        const fileItems = fileIds.map((id) => fileMap.get(id)).filter(Boolean) as ImageItem[];
+        setPipelineItems((prev) => prev.map((item) => (
+          item.id === group.id ? { ...item, status: 'uploading' } : item
+        )));
+        await runWithConcurrency(fileItems, uploadParallel, async (item) => {
+          try {
+            if (item.file.size > multipartThreshold) {
+              await uploadMultipart(item);
+            } else {
+              await uploadSimple(item);
+            }
+          } catch (err) {
+            markUploadFailed(item.id, err instanceof Error ? err.message : 'Upload failed');
+            throw err;
+          }
+        });
+        await jobService.fileUploaded(job.id, { files: fileIds.map((id) => ({ id })) });
+        setPipelineItems((prev) => prev.map((item) => (
+          item.id === group.id ? { ...item, status: 'queued_hdr' } : item
+        )));
+      }
+
+      setUploadComplete(true);
       setJobStatus('hdr_processing');
+      setJob((prev) => (prev ? { ...prev, status: 'hdr_processing' } : prev));
       const profile = await jobService.getProfile();
       onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
       const balanceRow = Array.isArray(startResponse?.balance) ? startResponse.balance[0] : startResponse?.balance;
@@ -981,6 +1116,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     } catch (err) {
       const message = getApiErrorMessage(err, 'Failed to start processing.');
       pushNotice('error', message);
+      setJobStatus('input_resolved');
+      setJob((prev) => (prev ? { ...prev, status: 'input_resolved' } : prev));
     }
   };
 
@@ -996,6 +1133,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setLightboxUrl(null);
     resetStreamState();
     setUploadComplete(false);
+    setGroupingComplete(false);
     localStorage.removeItem('mvai:last_job');
     saveEditorState({ mode: 'projects', workflowId: tool.id, jobId: null, search: '' });
   };
@@ -1011,6 +1149,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setShowProjectInput(false);
       setShowNewProjectForm(false);
       setUploadComplete(false);
+      setGroupingComplete(false);
       setPipelineItems([]);
       setPipelineProgress(null);
       setPreviewSummary(null);
@@ -1050,7 +1189,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       if (item.id !== groupId) return item;
       if (willExclude) return { ...item, status: 'skipped', is_skipped: true };
       if (item.status === 'skipped' || item.is_skipped) {
-        return { ...item, status: 'queued', is_skipped: false };
+        return { ...item, status: 'waiting_upload', is_skipped: false };
       }
       return item;
     }));
@@ -1061,7 +1200,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     setExcludedGroupIds(new Set());
     setPipelineItems((prev) => prev.map((item) => (
       item.status === 'skipped' || item.is_skipped
-        ? { ...item, status: 'queued', is_skipped: false }
+        ? { ...item, status: 'waiting_upload', is_skipped: false }
         : item
     )));
   };
@@ -1395,7 +1534,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         <div className="max-w-6xl mx-auto space-y-8">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
             <div className="flex items-center gap-3">
-              <button onClick={() => { setActiveTool(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); resetStreamState(); clearEditorState(); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+          <button onClick={() => { setActiveTool(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); setGroupingComplete(false); resetStreamState(); clearEditorState(); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
                 <i className="fa-solid fa-arrow-left"></i>
               </button>
               <div>
@@ -1543,13 +1682,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && uploadImages.length === 0;
   const hasHiddenUploads = uploadImages.length > 0 && galleryItems.length === 0 && showRawPreviews;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
-  const canEnhance = jobStatus === 'input_resolved' && !hasPendingUploads && selectedGroupCount > 0;
-  const canUploadBatch = hasPendingUploads && ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
+  const canEnhance = jobStatus === 'input_resolved' && groupingComplete && selectedGroupCount > 0;
+  const canUploadBatch = hasPendingUploads && !groupingComplete && ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved', 'failed', 'partial', 'completed', 'canceled'].includes(jobStatus);
   const canAddMore = ['idle', 'draft', 'uploaded', 'analyzing', 'input_resolved'].includes(jobStatus);
   const downloadLabel = downloadType === 'jpg' ? 'Download JPG' : 'Download ZIP';
   const canDownload = (jobStatus === 'completed' || jobStatus === 'partial') && Boolean(zipUrl);
-  const showReadyToEnhanceNotice = uploadComplete && jobStatus === 'input_resolved' && !processingActive;
-  const showProcessingNotice = uploadComplete && (processingActive || previewInProgress || jobStatus === 'analyzing');
+  const showReadyToEnhanceNotice = groupingComplete && jobStatus === 'input_resolved' && !processingActive;
+  const showProcessingNotice = (processingActive || previewInProgress) && jobStatus !== 'uploading';
   const runpodEtaMinutes = runpodQueue ? Math.ceil(runpodQueue.etaSeconds / 60) : null;
   const handleGallerySelect = (item: GalleryItem, index: number) => {
     setActiveIndex(index);
@@ -1561,7 +1700,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button onClick={() => { setActiveTool(null); setUploadImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); resetStreamState(); clearEditorState(); localStorage.removeItem('mvai:last_job'); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+          <button onClick={() => { setActiveTool(null); setUploadImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); setGroupingComplete(false); resetStreamState(); clearEditorState(); localStorage.removeItem('mvai:last_job'); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
             <i className="fa-solid fa-arrow-left"></i>
           </button>
           <div>
@@ -1626,7 +1765,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             )}
             {showReadyToEnhanceNotice && (
               <div className="mt-2 text-[10px] text-gray-400 uppercase tracking-widest">
-                Upload complete. Review groups and deselect any mis-grouped shots, then click Enhance to start processing.
+                Grouping complete. Review groups and deselect any mis-grouped shots, then click Enhance to start processing.
               </div>
             )}
           </div>

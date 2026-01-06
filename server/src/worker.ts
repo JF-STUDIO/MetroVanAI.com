@@ -545,9 +545,18 @@ const processRunningHubGroup = async (
     if (await isJobCanceled(jobId)) return;
     const releaseSlot = await aiGlobalLimiter.acquire();
     try {
-      await (supabaseAdmin.from('job_groups') as any)
+      const { data: claimed, error: claimError } = await (supabaseAdmin.from('job_groups') as any)
         .update({ status: 'ai_processing' })
-        .eq('id', group.id);
+        .eq('id', group.id)
+        .in('status', ['hdr_ok', 'preprocess_ok'])
+        .select('id');
+      if (claimError) {
+        throw new Error(claimError.message);
+      }
+      if (!claimed || (Array.isArray(claimed) && claimed.length === 0)) {
+        // Another worker already claimed this group.
+        return;
+      }
       const groupIndex = Math.max(((group.group_index as number | undefined) ?? 1) - 1, 0);
       emitJobEventAll(jobId, {
         type: 'group_status_changed',
@@ -692,7 +701,7 @@ const maybeAutoRetryFailedGroups = async (jobId: string, runtimeConfig: Record<s
   return true;
 };
 
-const processPipelineJob = async (jobId: string) => {
+const processPipelineJob = async (jobId: string, groupId?: string | null) => {
   const { data: job, error: jobError } = await (supabaseAdmin
     .from('jobs') as any)
     .select('id, user_id, workflow_id, workflow_version_id, settled_units, reserved_units, project_name, status')
@@ -716,7 +725,15 @@ const processPipelineJob = async (jobId: string) => {
     throw new Error('No job groups found');
   }
 
-  const pendingHdr = ((hdrGroups || []) as any[]).filter((group: any) => group.status === 'queued');
+  const groupsForJob = groupId
+    ? ((hdrGroups || []) as any[]).filter((group: any) => group.id === groupId)
+    : ((hdrGroups || []) as any[]);
+
+  if (groupId && groupsForJob.length === 0) {
+    return;
+  }
+
+  const pendingHdr = groupsForJob.filter((group: any) => group.status === 'queued');
 
   if (pendingHdr.length > 0) {
     if (await isJobCanceled(jobId)) return;
@@ -749,7 +766,8 @@ const processPipelineJob = async (jobId: string) => {
     .order('group_index', { ascending: true });
 
   const pendingAi = ((aiGroups || []) as any[]).filter((group: any) => (
-    group.status === 'preprocess_ok' || group.status === 'hdr_ok'
+    (group.status === 'preprocess_ok' || group.status === 'hdr_ok') &&
+    (!groupId || group.id === groupId)
   ));
   await runWithConcurrency(pendingAi, aiConcurrency, async (group) => {
     if (await isJobCanceled(jobId)) return;
@@ -767,6 +785,14 @@ const processPipelineJob = async (jobId: string) => {
   if (await isJobCanceled(jobId)) return;
   const autoRetried = await maybeAutoRetryFailedGroups(jobId, context.runtimeConfig);
   if (autoRetried) return;
+
+  const { data: completionGroups } = await (supabaseAdmin.from('job_groups') as any)
+    .select('status')
+    .eq('job_id', jobId);
+  const hasPending = (completionGroups || []).some((row: any) => !['ai_ok', 'failed', 'skipped'].includes(row.status));
+  if (hasPending) {
+    return;
+  }
 
   await (supabaseAdmin.from('jobs') as any)
     .update({ status: 'postprocess' })
@@ -814,9 +840,9 @@ const processLegacyJob = async (jobId: string) => {
 };
 
 const worker = new Worker('job-queue', async (job: Job) => {
-  const { jobId } = job.data as { jobId?: string };
+  const { jobId, groupId } = job.data as { jobId?: string; groupId?: string };
   if (!jobId) return;
-  console.log(`Worker processing job ${jobId}...`);
+  console.log(`Worker processing job ${jobId}${groupId ? ` (group ${groupId})` : ''}...`);
 
   try {
     if (job.name === 'preview-job') {
@@ -834,7 +860,7 @@ const worker = new Worker('job-queue', async (job: Job) => {
       .single();
 
     if (jobRecord?.workflow_id) {
-      await processPipelineJob(jobId);
+      await processPipelineJob(jobId, groupId);
     } else {
       await processLegacyJob(jobId);
     }

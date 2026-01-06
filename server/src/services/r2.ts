@@ -16,11 +16,14 @@ import {
 } from '@aws-sdk/client-s3';
 
 const defaultBucket = process.env.R2_BUCKET_NAME || '';
+const rawBucketEnv = process.env.R2_BUCKET_RAW || process.env.R2_RAW_BUCKET || '';
+const hdrBucketEnv = process.env.R2_BUCKET_HDR || process.env.R2_HDR_BUCKET || '';
+const outputBucketEnv = process.env.R2_BUCKET_OUTPUT || process.env.R2_OUT_BUCKET || '';
 export const BUCKET_NAME = defaultBucket || 'wangzhan';
 
-export const RAW_BUCKET = process.env.R2_BUCKET_RAW || defaultBucket || 'mvai-raw';
-export const HDR_BUCKET = process.env.R2_BUCKET_HDR || defaultBucket || 'mvai-hdr-temp';
-export const OUTPUT_BUCKET = process.env.R2_BUCKET_OUTPUT || defaultBucket || 'mvai-output';
+export const RAW_BUCKET = rawBucketEnv || hdrBucketEnv || defaultBucket || 'mvai-raw';
+export const HDR_BUCKET = hdrBucketEnv || defaultBucket || 'mvai-hdr-temp';
+export const OUTPUT_BUCKET = outputBucketEnv || defaultBucket || 'mvai-output';
 
 export const r2Client = new S3Client({
   region: 'auto',

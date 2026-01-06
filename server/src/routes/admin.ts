@@ -458,14 +458,12 @@ router.get('/admin/jobs', async (req: Request, res: Response) => {
   });
 
   const { data: groupCounts } = await (supabaseAdmin.from('job_groups') as any)
-    .select('job_id, status, count:count(*)')
-    .in('job_id', jobIds)
-    .group('job_id, status');
+    .select('job_id, status')
+    .in('job_id', jobIds);
 
   const { data: fileCounts } = await (supabaseAdmin.from('job_files') as any)
-    .select('job_id, count:count(*)')
-    .in('job_id', jobIds)
-    .group('job_id');
+    .select('job_id')
+    .in('job_id', jobIds);
 
   const { data: workflows } = await (supabaseAdmin.from('workflows') as any)
     .select('id, credit_per_unit');
@@ -477,14 +475,15 @@ router.get('/admin/jobs', async (req: Request, res: Response) => {
   const groupSummary = new Map<string, { total: number; done: number }>();
   (groupCounts || []).forEach((row: any) => {
     const current = groupSummary.get(row.job_id) || { total: 0, done: 0 };
-    current.total += Number(row.count) || 0;
-    if (row.status === 'ai_ok') current.done += Number(row.count) || 0;
+    current.total += 1;
+    if (row.status === 'ai_ok') current.done += 1;
     groupSummary.set(row.job_id, current);
   });
 
   const fileSummary = new Map<string, number>();
   (fileCounts || []).forEach((row: any) => {
-    fileSummary.set(row.job_id, Number(row.count) || 0);
+    const current = fileSummary.get(row.job_id) || 0;
+    fileSummary.set(row.job_id, current + 1);
   });
 
   const workflowMap = new Map<string, number>();
