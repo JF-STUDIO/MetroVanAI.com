@@ -882,9 +882,14 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           }
         };
         worker.onerror = (event) => reject(event);
+        const exifParallel = Number(import.meta.env.VITE_GROUPING_PARALLEL);
+        const exifSliceKb = Number(import.meta.env.VITE_EXIF_SLICE_KB);
+        const groupingOptions: Record<string, number> = { timeThresholdMs: 3500 };
+        if (Number.isFinite(exifParallel)) groupingOptions.exifParallel = exifParallel;
+        if (Number.isFinite(exifSliceKb)) groupingOptions.exifSliceKb = exifSliceKb;
         worker.postMessage({
           items: uploadImages.map(({ id, file }) => ({ id, file })),
-          options: { timeThresholdMs: 3500 }
+          options: groupingOptions
         });
       });
       worker.terminate();
@@ -1055,6 +1060,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           ? presignedList.filter((row) => row?.fileId && row?.putUrl).map((row) => [row.fileId, { putUrl: row.putUrl, r2Key: row.r2Key }])
           : []
       );
+      const r2KeyMap = new Map<string, string>();
+      for (const [fileId, entry] of presignMap.entries()) {
+        if (entry?.r2Key) r2KeyMap.set(fileId, entry.r2Key);
+      }
 
       const runWithConcurrency = async <T,>(items: T[], limit: number, handler: (item: T) => Promise<void>) => {
         const queue = [...items];
@@ -1100,6 +1109,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         if (!uploadId || !key || !Array.isArray(partUrls) || !partSize) {
           throw new Error(`Multipart init failed for ${item.file.name}`);
         }
+        r2KeyMap.set(item.id, key);
         let uploadedBytes = 0;
         const parts: { partNumber: number; etag: string }[] = [];
         await runWithConcurrency(partUrls, multipartParallel, async (part: any) => {
@@ -1141,7 +1151,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             throw err;
           }
         });
-        await jobService.fileUploaded(job.id, { files: fileIds.map((id) => ({ id })) });
+        await jobService.fileUploaded(job.id, {
+          files: fileIds.map((id) => ({ id, r2_key: r2KeyMap.get(id) }))
+        });
         setPipelineItems((prev) => prev.map((item) => (
           item.id === group.id ? { ...item, status: 'queued_hdr' } : item
         )));

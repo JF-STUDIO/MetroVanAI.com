@@ -10,6 +10,8 @@ type WorkerItem = {
 
 type GroupingOptions = {
   timeThresholdMs?: number;
+  exifParallel?: number;
+  exifSliceKb?: number;
 };
 
 type GroupFileMeta = {
@@ -20,6 +22,7 @@ type GroupFileMeta = {
   exifTime?: string | null;
   ev?: number | null;
   lastModified?: number | null;
+  exifTimeMs?: number | null;
 };
 
 type GroupResult = {
@@ -30,8 +33,15 @@ type GroupResult = {
   groupType: 'single' | 'group';
 };
 
-const readExif = async (file: WorkerFile) => {
-  const slice = file.slice(0, 256 * 1024);
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const getDefaultParallel = () => {
+  const cores = self.navigator?.hardwareConcurrency ?? 8;
+  return clamp(Math.floor(cores * 0.75), 2, 8);
+};
+
+const readExif = async (file: WorkerFile, sliceBytes: number) => {
+  const slice = file.slice(0, sliceBytes);
   const buffer = await slice.arrayBuffer();
   try {
     return await exifr.parse(buffer, {
@@ -77,13 +87,13 @@ const getCaptureTime = (tags: Record<string, any> | null, fallbackMs: number) =>
 };
 
 const groupByTime = (files: GroupFileMeta[], thresholdMs: number) => {
-  const sorted = [...files].sort((a, b) => (a.exifTime || '').localeCompare(b.exifTime || ''));
+  const sorted = [...files].sort((a, b) => (a.exifTimeMs ?? 0) - (b.exifTimeMs ?? 0));
   const groups: GroupResult[] = [];
   let current: GroupFileMeta[] = [];
   let currentStart: number | null = null;
 
   for (const file of sorted) {
-    const ts = file.exifTime ? new Date(file.exifTime).getTime() : (file.lastModified || 0);
+    const ts = file.exifTimeMs ?? file.lastModified ?? 0;
     if (currentStart === null) {
       currentStart = ts;
       current.push(file);
@@ -112,6 +122,32 @@ const groupByTime = (files: GroupFileMeta[], thresholdMs: number) => {
   });
 };
 
+const mapWithConcurrency = async <T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+  onProgress?: (count: number) => void
+) => {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  let completed = 0;
+
+  const runWorker = async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index], index);
+      completed += 1;
+      if (onProgress) onProgress(completed);
+    }
+  };
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => runWorker());
+  await Promise.all(workers);
+  return results;
+};
+
 self.onmessage = async (event: MessageEvent<{ files?: WorkerFile[]; items?: WorkerItem[]; options?: GroupingOptions }>) => {
   const { files, items, options } = event.data;
   const sourceItems: WorkerItem[] = Array.isArray(items)
@@ -121,26 +157,32 @@ self.onmessage = async (event: MessageEvent<{ files?: WorkerFile[]; items?: Work
       file
     })) : []);
   const total = sourceItems.length;
-  const fileMetas: GroupFileMeta[] = [];
   const threshold = options?.timeThresholdMs ?? 3500;
+  const parallel = clamp(Math.floor(options?.exifParallel ?? getDefaultParallel()), 1, 16);
+  const sliceBytes = clamp(Math.floor((options?.exifSliceKb ?? 256) * 1024), 64 * 1024, 1024 * 1024);
 
-  for (let i = 0; i < sourceItems.length; i += 1) {
-    const { file, id } = sourceItems[i];
-    const tags = await readExif(file);
-    const fallbackMs = file.lastModified || Date.now();
-    const exifTimeMs = getCaptureTime(tags, fallbackMs);
-    const meta: GroupFileMeta = {
-      id,
-      name: file.name,
-      size: file.size,
-      type: file.type || 'application/octet-stream',
-      exifTime: new Date(exifTimeMs).toISOString(),
-      ev: computeEv(tags),
-      lastModified: file.lastModified
-    };
-    fileMetas.push(meta);
-    self.postMessage({ type: 'progress', processed: i + 1, total });
-  }
+  const fileMetas = await mapWithConcurrency(
+    sourceItems,
+    parallel,
+    async ({ file, id }) => {
+      const tags = await readExif(file, sliceBytes);
+      const fallbackMs = file.lastModified || Date.now();
+      const exifTimeMs = getCaptureTime(tags, fallbackMs);
+      return {
+        id,
+        name: file.name,
+        size: file.size,
+        type: file.type || 'application/octet-stream',
+        exifTime: new Date(exifTimeMs).toISOString(),
+        exifTimeMs,
+        ev: computeEv(tags),
+        lastModified: file.lastModified
+      };
+    },
+    (processed) => {
+      self.postMessage({ type: 'progress', processed, total });
+    }
+  );
 
   const groups = groupByTime(fileMetas, threshold);
 

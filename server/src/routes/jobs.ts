@@ -1722,15 +1722,34 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
 
     const { data: fileRows, error: fileError } = await fileQuery;
     if (fileError) return res.status(500).json({ error: fileError.message });
-    if (!fileRows || fileRows.length === 0) return res.status(404).json({ error: 'files not found' });
 
-    const idsToUpdate = fileRows.map((row: any) => row.id);
+    const rowMap = new Map<string, any>();
+    (fileRows || []).forEach((row: any) => rowMap.set(row.id, row));
+
+    if (fileKeys.length > 0) {
+        const { data: keyRows, error: keyError } = await (supabaseAdmin.from('job_files') as any)
+            .select('id, group_id, upload_status')
+            .eq('job_id', jobId)
+            .in('r2_key', fileKeys);
+        if (keyError) return res.status(500).json({ error: keyError.message });
+        (keyRows || []).forEach((row: any) => rowMap.set(row.id, row));
+    }
+
+    if (rowMap.size === 0) return res.status(404).json({ error: 'files not found' });
+
+    const idsToUpdate = Array.from(rowMap.keys());
     const { error: updateError } = await (supabaseAdmin.from('job_files') as any)
         .update({ upload_status: 'uploaded', uploaded_at: new Date().toISOString() })
         .in('id', idsToUpdate);
     if (updateError) return res.status(500).json({ error: updateError.message });
 
-    const groupIds = Array.from(new Set(fileRows.map((row: any) => row.group_id).filter(Boolean)));
+    const groupIds = Array.from(
+        new Set(
+            Array.from(rowMap.values())
+                .map((row: any) => row.group_id)
+                .filter(Boolean)
+        )
+    );
     const readyGroups: any[] = [];
 
     for (const groupId of groupIds) {
