@@ -153,11 +153,18 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     'zipping'
   ]);
   const [resumeAttempted, setResumeAttempted] = useState(false);
-  const rawExtensions = new Set(['arw', 'cr2', 'cr3', 'nef', 'dng', 'rw2', 'orf', 'raf']);
+  const rawExtensions = new Set(['arw', 'cr2', 'cr3', 'nef', 'dng', 'rw2', 'orf', 'raf', 'raw']);
   const isRawFile = (file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
     return ext ? rawExtensions.has(ext) : false;
   };
+  const isJpegFile = (file: File) => {
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext === 'jpg' || ext === 'jpeg') return true;
+    const type = file.type?.toLowerCase();
+    return type === 'image/jpeg' || type === 'image/jpg';
+  };
+  const isSupportedUploadFile = (file: File) => isRawFile(file) || isJpegFile(file);
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
   const multipartThreshold = Number(import.meta.env.VITE_MULTIPART_THRESHOLD_MB || 50) * 1024 * 1024;
   const uploadParallel = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL || 10), 6, 16);
@@ -714,21 +721,27 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       pushNotice('error', 'Processing is already running. Please wait for it to finish before adding more files.');
       return;
     }
+    const invalidFiles = files.filter((file) => !isSupportedUploadFile(file));
+    if (invalidFiles.length > 0) {
+      pushNotice('error', 'Only JPG/RAW files are supported.');
+    }
+    const allowedFiles = files.filter((file) => isSupportedUploadFile(file));
+    if (allowedFiles.length === 0) return;
     const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
     const maxFileBytes = Number(import.meta.env.VITE_MAX_FILE_BYTES || (200 * 1024 * 1024));
-    if (maxFiles > 0 && uploadImages.length + files.length > maxFiles) {
+    if (maxFiles > 0 && uploadImages.length + allowedFiles.length > maxFiles) {
       pushNotice('error', `Too many files. Max ${maxFiles} per project.`);
       return;
     }
     if (maxFileBytes > 0) {
-      const oversized = files.find((file) => file.size > maxFileBytes);
+      const oversized = allowedFiles.find((file) => file.size > maxFileBytes);
       if (oversized) {
         pushNotice('error', `File too large: ${oversized.name}`);
         return;
       }
     }
 
-    const newItems: ImageItem[] = files.map(file => {
+    const newItems: ImageItem[] = allowedFiles.map(file => {
       const raw = isRawFile(file);
       const id = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       return {
