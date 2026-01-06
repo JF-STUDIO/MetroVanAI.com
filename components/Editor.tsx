@@ -3,6 +3,7 @@ import { Workflow, User, Job, JobAsset, PipelineGroupItem } from '../types';
 import { jobService } from '../services/jobService';
 import { supabase } from '../services/supabaseClient';
 import axios from 'axios';
+import exifr from 'exifr';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
   || (import.meta.env.DEV ? 'http://localhost:4000/api' : '/api');
@@ -171,6 +172,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const multipartParallel = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL || 4), 2, 8);
   const uploadRetryAttempts = Math.max(3, Number(import.meta.env.VITE_UPLOAD_RETRY || 3));
   const uploadRetryBaseMs = Math.max(300, Number(import.meta.env.VITE_UPLOAD_RETRY_BASE_MS || 800));
+  const rawPreviewParallel = clamp(Number(import.meta.env.VITE_RAW_PREVIEW_PARALLEL || 3), 1, 6);
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const withUploadRetry = async <T,>(fn: () => Promise<T>, label: string) => {
     let lastError: unknown;
@@ -186,6 +188,33 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       }
     }
     throw lastError instanceof Error ? lastError : new Error(`Upload failed (${label})`);
+  };
+  const createRawPreviewUrl = async (file: File) => {
+    try {
+      const thumb = await exifr.thumbnail(file);
+      if (!thumb) return null;
+      const blob = thumb instanceof Blob ? thumb : new Blob([thumb], { type: 'image/jpeg' });
+      return URL.createObjectURL(blob);
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const hydrateRawPreviews = async (items: ImageItem[]) => {
+    const targets = items.filter((item) => item.isRaw);
+    if (targets.length === 0) return;
+    const queue = [...targets];
+    const workers = Array.from({ length: rawPreviewParallel }, async () => {
+      while (queue.length) {
+        const next = queue.shift();
+        if (!next) return;
+        const previewUrl = await createRawPreviewUrl(next.file);
+        if (previewUrl) {
+          updateUploadItem(next.id, { preview: previewUrl });
+        }
+      }
+    });
+    await Promise.all(workers);
   };
   const resetStreamState = () => {
     setImages([]);
@@ -766,6 +795,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     if (uploadAllowedStatuses.has(jobStatus)) {
       setAutoUploadQueued(true);
     }
+    void hydrateRawPreviews(newItems);
   };
 
   // Handle new files from input click
