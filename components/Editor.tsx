@@ -120,6 +120,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [previewSummary, setPreviewSummary] = useState<{ total: number; ready: number } | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const reselectUploadsRef = useRef(false);
+  const pendingEnhanceRef = useRef(false);
   const [isDragging, setIsDragging] = useState(false);
   const [history, setHistory] = useState<HistoryJob[]>([]);
   const [historyCount, setHistoryCount] = useState(0);
@@ -131,6 +133,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [autoUploadQueued, setAutoUploadQueued] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [groupingComplete, setGroupingComplete] = useState(false);
+  const [needsUploadReselect, setNeedsUploadReselect] = useState(false);
   const editorStateKey = 'mvai:editor_state';
   const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
   const [runpodQueue, setRunpodQueue] = useState<{ pending: number; etaSeconds: number } | null>(null);
@@ -723,9 +726,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   };
 
   // Unified file handler for both click and drop
-  const processFiles = (fileList: FileList | null) => {
+  const processFiles = (
+    fileList: FileList | null,
+    options: { preserveGrouping?: boolean; replace?: boolean } = {}
+  ) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
+    const { preserveGrouping = false, replace = false } = options;
     if (!job) {
       pushNotice('error', 'Please create or select a project first.');
       return;
@@ -758,7 +765,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     if (allowedFiles.length === 0) return;
     const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
     const maxFileBytes = Number(import.meta.env.VITE_MAX_FILE_BYTES || (200 * 1024 * 1024));
-    if (maxFiles > 0 && uploadImages.length + allowedFiles.length > maxFiles) {
+    const existingCount = replace ? 0 : uploadImages.length;
+    if (maxFiles > 0 && existingCount + allowedFiles.length > maxFiles) {
       pushNotice('error', `Too many files. Max ${maxFiles} per project.`);
       return;
     }
@@ -783,16 +791,23 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         isRaw: raw
       };
     });
-    if (pipelineItems.length > 0) {
+    if (pipelineItems.length > 0 && !preserveGrouping) {
       setPipelineItems([]);
       setPipelineProgress(null);
       setPreviewSummary(null);
       resetStreamState();
     }
-    setGroupingComplete(false);
-    setUploadImages(prev => [...prev, ...newItems]);
-    if (activeIndex === null) setActiveIndex(uploadImages.length - 1 + newItems.length);
-    if (uploadAllowedStatuses.has(jobStatus)) {
+    if (!preserveGrouping) {
+      setGroupingComplete(false);
+    }
+    setNeedsUploadReselect(false);
+    setUploadImages(prev => (replace ? newItems : [...prev, ...newItems]));
+    if (replace) {
+      setActiveIndex(newItems.length > 0 ? newItems.length - 1 : null);
+    } else if (activeIndex === null) {
+      setActiveIndex(uploadImages.length - 1 + newItems.length);
+    }
+    if (!preserveGrouping && uploadAllowedStatuses.has(jobStatus)) {
       setAutoUploadQueued(true);
     }
     void hydrateRawPreviews(newItems);
@@ -800,8 +815,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
   // Handle new files from input click
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    processFiles(e.target.files);
+    const isReselect = reselectUploadsRef.current;
+    reselectUploadsRef.current = false;
+    processFiles(e.target.files, isReselect ? { preserveGrouping: true, replace: true } : {});
     e.target.value = '';
+    if (pendingEnhanceRef.current && isReselect) {
+      pendingEnhanceRef.current = false;
+      setTimeout(() => {
+        void startEnhanceProcess();
+      }, 0);
+    }
   };
 
   // Drag and Drop handlers
@@ -819,6 +842,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     e.preventDefault();
     setIsDragging(false);
     processFiles(e.dataTransfer.files);
+  };
+
+  const requestReselectUploads = (autoResume: boolean) => {
+    pendingEnhanceRef.current = autoResume;
+    reselectUploadsRef.current = true;
+    setNeedsUploadReselect(false);
+    fileInputRef.current?.click();
   };
 
   const handleRetryMissing = async () => {
@@ -974,6 +1004,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     if (uploadImages.length > 0) return;
     if (!groupingComplete || pipelineItems.length === 0) return;
     pushNotice('error', 'Local files are no longer available. Please reselect the original RAW/JPG files to continue uploading.');
+    setNeedsUploadReselect(true);
     setJobStatus('input_resolved');
     setJob((prev) => (prev ? { ...prev, status: 'input_resolved' } : prev));
   }, [groupingComplete, jobStatus, pipelineItems.length, uploadImages.length]);
@@ -989,6 +1020,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
     if (uploadImages.length === 0) {
       pushNotice('error', 'No local files available. Please reselect the original RAW/JPG files to continue.');
+      setNeedsUploadReselect(true);
+      requestReselectUploads(true);
       return;
     }
     try {
@@ -1800,6 +1833,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const canDownload = (jobStatus === 'completed' || jobStatus === 'partial') && Boolean(zipUrl);
   const showReadyToEnhanceNotice = groupingComplete && jobStatus === 'input_resolved' && !processingActive;
   const showProcessingNotice = (processingActive || previewInProgress) && jobStatus !== 'uploading';
+  const showReselectNotice = needsUploadReselect || (groupingComplete && pipelineItems.length > 0 && uploadImages.length === 0);
   const runpodEtaMinutes = runpodQueue ? Math.ceil(runpodQueue.etaSeconds / 60) : null;
   const handleGallerySelect = (item: GalleryItem, index: number) => {
     setActiveIndex(index);
@@ -1877,6 +1911,17 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             {showReadyToEnhanceNotice && (
               <div className="mt-2 text-[10px] text-gray-400 uppercase tracking-widest">
                 Grouping complete. Review groups and deselect any mis-grouped shots, then click Enhance to start processing.
+              </div>
+            )}
+            {showReselectNotice && (
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-amber-200 uppercase tracking-widest">
+                <span>Original files missing. Reselect RAW/JPG files to continue uploading.</span>
+                <button
+                  onClick={() => requestReselectUploads(false)}
+                  className="px-3 py-1 rounded-full border border-amber-400/40 bg-amber-500/10 text-amber-200 text-[10px] font-bold uppercase tracking-widest"
+                >
+                  Reselect files
+                </button>
               </div>
             )}
           </div>
