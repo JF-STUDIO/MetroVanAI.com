@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { authenticate, authenticateSse } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
 import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl, deletePrefix, createMultipartUpload, getPresignedUploadPartUrl, completeMultipartUpload, abortMultipartUpload } from '../services/r2.js';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
 import { v4 as uuidv4 } from 'uuid';
@@ -2859,6 +2859,7 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
             manifestKey,
             executionName,
             groupsCount: Array.isArray(groups) ? groups.length : 0,
+            uploadsCount: Array.isArray(uploads) ? uploads.length : 0,
             stale: isStale,
             mode
         });
@@ -3037,7 +3038,29 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
         let totalGroups = 0;
         let pipelineGroupIds: string[] = [];
         const uploadRows = Array.isArray(uploads) ? uploads : [];
-        if ((!Array.isArray(groups) || groups.length === 0) && uploadRows.length) {
+        let resolvedUploads = uploadRows;
+        if ((!Array.isArray(groups) || groups.length === 0) && resolvedUploads.length === 0) {
+            const prefix = `jobs/${jobId}/HDR_FINAL/`;
+            try {
+                const listResp = await r2Client.send(
+                    new ListObjectsV2Command({ Bucket: HDR_BUCKET, Prefix: prefix })
+                );
+                const contents = (listResp.Contents || []).filter((obj) => obj.Key);
+                if (contents.length > 0) {
+                    resolvedUploads = contents.map((obj) => ({
+                        key: obj.Key,
+                        name: path.basename(String(obj.Key))
+                    }));
+                    console.log('[HDR] fallback uploads from R2', {
+                        jobId,
+                        count: resolvedUploads.length
+                    });
+                }
+            } catch (err) {
+                console.warn('[HDR] list HDR outputs failed', (err as Error).message);
+            }
+        }
+        if ((!Array.isArray(groups) || groups.length === 0) && resolvedUploads.length) {
             const { data: existingGroups } = await (supabaseAdmin.from('job_groups') as any)
                 .select('id, group_index, group_type, output_filename')
                 .eq('job_id', jobId);
@@ -3048,7 +3071,7 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
                 (existingGroups || []).map((row: any) => [row.group_index, row.output_filename])
             );
 
-            const upserts = uploadRows.map((upload: any, idx: number) => {
+            const upserts = resolvedUploads.map((upload: any, idx: number) => {
                 const key = upload?.key || upload?.r2_key || upload?.hdr_key || null;
                 const filename = upload?.name || (key ? path.basename(String(key)) : null);
                 let groupIndex: number | null = null;
@@ -3154,7 +3177,7 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
         await bumpRunpodPending(-1);
 
         try {
-            emitJobEvent(jobId, { type: 'grouped', groups, uploads });
+            emitJobEvent(jobId, { type: 'grouped', groups, uploads: resolvedUploads });
         } catch (e) {
             console.warn('emit grouped after runpod callback failed', (e as Error).message);
         }
