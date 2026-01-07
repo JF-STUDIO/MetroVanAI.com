@@ -969,6 +969,15 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     void startBatchProcess();
   }, [autoUploadQueued, uploadImages.length, job?.id, jobStatus]);
 
+  useEffect(() => {
+    if (jobStatus !== 'uploading') return;
+    if (uploadImages.length > 0) return;
+    if (!groupingComplete || pipelineItems.length === 0) return;
+    pushNotice('error', 'Local files are no longer available. Please reselect the original RAW/JPG files to continue uploading.');
+    setJobStatus('input_resolved');
+    setJob((prev) => (prev ? { ...prev, status: 'input_resolved' } : prev));
+  }, [groupingComplete, jobStatus, pipelineItems.length, uploadImages.length]);
+
   const startEnhanceProcess = async () => {
     if (!job || !activeTool) {
       pushNotice('error', 'Missing job details. Select a project first.');
@@ -979,7 +988,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       return;
     }
     if (uploadImages.length === 0) {
-      pushNotice('error', 'No files available for upload.');
+      pushNotice('error', 'No local files available. Please reselect the original RAW/JPG files to continue.');
       return;
     }
     try {
@@ -1025,31 +1034,66 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setUploadComplete(false);
 
       const activeGroups = currentItems.filter((item) => !skipIds.includes(item.id));
-      const fileMap = new Map(uploadImages.map((item) => [item.id, item]));
+      type UploadTask = { serverId: string; item: ImageItem };
+      const fileMapById = new Map(uploadImages.map((item) => [item.id, item]));
+      const fileMapByName = new Map<string, ImageItem[]>();
+      for (const item of uploadImages) {
+        const nameKey = item.file.name.trim().toLowerCase();
+        const existing = fileMapByName.get(nameKey);
+        if (existing) {
+          existing.push(item);
+        } else {
+          fileMapByName.set(nameKey, [item]);
+        }
+      }
+      const usedLocalIds = new Set<string>();
+      const resolveUploadTask = (frame: { id?: string; filename?: string; name?: string }, groupIndex?: number): UploadTask => {
+        const frameId = frame?.id;
+        if (!frameId) {
+          throw new Error(`Group ${groupIndex ?? '?'} has missing file id. Please regroup and try again.`);
+        }
+        const byId = fileMapById.get(frameId);
+        if (byId) {
+          return { serverId: frameId, item: byId };
+        }
+        const frameName = (frame?.filename || frame?.name || '').trim();
+        if (frameName) {
+          const matches = fileMapByName.get(frameName.toLowerCase()) || [];
+          if (matches.length > 1) {
+            throw new Error(`Duplicate local files named "${frameName}". Please remove duplicates and try again.`);
+          }
+          if (matches.length === 1) {
+            const item = matches[0];
+            if (usedLocalIds.has(item.id)) {
+              throw new Error(`Local file "${frameName}" is matched multiple times. Please regroup and try again.`);
+            }
+            usedLocalIds.add(item.id);
+            return { serverId: frameId, item };
+          }
+        }
+        throw new Error(`Missing local file for group ${groupIndex ?? '?'}. Please reselect uploads.`);
+      };
       const groupQueue = [...activeGroups].sort((a, b) => (a.group_index || 0) - (b.group_index || 0));
 
-      const allFiles = new Map<string, ImageItem>();
+      const allTasks = new Map<string, UploadTask>();
       for (const group of groupQueue) {
-        const fileIds = group.frames?.map((frame) => frame.id).filter(Boolean) || [];
-        if (fileIds.length === 0) {
+        const frames = group.frames?.filter((frame) => frame?.id) || [];
+        if (frames.length === 0) {
           throw new Error(`Group ${group.group_index} has no files. Please regroup and try again.`);
         }
-        for (const fileId of fileIds) {
-          const fileItem = fileMap.get(fileId);
-          if (!fileItem) {
-            throw new Error(`Missing local file for group ${group.group_index}. Please reselect uploads.`);
-          }
-          allFiles.set(fileId, fileItem);
+        for (const frame of frames) {
+          const task = resolveUploadTask(frame, group.group_index);
+          allTasks.set(task.serverId, task);
         }
       }
 
-      const simpleUploads = Array.from(allFiles.values())
-        .filter((item) => item.file.size <= multipartThreshold)
-        .map((item) => ({
-          id: item.id,
-          name: item.file.name,
-          type: item.file.type || 'application/octet-stream',
-          size: item.file.size
+      const simpleUploads = Array.from(allTasks.values())
+        .filter((task) => task.item.file.size <= multipartThreshold)
+        .map((task) => ({
+          id: task.serverId,
+          name: task.item.file.name,
+          type: task.item.file.type || 'application/octet-stream',
+          size: task.item.file.size
         }));
 
       const presignedList = simpleUploads.length > 0
@@ -1077,8 +1121,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         await Promise.all(workers);
       };
 
-      const uploadSimple = async (item: ImageItem) => {
-        const target = presignMap.get(item.id);
+      const uploadSimple = async (task: UploadTask) => {
+        const { item, serverId } = task;
+        const target = presignMap.get(serverId);
         if (!target?.putUrl) {
           throw new Error(`Missing presigned URL for ${item.file.name}`);
         }
@@ -1097,10 +1142,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         updateUploadItem(item.id, { status: 'done', progress: 100, statusText: 'Uploaded' });
       };
 
-      const uploadMultipart = async (item: ImageItem) => {
+      const uploadMultipart = async (task: UploadTask) => {
+        const { item, serverId } = task;
         updateUploadItem(item.id, { status: 'uploading', progress: 0, statusText: 'Uploading' });
         const init = await jobService.createMultipartUpload(job.id, {
-          id: item.id,
+          id: serverId,
           name: item.file.name,
           type: item.file.type || 'application/octet-stream',
           size: item.file.size
@@ -1109,7 +1155,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         if (!uploadId || !key || !Array.isArray(partUrls) || !partSize) {
           throw new Error(`Multipart init failed for ${item.file.name}`);
         }
-        r2KeyMap.set(item.id, key);
+        r2KeyMap.set(serverId, key);
         let uploadedBytes = 0;
         const parts: { partNumber: number; etag: string }[] = [];
         await runWithConcurrency(partUrls, multipartParallel, async (part: any) => {
@@ -1134,25 +1180,35 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       };
 
       for (const group of groupQueue) {
-        const fileIds = group.frames?.map((frame) => frame.id).filter(Boolean) || [];
-        const fileItems = fileIds.map((id) => fileMap.get(id)).filter(Boolean) as ImageItem[];
+        const frames = group.frames?.filter((frame) => frame?.id) || [];
+        const fileIds = frames.map((frame) => frame.id).filter(Boolean) as string[];
+        if (fileIds.length === 0) {
+          throw new Error(`Group ${group.group_index} has no files. Please regroup and try again.`);
+        }
+        const tasks = frames.map((frame) => resolveUploadTask(frame, group.group_index));
         setPipelineItems((prev) => prev.map((item) => (
           item.id === group.id ? { ...item, status: 'uploading' } : item
         )));
-        await runWithConcurrency(fileItems, uploadParallel, async (item) => {
+        await runWithConcurrency(tasks, uploadParallel, async (task) => {
           try {
-            if (item.file.size > multipartThreshold) {
-              await uploadMultipart(item);
+            if (task.item.file.size > multipartThreshold) {
+              await uploadMultipart(task);
             } else {
-              await uploadSimple(item);
+              await uploadSimple(task);
             }
           } catch (err) {
-            markUploadFailed(item.id, err instanceof Error ? err.message : 'Upload failed');
+            markUploadFailed(task.item.id, err instanceof Error ? err.message : 'Upload failed');
             throw err;
           }
         });
         await jobService.fileUploaded(job.id, {
-          files: fileIds.map((id) => ({ id, r2_key: r2KeyMap.get(id) }))
+          files: fileIds.map((id) => {
+            const r2Key = r2KeyMap.get(id);
+            if (!r2Key) {
+              throw new Error(`Missing uploaded R2 key for group ${group.group_index}.`);
+            }
+            return { id, r2_key: r2Key };
+          })
         });
         setPipelineItems((prev) => prev.map((item) => (
           item.id === group.id ? { ...item, status: 'queued_hdr' } : item
