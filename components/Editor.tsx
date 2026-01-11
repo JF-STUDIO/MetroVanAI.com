@@ -177,6 +177,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const multipartParallel = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL || 6), 2, 12);
   const uploadRetryAttempts = Math.max(3, Number(import.meta.env.VITE_UPLOAD_RETRY || 3));
   const uploadRetryBaseMs = Math.max(300, Number(import.meta.env.VITE_UPLOAD_RETRY_BASE_MS || 800));
+  const uploadTimeoutMs = Math.max(30000, Number(import.meta.env.VITE_UPLOAD_TIMEOUT_MS || 120000));
+  const presignBatchSize = clamp(Number(import.meta.env.VITE_PRESIGN_BATCH || 80), 10, 200);
+  const uploadParallelMin = Math.max(1, Math.floor(uploadParallel / 4));
+  const multipartParallelMin = Math.max(1, Math.floor(multipartParallel / 2));
   const rawPreviewParallel = clamp(Number(import.meta.env.VITE_RAW_PREVIEW_PARALLEL || 3), 1, 6);
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const withUploadRetry = async <T,>(fn: () => Promise<T>, label: string) => {
@@ -188,11 +192,106 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         lastError = err;
         if (attempt >= uploadRetryAttempts) break;
         const delay = uploadRetryBaseMs * Math.pow(2, attempt - 1);
+        const jitter = Math.random() * uploadRetryBaseMs;
         console.warn(`Upload retry ${attempt}/${uploadRetryAttempts} (${label})`);
-        await sleep(delay);
+        await sleep(delay + jitter);
       }
     }
     throw lastError instanceof Error ? lastError : new Error(`Upload failed (${label})`);
+  };
+  const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMs: number) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+  const createAdaptiveRunner = (options: {
+    min: number;
+    max: number;
+    initial: number;
+    label: string;
+    successWindow?: number;
+    cooldownMs?: number;
+    decreaseFactor?: number;
+    increaseStep?: number;
+  }) => {
+    let limit = clamp(options.initial, options.min, options.max);
+    let successCount = 0;
+    let lastAdjust = Date.now();
+    const successWindow = options.successWindow ?? 8;
+    const cooldownMs = options.cooldownMs ?? 2000;
+    const decreaseFactor = options.decreaseFactor ?? 0.7;
+    const increaseStep = options.increaseStep ?? 1;
+
+    const record = (ok: boolean) => {
+      const now = Date.now();
+      if (!ok) {
+        successCount = 0;
+        const next = Math.max(options.min, Math.floor(limit * decreaseFactor));
+        if (next < limit) {
+          limit = next;
+          lastAdjust = now;
+          console.info(`[upload] ${options.label} concurrency down -> ${limit}`);
+        }
+        return;
+      }
+      successCount += 1;
+      if (successCount >= successWindow && limit < options.max && now - lastAdjust >= cooldownMs) {
+        limit = Math.min(options.max, limit + increaseStep);
+        successCount = 0;
+        lastAdjust = now;
+        console.info(`[upload] ${options.label} concurrency up -> ${limit}`);
+      }
+    };
+
+    const run = async <T,>(items: T[], handler: (item: T) => Promise<void>) => {
+      const queue = [...items];
+      let inFlight = 0;
+      let aborted = false;
+
+      return new Promise<void>((resolve, reject) => {
+        const launch = () => {
+          while (!aborted && inFlight < limit && queue.length) {
+            const next = queue.shift();
+            if (!next) return;
+            inFlight += 1;
+            Promise.resolve(handler(next))
+              .then(() => record(true))
+              .catch((err) => {
+                record(false);
+                if (!aborted) {
+                  aborted = true;
+                  reject(err);
+                }
+              })
+              .finally(() => {
+                inFlight -= 1;
+                if (!aborted) {
+                  if (queue.length === 0 && inFlight === 0) {
+                    resolve();
+                    return;
+                  }
+                  launch();
+                }
+              });
+          }
+          if (!aborted && queue.length === 0 && inFlight === 0) {
+            resolve();
+          }
+        };
+
+        if (queue.length === 0) {
+          resolve();
+          return;
+        }
+        launch();
+      });
+    };
+
+    return { run, getLimit: () => limit };
   };
   const createRawPreviewUrl = async (file: File) => {
     try {
@@ -1174,7 +1273,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setUploadComplete(false);
 
       const activeGroups = currentItems.filter((item) => !skipIds.includes(item.id));
-      type UploadTask = { serverId: string; item: ImageItem };
+      type UploadTask = { serverId: string; item: ImageItem; groupId?: string; groupIndex?: number | null };
       const fileMapById = new Map(uploadImages.map((item) => [item.id, item]));
       const fileMapByName = new Map<string, ImageItem[]>();
       for (const item of uploadImages) {
@@ -1215,19 +1314,41 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       };
       const groupQueue = [...activeGroups].sort((a, b) => (a.group_index || 0) - (b.group_index || 0));
 
-      const allTasks = new Map<string, UploadTask>();
+      const groupStates = new Map<string, {
+        group: PipelineGroupItem;
+        fileIds: string[];
+        remaining: number;
+        started: boolean;
+        finalized: boolean;
+      }>();
+      const taskMap = new Map<string, UploadTask>();
       for (const group of groupQueue) {
         const frames = group.frames?.filter((frame) => frame?.id) || [];
         if (frames.length === 0) {
           throw new Error(`Group ${group.group_index} has no files. Please regroup and try again.`);
         }
+        const fileIds = frames.map((frame) => frame.id).filter(Boolean) as string[];
+        if (fileIds.length === 0) {
+          throw new Error(`Group ${group.group_index} has no files. Please regroup and try again.`);
+        }
+        groupStates.set(group.id, {
+          group,
+          fileIds,
+          remaining: fileIds.length,
+          started: false,
+          finalized: false
+        });
         for (const frame of frames) {
           const task = resolveUploadTask(frame, group.group_index);
-          allTasks.set(task.serverId, task);
+          if (taskMap.has(task.serverId)) {
+            throw new Error(`File "${task.item.file.name}" is matched to multiple groups. Please regroup and try again.`);
+          }
+          taskMap.set(task.serverId, { ...task, groupId: group.id, groupIndex: group.group_index ?? null });
         }
       }
 
-      const simpleUploads = Array.from(allTasks.values())
+      const allTasks = Array.from(taskMap.values());
+      const simpleUploads = allTasks
         .filter((task) => task.item.file.size <= multipartThreshold)
         .map((task) => ({
           id: task.serverId,
@@ -1236,30 +1357,34 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           size: task.item.file.size
         }));
 
-      const presignedList = simpleUploads.length > 0
-        ? await jobService.getPresignedRawUploadUrls(job.id, simpleUploads)
-        : [];
-      const presignMap = new Map<string, { putUrl: string; r2Key: string }>(
-        Array.isArray(presignedList)
-          ? presignedList.filter((row) => row?.fileId && row?.putUrl).map((row) => [row.fileId, { putUrl: row.putUrl, r2Key: row.r2Key }])
-          : []
-      );
+      const presignMap = new Map<string, { putUrl: string; r2Key: string }>();
+      if (simpleUploads.length > 0) {
+        for (let i = 0; i < simpleUploads.length; i += presignBatchSize) {
+          const batch = simpleUploads.slice(i, i + presignBatchSize);
+          const batchResult = await withUploadRetry(
+            () => jobService.getPresignedRawUploadUrls(job.id, batch),
+            `presign:${Math.floor(i / presignBatchSize) + 1}`
+          );
+          if (Array.isArray(batchResult)) {
+            batchResult
+              .filter((row) => row?.fileId && row?.putUrl)
+              .forEach((row) => {
+                presignMap.set(row.fileId, { putUrl: row.putUrl, r2Key: row.r2Key });
+              });
+          }
+        }
+      }
       const r2KeyMap = new Map<string, string>();
       for (const [fileId, entry] of presignMap.entries()) {
         if (entry?.r2Key) r2KeyMap.set(fileId, entry.r2Key);
       }
-
-      const runWithConcurrency = async <T,>(items: T[], limit: number, handler: (item: T) => Promise<void>) => {
-        const queue = [...items];
-        const workers = Array.from({ length: Math.max(1, limit) }, async () => {
-          while (queue.length) {
-            const next = queue.shift();
-            if (!next) return;
-            await handler(next);
-          }
-        });
-        await Promise.all(workers);
-      };
+      const uploadRunner = createAdaptiveRunner({
+        min: uploadParallelMin,
+        max: uploadParallel,
+        initial: uploadParallel,
+        label: 'files',
+        successWindow: Math.max(6, uploadParallelMin * 2)
+      });
 
       const uploadSimple = async (task: UploadTask) => {
         const { item, serverId } = task;
@@ -1271,6 +1396,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         await withUploadRetry(() => (
           axios.put(target.putUrl, item.file, {
             headers: { 'Content-Type': item.file.type || 'application/octet-stream' },
+            timeout: uploadTimeoutMs,
             onUploadProgress: (evt) => {
               const total = evt.total || item.file.size;
               if (!total) return;
@@ -1285,75 +1411,111 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       const uploadMultipart = async (task: UploadTask) => {
         const { item, serverId } = task;
         updateUploadItem(item.id, { status: 'uploading', progress: 0, statusText: 'Uploading' });
-        const init = await jobService.createMultipartUpload(job.id, {
-          id: serverId,
-          name: item.file.name,
-          type: item.file.type || 'application/octet-stream',
-          size: item.file.size
-        });
+        const init = await withUploadRetry(() => (
+          jobService.createMultipartUpload(job.id, {
+            id: serverId,
+            name: item.file.name,
+            type: item.file.type || 'application/octet-stream',
+            size: item.file.size
+          })
+        ), `multipart-init:${item.file.name}`);
         const { uploadId, key, partSize, partUrls } = init || {};
         if (!uploadId || !key || !Array.isArray(partUrls) || !partSize) {
           throw new Error(`Multipart init failed for ${item.file.name}`);
         }
         r2KeyMap.set(serverId, key);
         let uploadedBytes = 0;
-        const parts: { partNumber: number; etag: string }[] = [];
-        await runWithConcurrency(partUrls, multipartParallel, async (part: any) => {
+        const partsMap = new Map<number, string>();
+        const partRunner = createAdaptiveRunner({
+          min: multipartParallelMin,
+          max: multipartParallel,
+          initial: multipartParallel,
+          label: `parts:${item.file.name}`,
+          successWindow: Math.max(4, multipartParallelMin * 2)
+        });
+        await partRunner.run(partUrls, async (part: any) => {
           const start = (part.partNumber - 1) * partSize;
           const end = Math.min(start + partSize, item.file.size);
           const blob = item.file.slice(start, end);
           await withUploadRetry(async () => {
-            const resp = await fetch(part.url, { method: 'PUT', body: blob });
+            const resp = await fetchWithTimeout(part.url, { method: 'PUT', body: blob }, uploadTimeoutMs);
             if (!resp.ok) {
               throw new Error(`Part ${part.partNumber} failed for ${item.file.name}`);
             }
             const etag = (resp.headers.get('ETag') || '').replace(/"/g, '');
-            parts.push({ partNumber: part.partNumber, etag });
+            if (!etag) {
+              throw new Error(`Missing ETag for part ${part.partNumber} (${item.file.name})`);
+            }
+            partsMap.set(part.partNumber, etag);
             uploadedBytes += (end - start);
             const percent = Math.min(99, Math.round((uploadedBytes / item.file.size) * 100));
             updateUploadItem(item.id, { progress: percent });
           }, `part:${part.partNumber}:${item.file.name}`);
         });
-        parts.sort((a, b) => a.partNumber - b.partNumber);
-        await jobService.completeMultipartUpload(job.id, { uploadId, key, parts });
+        const parts = Array.from(partsMap.entries())
+          .map(([partNumber, etag]) => ({ partNumber, etag }))
+          .sort((a, b) => a.partNumber - b.partNumber);
+        await withUploadRetry(
+          () => jobService.completeMultipartUpload(job.id, { uploadId, key, parts }),
+          `multipart-complete:${item.file.name}`
+        );
         updateUploadItem(item.id, { status: 'done', progress: 100, statusText: 'Uploaded' });
       };
 
-      for (const group of groupQueue) {
-        const frames = group.frames?.filter((frame) => frame?.id) || [];
-        const fileIds = frames.map((frame) => frame.id).filter(Boolean) as string[];
-        if (fileIds.length === 0) {
-          throw new Error(`Group ${group.group_index} has no files. Please regroup and try again.`);
-        }
-        const tasks = frames.map((frame) => resolveUploadTask(frame, group.group_index));
-        setPipelineItems((prev) => prev.map((item) => (
-          item.id === group.id ? { ...item, status: 'uploading' } : item
-        )));
-        await runWithConcurrency(tasks, uploadParallel, async (task) => {
-          try {
-            if (task.item.file.size > multipartThreshold) {
-              await uploadMultipart(task);
-            } else {
-              await uploadSimple(task);
-            }
-          } catch (err) {
-            markUploadFailed(task.item.id, err instanceof Error ? err.message : 'Upload failed');
-            throw err;
-          }
-        });
-        await jobService.fileUploaded(job.id, {
-          files: fileIds.map((id) => {
-            const r2Key = r2KeyMap.get(id);
-            if (!r2Key) {
-              throw new Error(`Missing uploaded R2 key for group ${group.group_index}.`);
-            }
-            return { id, r2_key: r2Key };
+      const finalizeGroup = async (state: {
+        group: PipelineGroupItem;
+        fileIds: string[];
+        remaining: number;
+        started: boolean;
+        finalized: boolean;
+      }) => {
+        if (state.finalized) return;
+        state.finalized = true;
+        await withUploadRetry(() => (
+          jobService.fileUploaded(job.id, {
+            files: state.fileIds.map((id) => {
+              const r2Key = r2KeyMap.get(id);
+              if (!r2Key) {
+                throw new Error(`Missing uploaded R2 key for group ${state.group.group_index ?? '?'}.`);
+              }
+              return { id, r2_key: r2Key };
+            })
           })
-        });
+        ), `file_uploaded:${state.group.group_index ?? state.group.id}`);
         setPipelineItems((prev) => prev.map((item) => (
-          item.id === group.id ? { ...item, status: 'queued_hdr' } : item
+          item.id === state.group.id ? { ...item, status: 'queued_hdr' } : item
         )));
-      }
+      };
+
+      await uploadRunner.run(allTasks, async (task) => {
+        if (!task.groupId) {
+          throw new Error(`Missing group assignment for upload ${task.serverId}.`);
+        }
+        const state = groupStates.get(task.groupId);
+        if (!state) {
+          throw new Error(`Missing group for upload ${task.serverId}.`);
+        }
+        if (!state.started) {
+          state.started = true;
+          setPipelineItems((prev) => prev.map((item) => (
+            item.id === state.group.id ? { ...item, status: 'uploading' } : item
+          )));
+        }
+        try {
+          if (task.item.file.size > multipartThreshold) {
+            await uploadMultipart(task);
+          } else {
+            await uploadSimple(task);
+          }
+        } catch (err) {
+          markUploadFailed(task.item.id, err instanceof Error ? err.message : 'Upload failed');
+          throw err;
+        }
+        state.remaining -= 1;
+        if (state.remaining === 0) {
+          await finalizeGroup(state);
+        }
+      });
 
       if (!previewRequestedRef.current) {
         previewRequestedRef.current = true;

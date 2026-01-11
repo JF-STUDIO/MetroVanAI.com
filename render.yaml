@@ -42,6 +42,8 @@ services:
         sync: false
       - key: MULTIPART_CHUNK_BYTES
         value: "33554432"
+      - key: R2_PRESIGN_TTL_SECONDS
+        value: "21600"
       - key: RUNNINGHUB_API_KEY
         sync: false
       - key: CORS_ORIGIN

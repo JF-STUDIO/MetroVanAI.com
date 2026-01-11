@@ -36,11 +36,17 @@ export const r2Client = new S3Client({
   responseChecksumValidation: 'WHEN_REQUIRED',
 });
 
+const resolvePresignTtlSeconds = () => {
+  const rawValue = Number(process.env.R2_PRESIGN_TTL_SECONDS || process.env.R2_PRESIGN_TTL || 3600);
+  if (!Number.isFinite(rawValue)) return 3600;
+  return Math.min(86400, Math.max(900, Math.floor(rawValue)));
+};
+
 export const getPresignedPutUrl = async (
   bucket: string,
   key: string,
   contentType: string,
-  expiresIn = 3600
+  expiresIn = resolvePresignTtlSeconds()
 ) => {
   const command = new PutObjectCommand({
     Bucket: bucket,
@@ -65,7 +71,7 @@ export const getPresignedUploadPartUrl = async (
   key: string,
   uploadId: string,
   partNumber: number,
-  expiresIn = 3600
+  expiresIn = resolvePresignTtlSeconds()
 ) => {
   const command = new UploadPartCommand({
     Bucket: bucket,
