@@ -18,6 +18,9 @@ import { attachJobStream, emitJobEvent, sendInitialJobEvents } from '../services
 import { GoogleAuth } from 'google-auth-library';
 
 const router = Router();
+const emitJobEventAsync = (jobId: string, payload: any) => {
+    void emitJobEvent(jobId, payload).catch(() => undefined);
+};
 
 // Create a new Redis connection for the queue.
 const jobQueue = new Queue('job-queue', { connection: createRedis() });
@@ -124,14 +127,18 @@ const getHdrEstimateSeconds = async () => {
 };
 
 const syncLegacyCredits = async (userId: string) => {
-    const { data: balance } = await (supabaseAdmin.from('credit_balances') as any)
-        .select('available_credits, reserved_credits')
-        .eq('user_id', userId)
-        .maybeSingle();
-    const { data: profile } = await (supabaseAdmin.from('profiles') as any)
-        .select('points')
-        .eq('id', userId)
-        .maybeSingle();
+    const [balanceResp, profileResp] = await Promise.all([
+        (supabaseAdmin.from('credit_balances') as any)
+            .select('available_credits, reserved_credits')
+            .eq('user_id', userId)
+            .maybeSingle(),
+        (supabaseAdmin.from('profiles') as any)
+            .select('points')
+            .eq('id', userId)
+            .maybeSingle()
+    ]);
+    const { data: balance } = balanceResp;
+    const { data: profile } = profileResp;
 
     const legacyPoints = Number(profile?.points ?? 0);
     const available = Number(balance?.available_credits ?? 0);
@@ -1419,19 +1426,25 @@ router.post('/jobs/:jobId/presign-raw', authenticate, async (req: AuthRequest, r
         }
     }
 
-    const { data: job } = await (supabaseAdmin
-        .from('jobs') as any).select('id').eq('id', jobId).eq('user_id', userId).single();
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-
     const fileIds = files.map((file) => file.id).filter((id): id is string => typeof id === 'string');
 
     let results: { fileId?: string; fileName: string; r2Key: string; putUrl: string }[] = [];
 
     if (fileIds.length > 0) {
-        const { data: fileRows, error: fileError } = await (supabaseAdmin.from('job_files') as any)
-            .select('id, r2_bucket, r2_key, filename')
-            .eq('job_id', jobId)
-            .in('id', fileIds);
+        const [jobResp, fileResp] = await Promise.all([
+            (supabaseAdmin.from('jobs') as any)
+                .select('id')
+                .eq('id', jobId)
+                .eq('user_id', userId)
+                .single(),
+            (supabaseAdmin.from('job_files') as any)
+                .select('id, r2_bucket, r2_key, filename')
+                .eq('job_id', jobId)
+                .in('id', fileIds),
+        ]);
+        const { data: job } = jobResp;
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+        const { data: fileRows, error: fileError } = fileResp;
         if (fileError) return res.status(500).json({ error: fileError.message });
         if (!fileRows || fileRows.length !== fileIds.length) {
             return res.status(400).json({ error: 'file ids not registered' });
@@ -1449,6 +1462,13 @@ router.post('/jobs/:jobId/presign-raw', authenticate, async (req: AuthRequest, r
             return { fileId: row.id, fileName: row.filename || file.name, r2Key: row.r2_key, putUrl };
         }));
     } else {
+        const { data: job } = await (supabaseAdmin.from('jobs') as any)
+            .select('id')
+            .eq('id', jobId)
+            .eq('user_id', userId)
+            .single();
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
         results = await Promise.all(files.map(async (file) => {
             const assetId = uuidv4();
             const ext = file.name.split('.').pop() || '';
@@ -1495,18 +1515,19 @@ router.post('/jobs/:jobId/presign-raw-multipart', authenticate, async (req: Auth
     }
     const contentType = file.type || 'application/octet-stream';
     const minPart = 5 * 1024 * 1024;
-    const targetPart = Number(process.env.MULTIPART_CHUNK_BYTES || 8 * 1024 * 1024);
+    const targetPart = Number(process.env.MULTIPART_CHUNK_BYTES || 16 * 1024 * 1024);
     const partSize = Math.max(minPart, targetPart);
     const partCount = Math.ceil(file.size / partSize);
 
     const { uploadId } = await createMultipartUpload(bucket, key, contentType);
     if (!uploadId) return res.status(500).json({ error: 'Failed to create multipart upload' });
 
-    const partUrls: { partNumber: number; url: string }[] = [];
-    for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
-        const url = await getPresignedUploadPartUrl(bucket, key, uploadId, partNumber);
-        partUrls.push({ partNumber, url });
-    }
+    const partUrls = await Promise.all(
+        Array.from({ length: partCount }, (_, idx) => idx + 1).map(async (partNumber) => {
+            const url = await getPresignedUploadPartUrl(bucket, key, uploadId, partNumber);
+            return { partNumber, url };
+        })
+    );
 
     res.json({ uploadId, key, bucket, partSize, partUrls });
 });
@@ -1672,19 +1693,27 @@ router.post('/jobs/:jobId/groups', authenticate, async (req: AuthRequest, res: R
         return res.status(400).json({ error: 'invalid grouping payload' });
     }
 
-    await (supabaseAdmin.from('job_groups') as any).delete().eq('job_id', jobId);
-    await (supabaseAdmin.from('job_files') as any).delete().eq('job_id', jobId);
+    await Promise.all([
+        (supabaseAdmin.from('job_groups') as any)
+            .delete({ returning: 'minimal' })
+            .eq('job_id', jobId),
+        (supabaseAdmin.from('job_files') as any)
+            .delete({ returning: 'minimal' })
+            .eq('job_id', jobId),
+    ]);
 
-    const { error: insertGroupError } = await (supabaseAdmin.from('job_groups') as any).insert(groupRows);
+    const { error: insertGroupError } = await (supabaseAdmin.from('job_groups') as any)
+        .insert(groupRows, { returning: 'minimal' });
     if (insertGroupError) return res.status(500).json({ error: insertGroupError.message });
 
-    const { error: insertFileError } = await (supabaseAdmin.from('job_files') as any).insert(fileRows);
+    const { error: insertFileError } = await (supabaseAdmin.from('job_files') as any)
+        .insert(fileRows, { returning: 'minimal' });
     if (insertFileError) return res.status(500).json({ error: insertFileError.message });
 
     if (representativeMap.size > 0) {
         const updates = Array.from(representativeMap.entries()).map(([groupId, representativeId]) => (
             (supabaseAdmin.from('job_groups') as any)
-                .update({ representative_file_id: representativeId })
+                .update({ representative_file_id: representativeId }, { returning: 'minimal' })
                 .eq('id', groupId)
                 .eq('job_id', jobId)
         ));
@@ -1696,7 +1725,7 @@ router.post('/jobs/:jobId/groups', authenticate, async (req: AuthRequest, res: R
     }
 
     await (supabaseAdmin.from('jobs') as any)
-        .update({ status: 'input_resolved', estimated_units: groupRows.length, progress: 0 })
+        .update({ status: 'input_resolved', estimated_units: groupRows.length, progress: 0 }, { returning: 'minimal' })
         .eq('id', jobId)
         .eq('user_id', userId);
 
@@ -1722,10 +1751,6 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     if (!payloadFiles.length) return res.status(400).json({ error: 'files required' });
 
-    const { data: job } = await (supabaseAdmin
-        .from('jobs') as any).select('id, status').eq('id', jobId).eq('user_id', userId).single();
-    if (!job) return res.status(404).json({ error: 'Job not found' });
-
     const fileIds = payloadFiles.map((file: any) => file?.id).filter((id: any) => typeof id === 'string');
     const fileKeys = payloadFiles.map((file: any) => file?.r2_key || file?.r2Key).filter((key: any) => typeof key === 'string');
     if (fileIds.length === 0 && fileKeys.length === 0) {
@@ -1735,29 +1760,34 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
     let fileQuery = (supabaseAdmin.from('job_files') as any)
         .select('id, group_id, upload_status')
         .eq('job_id', jobId);
-    if (fileIds.length) fileQuery = fileQuery.in('id', fileIds);
-    if (!fileIds.length && fileKeys.length) fileQuery = fileQuery.in('r2_key', fileKeys);
+    if (fileIds.length) {
+        fileQuery = fileQuery.in('id', fileIds);
+    } else if (fileKeys.length) {
+        fileQuery = fileQuery.in('r2_key', fileKeys);
+    }
 
-    const { data: fileRows, error: fileError } = await fileQuery;
+    const [jobResp, fileResp] = await Promise.all([
+        (supabaseAdmin
+            .from('jobs') as any)
+            .select('id, status')
+            .eq('id', jobId)
+            .eq('user_id', userId)
+            .single(),
+        fileQuery,
+    ]);
+    const { data: job } = jobResp;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    const { data: fileRows, error: fileError } = fileResp as any;
     if (fileError) return res.status(500).json({ error: fileError.message });
 
     const rowMap = new Map<string, any>();
     (fileRows || []).forEach((row: any) => rowMap.set(row.id, row));
 
-    if (fileKeys.length > 0) {
-        const { data: keyRows, error: keyError } = await (supabaseAdmin.from('job_files') as any)
-            .select('id, group_id, upload_status')
-            .eq('job_id', jobId)
-            .in('r2_key', fileKeys);
-        if (keyError) return res.status(500).json({ error: keyError.message });
-        (keyRows || []).forEach((row: any) => rowMap.set(row.id, row));
-    }
-
     if (rowMap.size === 0) return res.status(404).json({ error: 'files not found' });
 
     const idsToUpdate = Array.from(rowMap.keys());
     const { error: updateError } = await (supabaseAdmin.from('job_files') as any)
-        .update({ upload_status: 'uploaded', uploaded_at: new Date().toISOString() })
+        .update({ upload_status: 'uploaded', uploaded_at: new Date().toISOString() }, { returning: 'minimal' })
         .in('id', idsToUpdate);
     if (updateError) return res.status(500).json({ error: updateError.message });
 
@@ -1797,7 +1827,7 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
         if (nextStatus === 'queued_hdr' && isQueueState) {
             if (group.uploaded_count !== uploaded) {
                 await (supabaseAdmin.from('job_groups') as any)
-                    .update({ uploaded_count: uploaded })
+                    .update({ uploaded_count: uploaded }, { returning: 'minimal' })
                     .eq('id', groupId);
             }
         } else {
@@ -1812,7 +1842,7 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
 
             if (!didUpdate && group.uploaded_count !== uploaded) {
                 await (supabaseAdmin.from('job_groups') as any)
-                    .update({ uploaded_count: uploaded })
+                    .update({ uploaded_count: uploaded }, { returning: 'minimal' })
                     .eq('id', groupId);
             }
 
@@ -1829,29 +1859,38 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
 
     if (job.status !== 'uploading') {
         await (supabaseAdmin.from('jobs') as any)
-            .update({ status: 'uploading' })
+            .update({ status: 'uploading' }, { returning: 'minimal' })
             .eq('id', jobId)
             .eq('user_id', userId);
     }
 
-    const triggered: any[] = [];
-    for (const group of readyGroups) {
-        try {
-            const result = await triggerCloudRunGroup(jobId, group.id);
-            triggered.push({ groupId: group.id, executionName: result.executionName, manifestKey: result.manifestKey });
-            const idx = Math.max(((group.index as number | undefined) ?? 1) - 1, 0);
-            emitJobEvent(jobId, { type: 'group_status_changed', index: idx, status: 'processing_hdr', group_id: group.id });
-        } catch (error) {
-            const message = (error as Error).message;
-            await (supabaseAdmin.from('job_groups') as any)
-                .update({ status: 'failed', last_error: message })
-                .eq('id', group.id);
-            const idx = Math.max(((group.index as number | undefined) ?? 1) - 1, 0);
-            emitJobEvent(jobId, { type: 'group_failed', index: idx, group_id: group.id, error: message });
-        }
-    }
+    res.json({ ok: true, uploaded: idsToUpdate.length, queued: readyGroups.length });
 
-    res.json({ ok: true, uploaded: idsToUpdate.length, triggered });
+    if (readyGroups.length > 0) {
+        void (async () => {
+            for (const group of readyGroups) {
+                try {
+                    const result = await triggerCloudRunGroup(jobId, group.id);
+                    const idx = Math.max(((group.index as number | undefined) ?? 1) - 1, 0);
+                    emitJobEvent(jobId, {
+                        type: 'group_status_changed',
+                        index: idx,
+                        status: 'processing_hdr',
+                        group_id: group.id,
+                        execution_name: result.executionName,
+                        manifest_key: result.manifestKey
+                    });
+                } catch (error) {
+                    const message = (error as Error).message;
+                    await (supabaseAdmin.from('job_groups') as any)
+                        .update({ status: 'failed', last_error: message }, { returning: 'minimal' })
+                        .eq('id', group.id);
+                    const idx = Math.max(((group.index as number | undefined) ?? 1) - 1, 0);
+                    emitJobEvent(jobId, { type: 'group_failed', index: idx, group_id: group.id, error: message });
+                }
+            }
+        })();
+    }
 });
 
 // New pipeline: analyze and group files
@@ -2194,7 +2233,7 @@ router.post('/jobs/:jobId/groups/:groupId/representative', authenticate, async (
 
     const { error: updateError } = await (supabaseAdmin
         .from('job_groups') as any)
-        .update({ representative_file_id: fileId })
+        .update({ representative_file_id: fileId }, { returning: 'minimal' })
         .eq('id', groupId)
         .eq('job_id', jobId);
     if (updateError) return res.status(500).json({ error: updateError.message });
@@ -2222,17 +2261,24 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
     if (jobError || !job) return res.status(404).json({ error: 'Job not found' });
     if (!job.estimated_units || job.estimated_units <= 0) return res.status(400).json({ error: 'Analyze job first' });
 
-    const { data: workflow, error: workflowError } = await (supabaseAdmin
-        .from('workflows') as any)
-        .select('credit_per_unit')
-        .eq('id', job.workflow_id)
-        .single();
+    const [workflowResp, groupResp] = await Promise.all([
+        (supabaseAdmin
+            .from('workflows') as any)
+            .select('credit_per_unit')
+            .eq('id', job.workflow_id)
+            .single(),
+        (supabaseAdmin.from('job_groups') as any)
+            .select('id, group_index, status')
+            .eq('job_id', jobId)
+            .order('group_index', { ascending: true }),
+        syncLegacyCredits(userId).catch((error) => {
+            console.warn('credit sync failed', (error as Error).message);
+        })
+    ]);
+    const { data: workflow, error: workflowError } = workflowResp;
     if (workflowError || !workflow) return res.status(400).json({ error: 'Workflow not found' });
 
-    const { data: groupRows, error: groupError } = await (supabaseAdmin.from('job_groups') as any)
-        .select('id, group_index, status')
-        .eq('job_id', jobId)
-        .order('group_index', { ascending: true });
+    const { data: groupRows, error: groupError } = groupResp;
     if (groupError) return res.status(500).json({ error: groupError.message });
 
     const normalizedGroups = groupRows || [];
@@ -2248,23 +2294,23 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
 
     if (validSkipIds.length > 0) {
         await (supabaseAdmin.from('job_groups') as any)
-            .update({ status: 'skipped', last_error: null })
+            .update({ status: 'skipped', last_error: null }, { returning: 'minimal' })
             .in('id', validSkipIds);
         for (const id of validSkipIds) {
             const match = normalizedGroups.find((group: any) => group.id === id);
             const idx = Math.max(((match?.group_index as number | undefined) ?? 1) - 1, 0);
-            await emitJobEvent(jobId, { type: 'group_status_changed', index: idx, status: 'skipped', group_id: id });
+            emitJobEventAsync(jobId, { type: 'group_status_changed', index: idx, status: 'skipped', group_id: id });
         }
     }
 
     if (resumeIds.length > 0) {
         await (supabaseAdmin.from('job_groups') as any)
-            .update({ status: 'queued', last_error: null })
+            .update({ status: 'queued', last_error: null }, { returning: 'minimal' })
             .in('id', resumeIds);
         for (const id of resumeIds) {
             const match = normalizedGroups.find((group: any) => group.id === id);
             const idx = Math.max(((match?.group_index as number | undefined) ?? 1) - 1, 0);
-            await emitJobEvent(jobId, { type: 'group_status_changed', index: idx, status: 'queued', group_id: id });
+            emitJobEventAsync(jobId, { type: 'group_status_changed', index: idx, status: 'queued', group_id: id });
         }
     }
 
@@ -2281,8 +2327,6 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
     if (activeGroupCount === 0) {
         return res.status(400).json({ error: 'No groups selected for processing' });
     }
-
-    await syncLegacyCredits(userId);
 
     const creditsToReserve = activeGroupCount * workflow.credit_per_unit;
     const idempotencyKey = `reserve:${jobId}`;
@@ -2313,7 +2357,7 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
             reserved_units: activeGroupCount,
             estimated_units: activeGroupCount,
             error_message: null
-        })
+        }, { returning: 'minimal' })
         .eq('id', jobId)
         .eq('user_id', userId);
 
@@ -2331,17 +2375,17 @@ router.post('/jobs/:jobId/start', authenticate, async (req: AuthRequest, res: Re
                 output_key: null,
                 last_error: null,
                 attempts: 0
-            })
+            }, { returning: 'minimal' })
             .in('id', resetGroupIds);
         for (const groupId of resetGroupIds) {
             const match = normalizedGroups.find((group: any) => group.id === groupId);
             const idx = Math.max(((match?.group_index as number | undefined) ?? 1) - 1, 0);
-            emitJobEvent(jobId, { type: 'group_status_changed', index: idx, status: 'waiting_upload', group_id: groupId });
+            emitJobEventAsync(jobId, { type: 'group_status_changed', index: idx, status: 'waiting_upload', group_id: groupId });
         }
     }
 
     await (supabaseAdmin.from('jobs') as any)
-        .update({ status: 'uploading' })
+        .update({ status: 'uploading' }, { returning: 'minimal' })
         .eq('id', jobId)
         .eq('user_id', userId);
 
@@ -2515,7 +2559,7 @@ router.post('/jobs/create', authenticate, async (req: AuthRequest, res: Response
     }
 
     let workflowQuery = (supabaseAdmin.from('workflows') as any)
-        .select('id, credit_per_unit, is_active');
+        .select('id, credit_per_unit, is_active, workflow_versions(id, version, is_published)');
     if (workflowId) {
         workflowQuery = workflowQuery.eq('id', workflowId);
     } else {
@@ -2527,12 +2571,8 @@ router.post('/jobs/create', authenticate, async (req: AuthRequest, res: Response
         return res.status(404).json({ error: 'Workflow not found or inactive' });
     }
 
-    const { data: version, error: versionError } = await (supabaseAdmin.from('workflow_versions') as any)
-        .select('id, version')
-        .eq('workflow_id', workflow.id)
-        .eq('is_published', true)
-        .single();
-    if (versionError || !version) {
+    const publishedVersion = (workflow.workflow_versions || []).find((row: any) => row?.is_published);
+    if (!publishedVersion) {
         return res.status(400).json({ error: 'No published workflow version' });
     }
 
@@ -2541,11 +2581,11 @@ router.post('/jobs/create', authenticate, async (req: AuthRequest, res: Response
         .insert({
             user_id: userId,
             workflow_id: workflow.id,
-            workflow_version_id: version.id,
+            workflow_version_id: publishedVersion.id,
             project_name: projectName || null,
             status: 'draft'
         })
-        .select()
+        .select('id, user_id, workflow_id, workflow_version_id, project_name, status, created_at')
         .single();
 
     if (jobError) return res.status(500).json({ error: jobError.message });

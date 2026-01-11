@@ -40,6 +40,8 @@ services:
         value: wangzhan
       - key: R2_PUBLIC_DOMAIN
         sync: false
+      - key: MULTIPART_CHUNK_BYTES
+        value: "33554432"
       - key: RUNNINGHUB_API_KEY
         sync: false
       - key: CORS_ORIGIN

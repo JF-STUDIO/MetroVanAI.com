@@ -122,6 +122,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reselectUploadsRef = useRef(false);
   const pendingEnhanceRef = useRef(false);
+  const previewRequestedRef = useRef(false);
+  const previewUrlCacheRef = useRef(new Map<string, string>());
   const [isDragging, setIsDragging] = useState(false);
   const [history, setHistory] = useState<HistoryJob[]>([]);
   const [historyCount, setHistoryCount] = useState(0);
@@ -170,9 +172,9 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   };
   const isSupportedUploadFile = (file: File) => isRawFile(file) || isJpegFile(file);
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-  const multipartThreshold = Number(import.meta.env.VITE_MULTIPART_THRESHOLD_MB || 50) * 1024 * 1024;
-  const uploadParallel = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL || 10), 6, 16);
-  const multipartParallel = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL || 4), 2, 8);
+  const multipartThreshold = Number(import.meta.env.VITE_MULTIPART_THRESHOLD_MB || 20) * 1024 * 1024;
+  const uploadParallel = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL || 12), 6, 24);
+  const multipartParallel = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL || 6), 2, 12);
   const uploadRetryAttempts = Math.max(3, Number(import.meta.env.VITE_UPLOAD_RETRY || 3));
   const uploadRetryBaseMs = Math.max(300, Number(import.meta.env.VITE_UPLOAD_RETRY_BASE_MS || 800));
   const rawPreviewParallel = clamp(Number(import.meta.env.VITE_RAW_PREVIEW_PARALLEL || 3), 1, 6);
@@ -203,6 +205,72 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     }
   };
 
+  const pickFramePreview = (
+    frames: PipelineGroupItem['frames'] | undefined,
+    representativeIndex?: number | null
+  ) => {
+    if (!frames || frames.length === 0) return null;
+    if (representativeIndex) {
+      const rep = frames.find((frame) => frame.order === representativeIndex);
+      if (rep?.preview_url) return rep.preview_url;
+    }
+    const fallback = frames.find((frame) => frame.preview_url)?.preview_url;
+    return fallback || null;
+  };
+
+  const mergeFrames = (
+    prevFrames: PipelineGroupItem['frames'] | undefined,
+    nextFrames: PipelineGroupItem['frames'] | undefined
+  ) => {
+    if (!nextFrames || nextFrames.length === 0) return prevFrames || [];
+    const prevById = new Map((prevFrames || []).map((frame) => [frame.id, frame]));
+    return nextFrames.map((frame) => {
+      const prev = prevById.get(frame.id);
+      return {
+        ...prev,
+        ...frame,
+        preview_url: frame.preview_url ?? prev?.preview_url ?? null,
+        preview_ready: frame.preview_ready ?? prev?.preview_ready
+      };
+    });
+  };
+
+  const mergePipelineItems = (prevItems: PipelineGroupItem[], nextItems: PipelineGroupItem[]) => {
+    if (!Array.isArray(nextItems) || nextItems.length === 0) return prevItems;
+    const prevById = new Map(prevItems.map((item) => [item.id, item]));
+    return nextItems.map((item) => {
+      const prev = prevById.get(item.id);
+      if (!prev) return item;
+      const frames = mergeFrames(prev.frames, item.frames);
+      const representativeIndex = item.representative_index ?? prev.representative_index ?? null;
+      const previewUrl = item.preview_url ?? prev.preview_url ?? pickFramePreview(frames, representativeIndex);
+      return {
+        ...prev,
+        ...item,
+        frames,
+        preview_url: previewUrl,
+        representative_index: representativeIndex,
+        group_size: item.group_size ?? prev.group_size
+      };
+    });
+  };
+
+  const applyLocalPreviewToPipeline = (fileId: string, previewUrl: string) => {
+    setPipelineItems((prev) => prev.map((group) => {
+      if (!group.frames || group.frames.length === 0) return group;
+      let changed = false;
+      const frames = group.frames.map((frame) => {
+        if (frame.id !== fileId) return frame;
+        if (frame.preview_url === previewUrl) return frame;
+        changed = true;
+        return { ...frame, preview_url: previewUrl, preview_ready: true };
+      });
+      if (!changed) return group;
+      const nextPreview = pickFramePreview(frames, group.representative_index) || group.preview_url || null;
+      return { ...group, frames, preview_url: nextPreview };
+    }));
+  };
+
   const hydrateRawPreviews = async (items: ImageItem[]) => {
     const targets = items.filter((item) => item.isRaw);
     if (targets.length === 0) return;
@@ -214,6 +282,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         const previewUrl = await createRawPreviewUrl(next.file);
         if (previewUrl) {
           updateUploadItem(next.id, { preview: previewUrl });
+          applyLocalPreviewToPipeline(next.id, previewUrl);
         }
       }
     });
@@ -233,6 +302,33 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
   }, [lightboxUrl]);
+
+  useEffect(() => {
+    previewRequestedRef.current = false;
+  }, [job?.id]);
+
+  useEffect(() => {
+    const prevMap = previewUrlCacheRef.current;
+    const nextMap = new Map<string, string>();
+    uploadImages.forEach((item) => {
+      if (item.preview && item.preview.startsWith('blob:')) {
+        nextMap.set(item.id, item.preview);
+      }
+    });
+    for (const [id, url] of prevMap.entries()) {
+      const nextUrl = nextMap.get(id);
+      if (!nextUrl || nextUrl !== url) {
+        URL.revokeObjectURL(url);
+      }
+    }
+    previewUrlCacheRef.current = nextMap;
+  }, [uploadImages]);
+
+  useEffect(() => () => {
+    for (const url of previewUrlCacheRef.current.values()) {
+      URL.revokeObjectURL(url);
+    }
+  }, []);
 
   const saveLastJob = (jobId: string, workflowId: string) => {
     try {
@@ -295,7 +391,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             frames: g.frames || [],
             last_error: g.error || null,
           }));
-          setPipelineItems(items);
+          setPipelineItems(prev => mergePipelineItems(prev, items));
           setPipelineProgress(0);
           setImages(() => items.map(() => ({ status: 'pending' })));
           if (job?.id) {
@@ -932,23 +1028,34 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         throw new Error('No files processed. Please re-select your uploads.');
       }
 
-      const pipelineGroups: PipelineGroupItem[] = groups.map((group: any) => ({
-        id: group.id,
-        group_index: group.index,
-        status: 'waiting_upload',
-        group_type: group.groupType,
-        group_size: Array.isArray(group.fileIds) ? group.fileIds.length : 0,
-        representative_index: Array.isArray(group.fileIds)
-          ? Math.max(Math.ceil(group.fileIds.length / 2), 1)
-          : null,
-        frames: Array.isArray(group.fileMetas)
-          ? group.fileMetas.map((meta: any, idx: number) => ({
-            id: meta.id,
-            filename: meta.name,
-            order: idx + 1
-          }))
-          : []
-      }));
+      const previewById = new Map(uploadImages.map((item) => [item.id, item.preview]));
+      const pipelineGroups: PipelineGroupItem[] = groups.map((group: any) => {
+        const fileIds = Array.isArray(group.fileIds) ? group.fileIds : [];
+        const representativeIndex = fileIds.length > 0 ? Math.max(Math.ceil(fileIds.length / 2), 1) : null;
+        const frames = Array.isArray(group.fileMetas)
+          ? group.fileMetas.map((meta: any, idx: number) => {
+            const previewUrl = previewById.get(meta.id) || null;
+            return {
+              id: meta.id,
+              filename: meta.name,
+              order: idx + 1,
+              preview_url: previewUrl,
+              preview_ready: Boolean(previewUrl)
+            };
+          })
+          : [];
+        const groupPreview = pickFramePreview(frames, representativeIndex);
+        return {
+          id: group.id,
+          group_index: group.index,
+          status: 'waiting_upload',
+          group_type: group.groupType,
+          group_size: fileIds.length || frames.length || 0,
+          representative_index: representativeIndex,
+          frames,
+          preview_url: groupPreview
+        };
+      });
 
       setPipelineItems(pipelineGroups);
       setImages(() => pipelineGroups.map(() => ({ status: 'pending' })));
@@ -1248,6 +1355,22 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         )));
       }
 
+      if (!previewRequestedRef.current) {
+        previewRequestedRef.current = true;
+        try {
+          await jobService.generatePreviews(job.id);
+          const previewStatus = await jobService.getPipelineStatus(job.id);
+          if (Array.isArray(previewStatus?.items)) {
+            setPipelineItems(prev => mergePipelineItems(prev, previewStatus.items));
+          }
+          if (previewStatus?.previews) {
+            setPreviewSummary(previewStatus.previews);
+          }
+        } catch (err) {
+          console.warn('Preview generation failed', err);
+        }
+      }
+
       setUploadComplete(true);
       setJobStatus('hdr_processing');
       setJob((prev) => (prev ? { ...prev, status: 'hdr_processing' } : prev));
@@ -1372,8 +1495,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const hasPendingUploads = uploadImages.some((img) => img.status === 'pending' || img.status === 'uploading');
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
   const showGroupingOnly = jobStatus === 'grouping' && pipelineItems.length === 0;
-  const showUploadOnly = jobStatus === 'uploading' || showGroupingOnly;
-  const showUploadNotice = jobStatus === 'uploading' && uploadImages.length > 0;
+  const showUploadOnly = jobStatus === 'uploading' && pipelineItems.length === 0 && !uploadComplete;
+  const showUploadNotice = jobStatus === 'uploading' && uploadImages.length > 0 && !uploadComplete;
 
   const uploadProgress = uploadImages.length
     ? Math.round(uploadImages.reduce((sum, img) => sum + img.progress, 0) / uploadImages.length)
@@ -1435,7 +1558,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     const outputReady = Boolean(outputOverride) || isOutputReady(item);
     const isSkipped = effectiveSkippedIds.has(item.id) || item.status === 'skipped' || item.is_skipped;
     const groupType = item.group_type ?? null;
-    const preview = outputOverride || item.output_url || item.hdr_url || item.preview_url || '';
+    const framePreview = item.preview_url || pickFramePreview(item.frames, item.representative_index);
+    const preview = outputOverride || item.output_url || item.hdr_url || framePreview || '';
     const stage: GalleryItem['stage'] = outputReady
       ? 'output'
       : isSkipped
@@ -1476,7 +1600,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         setJobStatus(response.job.status);
       }
       if (Array.isArray(response?.items)) {
-        setPipelineItems(response.items);
+        setPipelineItems(prev => mergePipelineItems(prev, response.items));
       }
       if (typeof response?.progress === 'number') {
         setPipelineProgress(response.progress);

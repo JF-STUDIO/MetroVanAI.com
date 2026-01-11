@@ -1,4 +1,9 @@
 {
+  "env": {
+    "VITE_MULTIPART_THRESHOLD_MB": "100",
+    "VITE_UPLOAD_PARALLEL": "8",
+    "VITE_MULTIPART_PARALLEL": "3"
+  },
   "rewrites": [
     {
       "source": "/api/(.*)",
