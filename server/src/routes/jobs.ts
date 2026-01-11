@@ -1617,6 +1617,7 @@ router.post('/jobs/:jobId/groups', authenticate, async (req: AuthRequest, res: R
 
     const groupRows: any[] = [];
     const fileRows: any[] = [];
+    const representativeMap = new Map<string, string>();
 
     for (const group of groups) {
         const groupIndex = Number(group?.index || group?.groupIndex);
@@ -1627,8 +1628,8 @@ router.post('/jobs/:jobId/groups', authenticate, async (req: AuthRequest, res: R
         const groupName = formatGroupName(groupIndex);
         const outputFilename = `${groupName}.jpg`;
 
-        const representativeId = fileIds[Math.floor((fileIds.length - 1) / 2)] || null;
         const groupId = group?.id || uuidv4();
+        const representativeId = fileIds[Math.floor((fileIds.length - 1) / 2)] || null;
 
         groupRows.push({
             id: groupId,
@@ -1638,8 +1639,11 @@ router.post('/jobs/:jobId/groups', authenticate, async (req: AuthRequest, res: R
             status: 'waiting_upload',
             group_type: group?.groupType || 'group',
             output_filename: outputFilename,
-            representative_file_id: representativeId
+            representative_file_id: null
         });
+        if (representativeId) {
+            representativeMap.set(groupId, representativeId);
+        }
 
         fileIds.forEach((fileId: string, orderIndex: number) => {
             const meta = fileMap.get(fileId);
@@ -1676,6 +1680,20 @@ router.post('/jobs/:jobId/groups', authenticate, async (req: AuthRequest, res: R
 
     const { error: insertFileError } = await (supabaseAdmin.from('job_files') as any).insert(fileRows);
     if (insertFileError) return res.status(500).json({ error: insertFileError.message });
+
+    if (representativeMap.size > 0) {
+        const updates = Array.from(representativeMap.entries()).map(([groupId, representativeId]) => (
+            (supabaseAdmin.from('job_groups') as any)
+                .update({ representative_file_id: representativeId })
+                .eq('id', groupId)
+                .eq('job_id', jobId)
+        ));
+        try {
+            await Promise.all(updates);
+        } catch (error) {
+            console.warn('Failed to update representative_file_id', (error as Error).message);
+        }
+    }
 
     await (supabaseAdmin.from('jobs') as any)
         .update({ status: 'input_resolved', estimated_units: groupRows.length, progress: 0 })
