@@ -52,7 +52,7 @@ export interface Job {
   estimated_units?: number | null;
   reserved_units?: number | null;
   settled_units?: number | null;
-  status: 'draft' | 'uploaded' | 'analyzing' | 'input_resolved' | 'reserved' | 'preprocessing' | 'hdr_processing' | 'workflow_running' | 'ai_processing' | 'postprocess' | 'packaging' | 'zipping' | 'completed' | 'failed' | 'canceled' | 'partial' | 'pending' | 'queued' | 'processing';
+  status: 'draft' | 'uploaded' | 'analyzing' | 'input_resolved' | 'reserved' | 'preprocessing' | 'hdr_processing' | 'workflow_running' | 'ai_processing' | 'postprocess' | 'packaging' | 'zipping' | 'completed' | 'failed' | 'canceled' | 'partial' | 'pending' | 'queued' | 'processing' | 'uploading';
   error_message?: string;
   zip_key?: string;
   output_zip_key?: string | null;

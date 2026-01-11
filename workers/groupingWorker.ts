@@ -88,7 +88,7 @@ const getCaptureTime = (tags: Record<string, any> | null, fallbackMs: number) =>
 
 const groupByTime = (files: GroupFileMeta[], thresholdMs: number) => {
   const sorted = [...files].sort((a, b) => (a.exifTimeMs ?? 0) - (b.exifTimeMs ?? 0));
-  const groups: GroupResult[] = [];
+  const groups: GroupFileMeta[][] = [];
   let current: GroupFileMeta[] = [];
   let currentStart: number | null = null;
 
