@@ -179,16 +179,25 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const isSupportedUploadFile = (file: File) => isRawFile(file) || isJpegFile(file);
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
   const multipartThreshold = Number(import.meta.env.VITE_MULTIPART_THRESHOLD_MB || 20) * 1024 * 1024;
-  const uploadParallel = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL || 12), 6, 24);
-  const multipartParallel = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL || 6), 2, 12);
+  const uploadParallelMin = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL_MIN || 2), 1, 48);
+  const uploadParallelMax = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL_MAX || 12), uploadParallelMin, 48);
+  const uploadParallel = clamp(Number(import.meta.env.VITE_UPLOAD_PARALLEL || uploadParallelMax), uploadParallelMin, uploadParallelMax);
+  const multipartParallelMin = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL_MIN || 2), 1, 24);
+  const multipartParallelMax = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL_MAX || 6), multipartParallelMin, 24);
+  const multipartParallel = clamp(Number(import.meta.env.VITE_MULTIPART_PARALLEL || multipartParallelMax), multipartParallelMin, multipartParallelMax);
   const uploadRetryAttempts = Math.max(3, Number(import.meta.env.VITE_UPLOAD_RETRY || 3));
   const uploadRetryBaseMs = Math.max(300, Number(import.meta.env.VITE_UPLOAD_RETRY_BASE_MS || 800));
   const uploadTimeoutMs = Math.max(30000, Number(import.meta.env.VITE_UPLOAD_TIMEOUT_MS || 120000));
   const presignBatchSize = clamp(Number(import.meta.env.VITE_PRESIGN_BATCH || 80), 10, 200);
-  const uploadParallelMin = Math.max(1, Math.floor(uploadParallel / 4));
-  const multipartParallelMin = Math.max(1, Math.floor(multipartParallel / 2));
+  const uploadParallelFloor = Math.max(uploadParallelMin, Math.floor(uploadParallel / 4));
+  const multipartParallelFloor = Math.max(multipartParallelMin, Math.floor(multipartParallel / 2));
   const rawPreviewParallel = clamp(Number(import.meta.env.VITE_RAW_PREVIEW_PARALLEL || 3), 1, 6);
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const revokePreviewUrl = (url?: string | null) => {
+    if (url && url.startsWith('blob:')) {
+      URL.revokeObjectURL(url);
+    }
+  };
   const withUploadRetry = async <T,>(fn: () => Promise<T>, label: string) => {
     let lastError: unknown;
     for (let attempt = 1; attempt <= uploadRetryAttempts; attempt += 1) {
@@ -972,10 +981,21 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     if (allowedFiles.length === 0) return;
     const maxFiles = Number(import.meta.env.VITE_MAX_UPLOAD_FILES || 0);
     const maxFileBytes = Number(import.meta.env.VITE_MAX_FILE_BYTES || (200 * 1024 * 1024));
+    const maxTotalBytes = Number(import.meta.env.VITE_MAX_UPLOAD_BYTES || 0);
     const existingCount = replace ? 0 : uploadImages.length;
     if (maxFiles > 0 && existingCount + allowedFiles.length > maxFiles) {
       pushNotice('error', `Too many files. Max ${maxFiles} per project.`);
       return;
+    }
+    if (maxTotalBytes > 0) {
+      const currentBytes = replace
+        ? 0
+        : uploadImages.reduce((sum, item) => sum + (item.file?.size || 0), 0);
+      const incomingBytes = allowedFiles.reduce((sum, file) => sum + file.size, 0);
+      if (currentBytes + incomingBytes > maxTotalBytes) {
+        pushNotice('error', 'Total upload size exceeds the project limit.');
+        return;
+      }
     }
     if (maxFileBytes > 0) {
       const oversized = allowedFiles.find((file) => file.size > maxFileBytes);
@@ -1008,7 +1028,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setGroupingComplete(false);
     }
     setNeedsUploadReselect(false);
-    setUploadImages(prev => (replace ? newItems : [...prev, ...newItems]));
+    setUploadImages(prev => {
+      if (replace) {
+        prev.forEach((item) => revokePreviewUrl(item.preview));
+      }
+      return replace ? newItems : [...prev, ...newItems];
+    });
     if (replace) {
       setActiveIndex(newItems.length > 0 ? newItems.length - 1 : null);
     } else if (activeIndex === null) {
@@ -1075,9 +1100,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   };
 
   const updateUploadItem = (id: string, updates: Partial<ImageItem>) => {
-    setUploadImages((prev) => prev.map((item) => (
-      item.id === id ? { ...item, ...updates } : item
-    )));
+    setUploadImages((prev) => prev.map((item) => {
+      if (item.id !== id) return item;
+      if ('preview' in updates) {
+        const nextPreview = updates.preview ?? '';
+        if (item.preview && item.preview !== nextPreview) {
+          revokePreviewUrl(item.preview);
+        }
+      }
+      return { ...item, ...updates };
+    }));
   };
 
   const markUploadFailed = (id: string, message?: string) => {
@@ -1621,11 +1653,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         if (entry?.r2Key) r2KeyMap.set(fileId, entry.r2Key);
       }
       const uploadRunner = createAdaptiveRunner({
-        min: uploadParallelMin,
+        min: uploadParallelFloor,
         max: uploadParallel,
         initial: uploadParallel,
         label: 'files',
-        successWindow: Math.max(6, uploadParallelMin * 2)
+        successWindow: Math.max(6, uploadParallelFloor * 2)
       });
 
       const uploadSimple = async (task: UploadTask) => {
@@ -1669,11 +1701,11 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         let uploadedBytes = 0;
         const partsMap = new Map<number, string>();
         const partRunner = createAdaptiveRunner({
-          min: multipartParallelMin,
+          min: multipartParallelFloor,
           max: multipartParallel,
           initial: multipartParallel,
           label: `parts:${item.file.name}`,
-          successWindow: Math.max(4, multipartParallelMin * 2)
+          successWindow: Math.max(4, multipartParallelFloor * 2)
         });
         await partRunner.run(partUrls, async (part: any) => {
           const start = (part.partNumber - 1) * partSize;
@@ -2668,7 +2700,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                     className={`relative overflow-hidden rounded-2xl border transition-all bg-black/40 ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-white/5 hover:border-white/15'} ${isExcluded ? 'opacity-60' : ''}`}
                   >
                     {img.preview ? (
-                      <img src={img.preview} className="w-full h-48 object-cover" />
+                      <img src={img.preview} className="w-full h-48 object-cover" loading="lazy" decoding="async" />
                     ) : (
                       <div className="w-full h-48 flex flex-col items-center justify-center text-[10px] text-gray-500 uppercase tracking-widest px-3 text-center">
                         <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-2">
@@ -2807,7 +2839,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           onClick={() => setLightboxUrl(null)}
         >
           <div className="relative max-w-6xl w-full h-full flex items-center justify-center">
-            <img src={lightboxUrl} className="max-h-full max-w-full object-contain rounded-2xl shadow-2xl" />
+            <img src={lightboxUrl} className="max-h-full max-w-full object-contain rounded-2xl shadow-2xl" decoding="async" />
             <button
               type="button"
               onClick={() => setLightboxUrl(null)}

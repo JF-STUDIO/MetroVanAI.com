@@ -42,6 +42,14 @@ services:
         sync: false
       - key: MULTIPART_CHUNK_BYTES
         value: "33554432"
+      - key: UPLOAD_VERIFY_CONCURRENCY
+        value: "8"
+      - key: MAX_UPLOAD_FILES
+        value: "1000"
+      - key: MAX_FILE_BYTES
+        value: "524288000"
+      - key: MAX_UPLOAD_BYTES
+        value: "21474836480"
       - key: R2_PRESIGN_TTL_SECONDS
         value: "21600"
       - key: RUNNINGHUB_API_KEY
