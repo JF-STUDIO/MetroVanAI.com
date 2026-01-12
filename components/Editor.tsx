@@ -135,6 +135,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   const [autoUploadQueued, setAutoUploadQueued] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [groupingComplete, setGroupingComplete] = useState(false);
+  const groupingFilesRef = useRef<any[] | null>(null);
+  const [groupingDirty, setGroupingDirty] = useState(false);
+  const [groupingThresholdMs, setGroupingThresholdMs] = useState(() => {
+    const raw = Number(import.meta.env.VITE_GROUPING_TIME_MS || 3500);
+    return Number.isFinite(raw) ? Math.max(500, Math.min(raw, 15000)) : 3500;
+  });
   const [needsUploadReselect, setNeedsUploadReselect] = useState(false);
   const editorStateKey = 'mvai:editor_state';
   const [pendingActiveIndex, setPendingActiveIndex] = useState<number | null>(null);
@@ -329,7 +335,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         ...prev,
         ...frame,
         preview_url: frame.preview_url ?? prev?.preview_url ?? null,
-        preview_ready: frame.preview_ready ?? prev?.preview_ready
+        preview_ready: frame.preview_ready ?? prev?.preview_ready,
+        upload_status: frame.upload_status ?? prev?.upload_status ?? null,
+        uploaded_at: frame.uploaded_at ?? prev?.uploaded_at ?? null,
+        r2_key: frame.r2_key ?? prev?.r2_key ?? null,
+        size: frame.size ?? prev?.size ?? null,
+        exif_time: frame.exif_time ?? prev?.exif_time ?? null,
+        ev: frame.ev ?? prev?.ev ?? null
       };
     });
   };
@@ -1076,6 +1088,73 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     });
   };
 
+  const runGroupingWorker = async (thresholdMs: number) => {
+    const worker = new Worker(new URL('../workers/groupingWorker.ts', import.meta.url), { type: 'module' });
+    try {
+      const result = await new Promise<{ groups: any[]; files: any[]; total: number }>((resolve, reject) => {
+        worker.onmessage = (event) => {
+          const data = event.data;
+          if (data?.type === 'progress' && data.total) {
+            const progress = Math.round((data.processed / data.total) * 100);
+            setPipelineProgress(Math.min(100, Math.max(0, progress)));
+            return;
+          }
+          if (data?.type === 'done') {
+            resolve(data);
+          }
+        };
+        worker.onerror = (event) => reject(event);
+        const exifParallel = Number(import.meta.env.VITE_GROUPING_PARALLEL);
+        const exifSliceKb = Number(import.meta.env.VITE_EXIF_SLICE_KB);
+        const groupingOptions: Record<string, number> = { timeThresholdMs: thresholdMs };
+        if (Number.isFinite(exifParallel)) groupingOptions.exifParallel = exifParallel;
+        if (Number.isFinite(exifSliceKb)) groupingOptions.exifSliceKb = exifSliceKb;
+        worker.postMessage({
+          items: uploadImages.map(({ id, file }) => ({ id, file })),
+          options: groupingOptions
+        });
+      });
+      return result;
+    } finally {
+      worker.terminate();
+    }
+  };
+
+  const buildPipelineGroups = (groups: any[], files: any[]) => {
+    const previewById = new Map(uploadImages.map((item) => [item.id, item.preview]));
+    return groups.map((group: any) => {
+      const fileIds = Array.isArray(group.fileIds) ? group.fileIds : [];
+      const representativeIndex = fileIds.length > 0 ? Math.max(Math.ceil(fileIds.length / 2), 1) : null;
+      const frames = Array.isArray(group.fileMetas)
+        ? group.fileMetas.map((meta: any, idx: number) => {
+          const previewUrl = previewById.get(meta.id) || null;
+          return {
+            id: meta.id,
+            filename: meta.name,
+            order: idx + 1,
+            preview_url: previewUrl,
+            preview_ready: Boolean(previewUrl),
+            upload_status: 'pending',
+            size: meta.size ?? null,
+            exif_time: meta.exifTime ?? null,
+            ev: meta.ev ?? null
+          };
+        })
+        : [];
+      const groupPreview = pickFramePreview(frames, representativeIndex);
+      return {
+        id: group.id,
+        group_index: group.index,
+        status: 'waiting_upload',
+        group_type: group.groupType,
+        group_size: fileIds.length || frames.length || 0,
+        representative_index: representativeIndex,
+        frames,
+        preview_url: groupPreview
+      } as PipelineGroupItem;
+    });
+  };
+
   // Main batch processing logic
   const startBatchProcess = async () => {
     if (!activeTool || uploadImages.length === 0 || !job) {
@@ -1093,32 +1172,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setPipelineProgress(0);
       setPreviewSummary(null);
       resetStreamState();
-      const worker = new Worker(new URL('../workers/groupingWorker.ts', import.meta.url), { type: 'module' });
-      const groupingResult = await new Promise<{ groups: any[]; files: any[]; total: number }>((resolve, reject) => {
-        worker.onmessage = (event) => {
-          const data = event.data;
-          if (data?.type === 'progress' && data.total) {
-            const progress = Math.round((data.processed / data.total) * 100);
-            setPipelineProgress(Math.min(100, Math.max(0, progress)));
-            return;
-          }
-          if (data?.type === 'done') {
-            resolve(data);
-          }
-        };
-        worker.onerror = (event) => reject(event);
-        const exifParallel = Number(import.meta.env.VITE_GROUPING_PARALLEL);
-        const exifSliceKb = Number(import.meta.env.VITE_EXIF_SLICE_KB);
-        const groupingOptions: Record<string, number> = { timeThresholdMs: 3500 };
-        if (Number.isFinite(exifParallel)) groupingOptions.exifParallel = exifParallel;
-        if (Number.isFinite(exifSliceKb)) groupingOptions.exifSliceKb = exifSliceKb;
-        worker.postMessage({
-          items: uploadImages.map(({ id, file }) => ({ id, file })),
-          options: groupingOptions
-        });
-      });
-      worker.terminate();
-
+      const groupingResult = await runGroupingWorker(groupingThresholdMs);
       const { groups, files } = groupingResult;
       if (!Array.isArray(groups) || groups.length === 0) {
         throw new Error('No groups detected. Check the file timestamps and try again.');
@@ -1126,35 +1180,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       if (!Array.isArray(files) || files.length === 0) {
         throw new Error('No files processed. Please re-select your uploads.');
       }
-
-      const previewById = new Map(uploadImages.map((item) => [item.id, item.preview]));
-      const pipelineGroups: PipelineGroupItem[] = groups.map((group: any) => {
-        const fileIds = Array.isArray(group.fileIds) ? group.fileIds : [];
-        const representativeIndex = fileIds.length > 0 ? Math.max(Math.ceil(fileIds.length / 2), 1) : null;
-        const frames = Array.isArray(group.fileMetas)
-          ? group.fileMetas.map((meta: any, idx: number) => {
-            const previewUrl = previewById.get(meta.id) || null;
-            return {
-              id: meta.id,
-              filename: meta.name,
-              order: idx + 1,
-              preview_url: previewUrl,
-              preview_ready: Boolean(previewUrl)
-            };
-          })
-          : [];
-        const groupPreview = pickFramePreview(frames, representativeIndex);
-        return {
-          id: group.id,
-          group_index: group.index,
-          status: 'waiting_upload',
-          group_type: group.groupType,
-          group_size: fileIds.length || frames.length || 0,
-          representative_index: representativeIndex,
-          frames,
-          preview_url: groupPreview
-        };
-      });
+      const pipelineGroups = buildPipelineGroups(groups, files);
 
       setPipelineItems(pipelineGroups);
       setImages(() => pipelineGroups.map(() => ({ status: 'pending' })));
@@ -1162,6 +1188,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setGroupingComplete(true);
       setJobStatus('input_resolved');
       setJob(prev => (prev ? { ...prev, status: 'input_resolved', estimated_units: pipelineGroups.length } : prev));
+      groupingFilesRef.current = files;
+      setGroupingDirty(false);
 
       try {
         await jobService.registerGroups(job.id, { files, groups });
@@ -1181,6 +1209,170 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setJobStatus('idle');
       setUploadComplete(false);
       setGroupingComplete(false);
+    }
+  };
+
+  const createGroupId = () => (
+    crypto?.randomUUID
+      ? crypto.randomUUID()
+      : `group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  );
+
+  const normalizeFrames = (frames: PipelineGroupItem['frames'] | undefined) => (
+    (frames || []).map((frame, idx) => ({ ...frame, order: idx + 1 }))
+  );
+
+  const buildGroupFromFrames = (
+    frames: PipelineGroupItem['frames'] | undefined,
+    seedId?: string
+  ): PipelineGroupItem => {
+    const normalizedFrames = normalizeFrames(frames);
+    const groupSize = normalizedFrames.length || 0;
+    const representativeIndex = groupSize > 0 ? Math.max(1, Math.ceil(groupSize / 2)) : null;
+    const previewUrl = pickFramePreview(normalizedFrames, representativeIndex);
+    return {
+      id: seedId || createGroupId(),
+      group_index: 0,
+      status: 'waiting_upload',
+      group_type: groupSize > 1 ? 'group' : 'single',
+      group_size: groupSize,
+      representative_index: representativeIndex,
+      frames: normalizedFrames,
+      preview_url: previewUrl
+    };
+  };
+
+  const normalizeGroupOrder = (items: PipelineGroupItem[]) => (
+    items.map((item, idx) => ({
+      ...item,
+      group_index: idx + 1
+    }))
+  );
+
+  const buildGroupingPayload = (items: PipelineGroupItem[]) => (
+    items.map((group, idx) => ({
+      id: group.id,
+      index: idx + 1,
+      groupType: group.group_type || ((group.frames || []).length > 1 ? 'group' : 'single'),
+      fileIds: (group.frames || []).map((frame) => frame.id)
+    }))
+  );
+
+  const applyGroupingChanges = async (items: PipelineGroupItem[]) => {
+    if (!job) return null;
+    let files = groupingFilesRef.current;
+    if (!files || files.length === 0) {
+      const fileMap = new Map<string, any>();
+      items.forEach((group) => {
+        (group.frames || []).forEach((frame) => {
+          if (!frame?.id) return;
+          if (fileMap.has(frame.id)) return;
+          fileMap.set(frame.id, {
+            id: frame.id,
+            name: frame.filename,
+            size: frame.size ?? null,
+            exifTime: frame.exif_time ?? null,
+            ev: frame.ev ?? null
+          });
+        });
+      });
+      files = Array.from(fileMap.values());
+    }
+    if (!files || files.length === 0) {
+      pushNotice('error', 'Grouping metadata is missing. Please regroup first.');
+      return null;
+    }
+    groupingFilesRef.current = files;
+    const normalized = normalizeGroupOrder(items);
+    const groups = buildGroupingPayload(normalized);
+    await jobService.registerGroups(job.id, { files, groups });
+    setPipelineItems(normalized);
+    setImages(() => normalized.map(() => ({ status: 'pending' })));
+    setGroupingDirty(false);
+    setExcludedGroupIds(new Set());
+    setJob((prev) => (prev ? { ...prev, estimated_units: normalized.length, status: 'input_resolved' } : prev));
+    return normalized;
+  };
+
+  const mergeGroupWithPrevious = (groupId: string) => {
+    setPipelineItems((prev) => {
+      const index = prev.findIndex((group) => group.id === groupId);
+      if (index <= 0) return prev;
+      const prevGroup = prev[index - 1];
+      const currentGroup = prev[index];
+      const mergedFrames = [
+        ...(prevGroup.frames || []),
+        ...(currentGroup.frames || [])
+      ];
+      const mergedGroup = buildGroupFromFrames(mergedFrames, prevGroup.id);
+      const nextItems = [
+        ...prev.slice(0, index - 1),
+        mergedGroup,
+        ...prev.slice(index + 1)
+      ];
+      return normalizeGroupOrder(nextItems);
+    });
+    setGroupingDirty(true);
+    setExcludedGroupIds(new Set());
+  };
+
+  const splitGroupIntoSingles = (groupId: string) => {
+    setPipelineItems((prev) => {
+      const index = prev.findIndex((group) => group.id === groupId);
+      if (index === -1) return prev;
+      const group = prev[index];
+      const frames = group.frames || [];
+      if (frames.length <= 1) return prev;
+      const singles = frames.map((frame) => buildGroupFromFrames([frame]));
+      const nextItems = [
+        ...prev.slice(0, index),
+        ...singles,
+        ...prev.slice(index + 1)
+      ];
+      return normalizeGroupOrder(nextItems);
+    });
+    setGroupingDirty(true);
+    setExcludedGroupIds(new Set());
+  };
+
+  const handleRegroup = async () => {
+    if (!job || uploadImages.length === 0) {
+      pushNotice('error', 'Please select files before regrouping.');
+      return;
+    }
+    if (jobStatus === 'uploading') {
+      pushNotice('error', 'Uploads already started. Create a new project to regroup.');
+      return;
+    }
+    try {
+      setNotice(null);
+      setJobStatus('grouping');
+      setUploadComplete(false);
+      setGroupingComplete(false);
+      setPipelineProgress(0);
+      const groupingResult = await runGroupingWorker(groupingThresholdMs);
+      const { groups, files } = groupingResult;
+      if (!Array.isArray(groups) || groups.length === 0) {
+        throw new Error('No groups detected. Adjust the threshold and try again.');
+      }
+      if (!Array.isArray(files) || files.length === 0) {
+        throw new Error('No files processed. Please re-select your uploads.');
+      }
+      const pipelineGroups = buildPipelineGroups(groups, files);
+      setPipelineItems(pipelineGroups);
+      setImages(() => pipelineGroups.map(() => ({ status: 'pending' })));
+      setPipelineProgress(100);
+      setGroupingComplete(true);
+      setJobStatus('input_resolved');
+      setJob(prev => (prev ? { ...prev, status: 'input_resolved', estimated_units: pipelineGroups.length } : prev));
+      groupingFilesRef.current = files;
+      setGroupingDirty(false);
+      setExcludedGroupIds(new Set());
+      await jobService.registerGroups(job.id, { files, groups });
+    } catch (err) {
+      pushNotice('error', err instanceof Error ? `Regroup failed: ${err.message}` : 'Regroup failed.');
+      setJobStatus('input_resolved');
+      setGroupingComplete(true);
     }
   };
 
@@ -1233,7 +1425,15 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     try {
       setNotice(null);
       let currentItems = pipelineItems;
-      if (currentItems.length === 0) {
+      if (groupingDirty) {
+        const applied = await applyGroupingChanges(currentItems);
+        if (!applied) return;
+        currentItems = applied;
+      }
+      const needsRefresh = currentItems.length === 0 || currentItems.some((item) => (
+        (item.frames || []).some((frame) => !frame?.r2_key || frame?.upload_status == null)
+      ));
+      if (needsRefresh) {
         const response = await jobService.getPipelineStatus(job.id);
         if (Array.isArray(response?.items)) {
           setPipelineItems(response.items);
@@ -1273,20 +1473,29 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setUploadComplete(false);
 
       const activeGroups = currentItems.filter((item) => !skipIds.includes(item.id));
+      const isFrameUploaded = (frame: any) => String(frame?.upload_status || '').toLowerCase() === 'uploaded';
       type UploadTask = { serverId: string; item: ImageItem; groupId?: string; groupIndex?: number | null };
       const fileMapById = new Map(uploadImages.map((item) => [item.id, item]));
       const fileMapByName = new Map<string, ImageItem[]>();
+      const fileMapByFingerprint = new Map<string, ImageItem[]>();
       for (const item of uploadImages) {
         const nameKey = item.file.name.trim().toLowerCase();
+        const fingerprint = `${nameKey}:${item.file.size}`;
         const existing = fileMapByName.get(nameKey);
         if (existing) {
           existing.push(item);
         } else {
           fileMapByName.set(nameKey, [item]);
         }
+        const existingFingerprint = fileMapByFingerprint.get(fingerprint);
+        if (existingFingerprint) {
+          existingFingerprint.push(item);
+        } else {
+          fileMapByFingerprint.set(fingerprint, [item]);
+        }
       }
       const usedLocalIds = new Set<string>();
-      const resolveUploadTask = (frame: { id?: string; filename?: string; name?: string }, groupIndex?: number): UploadTask => {
+      const resolveUploadTask = (frame: { id?: string; filename?: string; name?: string; size?: number | null }, groupIndex?: number): UploadTask => {
         const frameId = frame?.id;
         if (!frameId) {
           throw new Error(`Group ${groupIndex ?? '?'} has missing file id. Please regroup and try again.`);
@@ -1297,6 +1506,19 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         }
         const frameName = (frame?.filename || frame?.name || '').trim();
         if (frameName) {
+          const frameSize = frame?.size;
+          if (frameSize) {
+            const fingerprint = `${frameName.toLowerCase()}:${frameSize}`;
+            const fingerprintMatches = fileMapByFingerprint.get(fingerprint) || [];
+            if (fingerprintMatches.length === 1) {
+              const item = fingerprintMatches[0];
+              if (usedLocalIds.has(item.id)) {
+                throw new Error(`Local file "${frameName}" is matched multiple times. Please regroup and try again.`);
+              }
+              usedLocalIds.add(item.id);
+              return { serverId: frameId, item };
+            }
+          }
           const matches = fileMapByName.get(frameName.toLowerCase()) || [];
           if (matches.length > 1) {
             throw new Error(`Duplicate local files named "${frameName}". Please remove duplicates and try again.`);
@@ -1314,6 +1536,18 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       };
       const groupQueue = [...activeGroups].sort((a, b) => (a.group_index || 0) - (b.group_index || 0));
 
+      const r2KeyMap = new Map<string, string>();
+      const markAlreadyUploaded = (frame: { filename?: string; name?: string; size?: number | null }) => {
+        const frameName = (frame?.filename || frame?.name || '').trim();
+        if (!frameName) return;
+        const frameSize = frame?.size;
+        if (!frameSize) return;
+        const fingerprint = `${frameName.toLowerCase()}:${frameSize}`;
+        const matches = fileMapByFingerprint.get(fingerprint) || [];
+        if (matches.length !== 1) return;
+        const item = matches[0];
+        updateUploadItem(item.id, { status: 'done', progress: 100, statusText: 'Uploaded' });
+      };
       const groupStates = new Map<string, {
         group: PipelineGroupItem;
         fileIds: string[];
@@ -1331,14 +1565,23 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         if (fileIds.length === 0) {
           throw new Error(`Group ${group.group_index} has no files. Please regroup and try again.`);
         }
+        const pendingFrames = frames.filter((frame) => !isFrameUploaded(frame));
         groupStates.set(group.id, {
           group,
           fileIds,
-          remaining: fileIds.length,
+          remaining: pendingFrames.length,
           started: false,
           finalized: false
         });
         for (const frame of frames) {
+          if (frame?.r2_key) {
+            r2KeyMap.set(frame.id, frame.r2_key);
+          }
+          if (isFrameUploaded(frame)) {
+            markAlreadyUploaded(frame);
+          }
+        }
+        for (const frame of pendingFrames) {
           const task = resolveUploadTask(frame, group.group_index);
           if (taskMap.has(task.serverId)) {
             throw new Error(`File "${task.item.file.name}" is matched to multiple groups. Please regroup and try again.`);
@@ -1374,7 +1617,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           }
         }
       }
-      const r2KeyMap = new Map<string, string>();
       for (const [fileId, entry] of presignMap.entries()) {
         if (entry?.r2Key) r2KeyMap.set(fileId, entry.r2Key);
       }
@@ -1486,6 +1728,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
           item.id === state.group.id ? { ...item, status: 'queued_hdr' } : item
         )));
       };
+
+      for (const state of groupStates.values()) {
+        if (state.remaining === 0) {
+          await finalizeGroup(state);
+        }
+      }
 
       await uploadRunner.run(allTasks, async (task) => {
         if (!task.groupId) {
@@ -1655,6 +1903,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
   });
 
   const hasPendingUploads = uploadImages.some((img) => img.status === 'pending' || img.status === 'uploading');
+  const canEditGroups = groupingComplete && jobStatus === 'input_resolved' && !uploadComplete;
+  const canRegroup = canEditGroups && uploadImages.length > 0;
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
   const showGroupingOnly = jobStatus === 'grouping' && pipelineItems.length === 0;
   const showUploadOnly = jobStatus === 'uploading' && pipelineItems.length === 0 && !uploadComplete;
@@ -2363,6 +2613,41 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                 )}
               </div>
             )}
+            {pipelineItems.length > 0 && canEditGroups && (
+              <div className="flex flex-wrap items-center gap-3 text-[10px] uppercase tracking-widest text-gray-500">
+                <span className="text-gray-400">Grouping Threshold</span>
+                <input
+                  type="range"
+                  min={500}
+                  max={15000}
+                  step={250}
+                  value={groupingThresholdMs}
+                  onChange={(e) => setGroupingThresholdMs(Number(e.target.value))}
+                  className="w-48 accent-indigo-500"
+                />
+                <span className="text-white">{Math.round(groupingThresholdMs / 100) / 10}s</span>
+                <button
+                  type="button"
+                  onClick={handleRegroup}
+                  disabled={!canRegroup}
+                  className="px-3 py-1 rounded-full border border-white/10 text-[10px] text-white/80 hover:border-white/30 transition disabled:opacity-40"
+                >
+                  Regroup
+                </button>
+                {groupingDirty && (
+                  <button
+                    type="button"
+                    onClick={() => void applyGroupingChanges(pipelineItems)}
+                    className="px-3 py-1 rounded-full border border-amber-400/40 text-[10px] text-amber-200 hover:border-amber-300/60 transition"
+                  >
+                    Apply Changes
+                  </button>
+                )}
+                {groupingDirty && (
+                  <span className="text-amber-300">Grouping edits pending</span>
+                )}
+              </div>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
               {galleryItems.map((img, idx) => {
                 const groupSize = img.groupSize ?? 0;
@@ -2372,6 +2657,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                 const isExcluded = effectiveSkippedIds.has(img.id);
                 const canToggleSkip = fromPipeline && jobStatus === 'input_resolved';
                 const showCheck = fromPipeline && jobStatus === 'input_resolved' && !isExcluded;
+                const labelParts = (img.label || '').split('.');
+                const extLabel = labelParts.length > 1 ? labelParts[labelParts.length - 1].toUpperCase() : 'RAW';
                 return (
                   <div
                     key={img.id || idx}
@@ -2383,9 +2670,12 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                     {img.preview ? (
                       <img src={img.preview} className="w-full h-48 object-cover" />
                     ) : (
-                      <div className="w-full h-48 flex flex-col items-center justify-center text-[10px] text-gray-500 uppercase tracking-widest">
-                        <i className="fa-solid fa-image text-lg mb-2 text-gray-600"></i>
-                        Preview Pending
+                      <div className="w-full h-48 flex flex-col items-center justify-center text-[10px] text-gray-500 uppercase tracking-widest px-3 text-center">
+                        <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-2">
+                          <i className="fa-solid fa-image text-base text-gray-600"></i>
+                        </div>
+                        <div className="text-[11px] text-gray-300">{extLabel}</div>
+                        <div className="mt-1 text-[10px] text-gray-500 truncate w-full">{img.label}</div>
                       </div>
                     )}
                     {showBadge && (
@@ -2404,13 +2694,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                         >
                           <i className="fa-solid fa-chevron-right"></i>
                         </button>
-                      </div>
-                    )}
-                    {img.stage === 'input' && !img.preview && img.status !== 'failed' && (
-                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                        <p className="text-indigo-200 text-[10px] font-bold uppercase tracking-widest">
-                          Preview pending
-                        </p>
                       </div>
                     )}
                     {img.status === 'processing' && (img.stage === 'hdr' || img.stage === 'ai') && (
@@ -2443,6 +2726,34 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                       {img.label}
                     </div>
                     <div className="absolute top-3 right-3 flex flex-col items-end gap-2">
+                      {fromPipeline && canEditGroups && (
+                        <div className="flex items-center gap-2">
+                          {idx > 0 && (
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                mergeGroupWithPrevious(img.id);
+                              }}
+                              className="px-2 py-1 rounded-full bg-black/70 border border-white/10 text-[10px] text-white/80 hover:border-white/30 transition"
+                            >
+                              Merge Prev
+                            </button>
+                          )}
+                          {groupSize > 1 && (
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                splitGroupIntoSingles(img.id);
+                              }}
+                              className="px-2 py-1 rounded-full bg-black/70 border border-white/10 text-[10px] text-white/80 hover:border-white/30 transition"
+                            >
+                              Split
+                            </button>
+                          )}
+                        </div>
+                      )}
                       {fromPipeline && (
                         <label
                           className={`flex items-center gap-2 px-2.5 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition ${

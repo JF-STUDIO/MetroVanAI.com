@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate, authenticateSse } from '../middleware/auth.js';
 import { supabaseAdmin } from '../services/supabase.js';
-import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl, deletePrefix, createMultipartUpload, getPresignedUploadPartUrl, completeMultipartUpload, abortMultipartUpload } from '../services/r2.js';
+import { r2Client, BUCKET_NAME, RAW_BUCKET, HDR_BUCKET, OUTPUT_BUCKET, getPresignedPutUrl, getPresignedGetUrl, deletePrefix, createMultipartUpload, getPresignedUploadPartUrl, completeMultipartUpload, abortMultipartUpload, headObject } from '../services/r2.js';
 import { ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Queue } from 'bullmq';
@@ -44,6 +44,23 @@ const runWithConcurrency = async <T>(
         }
     });
     await Promise.all(workers);
+};
+
+const UPLOAD_VERIFY_ENABLED = process.env.UPLOAD_VERIFY_ENABLED !== 'false';
+const UPLOAD_VERIFY_CONCURRENCY = Number.parseInt(process.env.UPLOAD_VERIFY_CONCURRENCY || '6', 10);
+
+const verifyR2Objects = async (items: Array<{ id?: string; r2_bucket?: string; r2_key?: string }>) => {
+    if (!UPLOAD_VERIFY_ENABLED) return [];
+    const missing: Array<{ id?: string; r2_key: string }> = [];
+    const validItems = items.filter((item) => item?.r2_key);
+    await runWithConcurrency(validItems, Math.max(1, UPLOAD_VERIFY_CONCURRENCY), async (item) => {
+        const bucket = item.r2_bucket || resolveRawBucket();
+        const exists = await headObject(bucket, item.r2_key as string);
+        if (!exists) {
+            missing.push({ id: item.id, r2_key: item.r2_key as string });
+        }
+    });
+    return missing;
 };
 
 const createLimiter = (limit: number) => {
@@ -1592,11 +1609,18 @@ router.post('/jobs/:jobId/upload-complete', authenticate, async (req: AuthReques
             exif_time: file.exif_time || null,
             size: file.size || null,
             camera_make: file.camera_make || null,
-            camera_model: file.camera_model || null
+            camera_model: file.camera_model || null,
+            upload_status: 'uploaded',
+            uploaded_at: new Date().toISOString()
         };
     }).filter((row: any) => row && row.r2_key);
 
     if (rows.length === 0) return res.status(400).json({ error: 'No valid file keys provided' });
+
+    const missing = await verifyR2Objects(rows);
+    if (missing.length > 0) {
+        return res.status(400).json({ error: 'Upload verification failed', missing });
+    }
 
     const { error: insertError } = await (supabaseAdmin.from('job_files') as any)
         .upsert(rows, { onConflict: 'job_id,r2_key' });
@@ -1758,7 +1782,7 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
     }
 
     let fileQuery = (supabaseAdmin.from('job_files') as any)
-        .select('id, group_id, upload_status')
+        .select('id, group_id, upload_status, r2_bucket, r2_key')
         .eq('job_id', jobId);
     if (fileIds.length) {
         fileQuery = fileQuery.in('id', fileIds);
@@ -1785,11 +1809,19 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
 
     if (rowMap.size === 0) return res.status(404).json({ error: 'files not found' });
 
-    const idsToUpdate = Array.from(rowMap.keys());
-    const { error: updateError } = await (supabaseAdmin.from('job_files') as any)
-        .update({ upload_status: 'uploaded', uploaded_at: new Date().toISOString() }, { returning: 'minimal' })
-        .in('id', idsToUpdate);
-    if (updateError) return res.status(500).json({ error: updateError.message });
+    const rowsToUpdate = Array.from(rowMap.values()).filter((row: any) => row.upload_status !== 'uploaded');
+    if (rowsToUpdate.length > 0) {
+        const missing = await verifyR2Objects(rowsToUpdate);
+        if (missing.length > 0) {
+            return res.status(400).json({ error: 'Upload verification failed', missing });
+        }
+
+        const idsToUpdate = rowsToUpdate.map((row: any) => row.id);
+        const { error: updateError } = await (supabaseAdmin.from('job_files') as any)
+            .update({ upload_status: 'uploaded', uploaded_at: new Date().toISOString() }, { returning: 'minimal' })
+            .in('id', idsToUpdate);
+        if (updateError) return res.status(500).json({ error: updateError.message });
+    }
 
     const groupIds = Array.from(
         new Set(
@@ -1799,6 +1831,7 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
         )
     );
     const readyGroups: any[] = [];
+    const updatedCount = rowsToUpdate.length;
 
     for (const groupId of groupIds) {
         const { data: group } = await (supabaseAdmin.from('job_groups') as any)
@@ -1864,7 +1897,7 @@ router.post('/jobs/:jobId/file_uploaded', authenticate, async (req: AuthRequest,
             .eq('user_id', userId);
     }
 
-    res.json({ ok: true, uploaded: idsToUpdate.length, queued: readyGroups.length });
+    res.json({ ok: true, uploaded: updatedCount, queued: readyGroups.length });
 
     if (readyGroups.length > 0) {
         void (async () => {
@@ -2624,7 +2657,7 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
         .order('group_index', { ascending: true });
 
     const { data: fileRows } = await (supabaseAdmin.from('job_files') as any)
-        .select('id, group_id, r2_bucket, r2_key, filename, input_kind, preview_bucket, preview_key, preview_ready, group_order')
+        .select('id, group_id, r2_bucket, r2_key, filename, input_kind, preview_bucket, preview_key, preview_ready, group_order, upload_status, uploaded_at, size, exif_time, ev')
         .eq('job_id', jobId);
 
     const filesByGroup = new Map<string, any[]>();
@@ -2679,7 +2712,13 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
             order: index + 1,
             preview_url: await buildPreviewUrl(file),
             input_kind: resolveInputKind(file),
-            preview_ready: isPreviewReady(file)
+            preview_ready: isPreviewReady(file),
+            upload_status: file.upload_status || 'pending',
+            uploaded_at: file.uploaded_at || null,
+            r2_key: file.r2_key,
+            size: file.size || null,
+            exif_time: file.exif_time || null,
+            ev: typeof file.ev === 'number' ? file.ev : null
         })));
         const representativeFrame = frames[repIndex] || frames[0] || null;
         const previewUrl = representativeFrame?.preview_url || null;

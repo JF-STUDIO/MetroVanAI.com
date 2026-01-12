@@ -92,6 +92,12 @@ export interface PipelineGroupItem {
     preview_url?: string | null;
     input_kind?: string | null;
     preview_ready?: boolean;
+    upload_status?: string | null;
+    uploaded_at?: string | null;
+    r2_key?: string | null;
+    size?: number | null;
+    exif_time?: string | null;
+    ev?: number | null;
   }[];
   last_error?: string | null;
 }
