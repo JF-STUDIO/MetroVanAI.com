@@ -4,7 +4,7 @@ import { supabase } from './supabaseClient';
 // Hardcoded API URL for production stability
 const API_BASE_URL = import.meta.env.DEV
   ? 'http://localhost:4000/api'
-  : 'https://metrovanai-com.onrender.com/api';
+  : 'https://metrovan-server-docker.onrender.com/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
