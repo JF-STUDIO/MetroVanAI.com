@@ -309,19 +309,39 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
 
     return { run, getLimit: () => limit };
   };
-  // Ultra-fast EXIF reader for grouping (skips thumbnail extraction)
+  // Ultra-fast EXIF reader for grouping (based on the Python script logic)
   const readExifMetadata = async (file: File) => {
     try {
-      // Only read specific tags needed for grouping
+      // Read extended tags for smarter grouping
       const tags = await exifr.parse(file, {
-        pick: ['DateTimeOriginal', 'ExposureTime', 'FNumber', 'ISO', 'ExposureBiasValue'],
-        skip: ['MakerNote', 'UserComment'] // Skip large blocks
+        pick: [
+          'DateTimeOriginal', 'CreateDate', 'SubSecDateTimeOriginal',
+          'ExposureTime', 'ShutterSpeedValue', 'ISO', 'FNumber', 'ApertureValue',
+          'FocalLength', 'Model', 'SerialNumber', 'ExifImageWidth', 'ExifImageHeight',
+          'Orientation', 'ExposureBiasValue'
+        ],
+        skip: ['MakerNote', 'UserComment']
       });
+
+      const width = tags?.ExifImageWidth;
+      const height = tags?.ExifImageHeight;
+      // Handle orientation swap (5-8 means transposed)
+      const isTransposed = tags?.Orientation && tags.Orientation >= 5;
+
       return {
         id: '', // Will be filled
         name: file.name,
         size: file.size,
+        // Time parsing priority: DateTimeOriginal -> LastModified
         exifTime: tags?.DateTimeOriginal ? new Date(tags.DateTimeOriginal).getTime() : file.lastModified,
+        model: tags?.Model ? String(tags.Model) : null,
+        serial: tags?.SerialNumber ? String(tags.SerialNumber) : null,
+        orientation: tags?.Orientation,
+        width: isTransposed ? height : width,
+        height: isTransposed ? width : height,
+        focal: tags?.FocalLength ? Number(tags.FocalLength) : null,
+        fnum: tags?.FNumber ? Number(tags.FNumber) : (tags?.ApertureValue ? Number(tags.ApertureValue) : null),
+        iso: tags?.ISO ? Number(tags.ISO) : null,
         ev: tags?.ExposureBiasValue ?? null
       };
     } catch {
@@ -330,9 +350,52 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
         name: file.name,
         size: file.size,
         exifTime: file.lastModified,
-        ev: null
+        model: null, serial: null, orientation: null, width: null, height: null,
+        focal: null, fnum: null, iso: null, ev: null
       };
     }
+  };
+
+  // Helper utils for grouping
+  const getAspectRatio = (w: number | null | undefined, h: number | null | undefined) => {
+    if (!w || !h) return null;
+    return w / h;
+  };
+
+  const isCloseEnough = (a: number | null, b: number | null, tol: number) => {
+    if (a == null || b == null) return true; // Loose matching if missing
+    return Math.abs(a - b) <= tol;
+  };
+
+  const isRatioClose = (a: number | null, b: number | null, tol: number) => {
+    if (a == null || b == null || a === 0 || b === 0) return true;
+    const max = Math.max(a, b);
+    const min = Math.min(a, b);
+    return (max / min) <= tol;
+  };
+
+  const calculateMatchScore = (a: any, b: any) => {
+    let score = 0;
+    // Camera Model
+    if (a.model && b.model && a.model === b.model) score += 1;
+    // Serial Number
+    if (a.serial && b.serial && a.serial === b.serial) score += 1;
+    // Orientation
+    if (a.orientation && b.orientation && a.orientation === b.orientation) score += 1;
+
+    // Aspect Ratio (tol 1.25 from python script)
+    const arA = getAspectRatio(a.width, a.height);
+    const arB = getAspectRatio(b.width, b.height);
+    if (isRatioClose(arA, arB, 1.25)) score += 1;
+
+    // Focal Length (tol 6.0)
+    if (isCloseEnough(a.focal, b.focal, 6.0)) score += 1;
+    // Aperture (tol 0.6)
+    if (isCloseEnough(a.fnum, b.fnum, 0.6)) score += 1;
+    // ISO (ratio 2.2)
+    if (isRatioClose(a.iso, b.iso, 2.2)) score += 1;
+
+    return score;
   };
 
   const createRawPreviewUrl = async (file: File) => {
@@ -1178,15 +1241,35 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     const groups: any[] = [];
     if (sorted.length === 0) return { groups: [], files: [] };
 
+    // Parameters corresponding to Python script defaults
+    // GAP default 6s (6000ms), SPAN default 12s (12000ms)
+    // SCORE_THR default 6
+    const GAP_MS = thresholdMs > 0 ? thresholdMs : 6000;
+    const SPAN_MS = GAP_MS * 2;
+    const SCORE_THR = 5; // Slightly lower than python's 6 to be safe with web parsing
+
     let currentGroup: any[] = [sorted[0]];
+    let groupStartTime = sorted[0].exifTime || 0;
+    let lastFile = sorted[0];
 
-    // Simple adaptive grouping: if time diff < threshold, same group
     for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1];
       const curr = sorted[i];
-      const diff = Math.abs((curr.exifTime || 0) - (prev.exifTime || 0));
 
-      if (diff < thresholdMs) {
+      // Time logic
+      const dtPrev = Math.abs((curr.exifTime || 0) - (lastFile.exifTime || 0));
+      const dtSpan = Math.abs((curr.exifTime || 0) - groupStartTime);
+
+      let split = (dtPrev > GAP_MS) || (dtSpan > SPAN_MS);
+
+      // Score logic
+      if (!split) {
+        const score = calculateMatchScore(lastFile, curr);
+        if (score < SCORE_THR) {
+          split = true;
+        }
+      }
+
+      if (!split) {
         currentGroup.push(curr);
       } else {
         // Commit current group
@@ -1196,9 +1279,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
           fileIds: currentGroup.map(f => f.id),
           fileMetas: currentGroup
         });
+        // Start new group
         currentGroup = [curr];
+        groupStartTime = curr.exifTime || 0;
       }
+      lastFile = curr;
     }
+
     // Commit last group
     if (currentGroup.length > 0) {
       groups.push({
