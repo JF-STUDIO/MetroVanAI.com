@@ -1,28 +1,26 @@
 {
-  "env": {
-    "VITE_MULTIPART_THRESHOLD_MB": "120",
-    "VITE_UPLOAD_PARALLEL_MIN": "2",
-    "VITE_UPLOAD_PARALLEL_MAX": "10",
-    "VITE_UPLOAD_PARALLEL": "6",
-    "VITE_MULTIPART_PARALLEL_MIN": "1",
-    "VITE_MULTIPART_PARALLEL_MAX": "6",
-    "VITE_MULTIPART_PARALLEL": "3",
-    "VITE_UPLOAD_RETRY": "4",
-    "VITE_UPLOAD_RETRY_BASE_MS": "1000",
-    "VITE_UPLOAD_TIMEOUT_MS": "150000",
-    "VITE_PRESIGN_BATCH": "60",
-    "VITE_MAX_UPLOAD_FILES": "1000",
-    "VITE_MAX_FILE_BYTES": "524288000",
-    "VITE_MAX_UPLOAD_BYTES": "21474836480"
-  },
+  "version": 2,
+  "builds": [
+    {
+      "src": "client/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist"
+      }
+    },
+    {
+      "src": "server/index.js",
+      "use": "@vercel/node"
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://metrovan-server-docker.onrender.com/api/$1"
+      "destination": "/server/index.js"
     },
     {
       "source": "/(.*)",
-      "destination": "/index.html"
+      "destination": "/client/$1"
     }
   ]
 }

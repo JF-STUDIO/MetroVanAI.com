@@ -1,0 +1,7 @@
+[build]
+  base = "client"
+  publish = "dist"
+  command = "pnpm run build"
+
+[context.production]
+  environment = { NODE_VERSION = "20" }
