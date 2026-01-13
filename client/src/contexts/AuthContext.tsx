@@ -66,6 +66,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         await refreshUser();
       } catch (err) {
         console.warn('Auth initialization failed', err);
+      } finally {
         if (mounted) setLoading(false);
       }
     };
