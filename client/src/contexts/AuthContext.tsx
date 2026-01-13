@@ -53,12 +53,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (error instanceof Error && error.name === 'AbortError') return;
       console.error('Error in refreshUser:', error);
       setUser(null);
-    } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    // Safety timeout: stop loading after 5 seconds even if API hangs
+    const timer = setTimeout(() => {
+      setLoading(false);
+    }, 5000);
+
     refreshUser();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
@@ -72,6 +76,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     return () => {
+      clearTimeout(timer);
       subscription.unsubscribe();
     };
   }, []);
