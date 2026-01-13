@@ -20,7 +20,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       if (sessionError) throw sessionError;
-      
+
       if (session?.user) {
         // Try to fetch profile, but fallback gracefully if it fails or if user is new
         try {
@@ -58,25 +58,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
-    // Safety timeout: stop loading after 5 seconds even if API hangs
-    const timer = setTimeout(() => {
-      setLoading(false);
-    }, 5000);
+    let mounted = true;
 
-    refreshUser();
+    const initAuth = async () => {
+      // Race the session fetch against a timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Auth Timeout')), 8000); // 8s timeout
+      });
+
+      try {
+        await Promise.race([refreshUser(), timeoutPromise]);
+      } catch (err) {
+        console.warn('Auth initialization timed out or failed', err);
+        if (mounted) setLoading(false);
+      }
+    };
+
+    initAuth();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        // We can optionally debounce this or just call refreshUser
+      if (session?.user && mounted) {
         await refreshUser();
-      } else {
+      } else if (mounted) {
         setUser(null);
         setLoading(false);
       }
     });
 
     return () => {
-      clearTimeout(timer);
+      mounted = false;
       subscription.unsubscribe();
     };
   }, []);
