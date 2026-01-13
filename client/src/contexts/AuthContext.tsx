@@ -61,15 +61,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let mounted = true;
 
     const initAuth = async () => {
-      // Race the session fetch against a timeout
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Auth Timeout')), 8000); // 8s timeout
-      });
-
+      // Direct call without artificial timeout to accommodate slower network/cold starts
       try {
-        await Promise.race([refreshUser(), timeoutPromise]);
+        await refreshUser();
       } catch (err) {
-        console.warn('Auth initialization timed out or failed', err);
+        console.warn('Auth initialization failed', err);
         if (mounted) setLoading(false);
       }
     };
