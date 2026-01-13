@@ -353,8 +353,8 @@ const triggerCloudRunJob = async (jobId: string, mode: RunpodMode) => {
                     .map((file: any) => file.r2_key)
                     .filter((key: any) => typeof key === 'string')
                     .map((key: string) => {
-                    return `jobs/${jobId}/RAW_GROUPED/${groupName}/${path.basename(key)}`;
-                });
+                        return `jobs/${jobId}/RAW_GROUPED/${groupName}/${path.basename(key)}`;
+                    });
                 return {
                     groupIndex,
                     groupName,
@@ -1061,105 +1061,105 @@ const buildSequenceGroups = (files: any[]) => {
 
 // 1. 获取所有工具
 router.get('/tools', async (req: Request, res: Response) => {
-  const { data, error } = await (supabaseAdmin.from('photo_tools') as any).select('*').eq('is_active', true);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+    const { data, error } = await (supabaseAdmin.from('photo_tools') as any).select('*').eq('is_active', true);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data);
 });
 
 // 2. 创建任务
 router.post('/jobs', authenticate, async (req: AuthRequest, res: Response) => {
-  console.log('Received /api/jobs request:', req.body);
-  const { toolId, projectName } = req.body;
-  const userId = req.user?.id;
+    console.log('Received /api/jobs request:', req.body);
+    const { toolId, projectName } = req.body;
+    const userId = req.user?.id;
 
-  if (!projectName) {
-    console.error('Project name is missing');
-    return res.status(400).json({ error: 'Project name is required' });
-  }
-  if (!toolId) {
-    console.error('Tool ID is missing');
-    return res.status(400).json({ error: 'Tool ID is required' });
-  }
-
-  try {
-    const { data, error } = await (supabaseAdmin
-      .from('jobs') as any)
-      .insert({ user_id: userId, tool_id: toolId, project_name: projectName, status: 'pending' })
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Supabase insert error:', error);
-      return res.status(500).json({ error: error.message });
+    if (!projectName) {
+        console.error('Project name is missing');
+        return res.status(400).json({ error: 'Project name is required' });
     }
-    
-    console.log('Job created successfully:', data);
-    res.json(data);
-  } catch (e) {
-    console.error('Catch block error in /api/jobs:', e);
-    res.status(500).json({ error: 'An unexpected error occurred.' });
-  }
+    if (!toolId) {
+        console.error('Tool ID is missing');
+        return res.status(400).json({ error: 'Tool ID is required' });
+    }
+
+    try {
+        const { data, error } = await (supabaseAdmin
+            .from('jobs') as any)
+            .insert({ user_id: userId, tool_id: toolId, project_name: projectName, status: 'pending' })
+            .select()
+            .single();
+
+        if (error) {
+            console.error('Supabase insert error:', error);
+            return res.status(500).json({ error: error.message });
+        }
+
+        console.log('Job created successfully:', data);
+        res.json(data);
+    } catch (e) {
+        console.error('Catch block error in /api/jobs:', e);
+        res.status(500).json({ error: 'An unexpected error occurred.' });
+    }
 });
 
 // 3. 获取上传预签名 URL
 router.post('/jobs/:jobId/presign-upload', authenticate, async (req: AuthRequest, res: Response) => {
-  const { jobId } = req.params;
-  const { files }: { files: {name: string, type: string}[] } = req.body;
-  const userId = req.user?.id;
+    const { jobId } = req.params;
+    const { files }: { files: { name: string, type: string }[] } = req.body;
+    const userId = req.user?.id;
 
-  if (!Array.isArray(files) || files.length === 0) {
-    return res.status(400).json({ error: 'files required' });
-  }
-  if (MAX_UPLOAD_FILES > 0 && files.length > MAX_UPLOAD_FILES) {
-    return res.status(413).json({ error: `Too many files (max ${MAX_UPLOAD_FILES})` });
-  }
+    if (!Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: 'files required' });
+    }
+    if (MAX_UPLOAD_FILES > 0 && files.length > MAX_UPLOAD_FILES) {
+        return res.status(413).json({ error: `Too many files (max ${MAX_UPLOAD_FILES})` });
+    }
 
-  const results = await Promise.all(files.map(async (file) => {
-    const assetId = uuidv4();
-    const ext = file.name.split('.').pop() || '';
-    const r2Key = `u/${userId}/jobs/${jobId}/raw/${assetId}.${ext}`;
-    
-    const command = new PutObjectCommand({
-      Bucket: BUCKET_NAME,
-      Key: r2Key,
-      ContentType: file.type
-    });
+    const results = await Promise.all(files.map(async (file) => {
+        const assetId = uuidv4();
+        const ext = file.name.split('.').pop() || '';
+        const r2Key = `u/${userId}/jobs/${jobId}/raw/${assetId}.${ext}`;
 
-    const putUrl = await getSignedUrl(r2Client, command, { expiresIn: 3600 });
-    
-    await (supabaseAdmin.from('job_assets') as any).insert({
-        id: assetId,
-        job_id: jobId,
-        r2_key: r2Key,
-        status: 'pending'
-    });
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: r2Key,
+            ContentType: file.type
+        });
 
-    return { assetId, r2Key, putUrl, fileName: file.name };
-  }));
+        const putUrl = await getSignedUrl(r2Client, command, { expiresIn: 3600 });
 
-  res.json(results);
+        await (supabaseAdmin.from('job_assets') as any).insert({
+            id: assetId,
+            job_id: jobId,
+            r2_key: r2Key,
+            status: 'pending'
+        });
+
+        return { assetId, r2Key, putUrl, fileName: file.name };
+    }));
+
+    res.json(results);
 });
 
 // 4. 提交任务 (校验并入队)
 router.post('/jobs/:jobId/commit', authenticate, async (req: AuthRequest, res: Response) => {
-  const { jobId } = req.params;
-  const userId = req.user?.id;
+    const { jobId } = req.params;
+    const userId = req.user?.id;
 
-  const { data: job, error: jobErr } = await (supabaseAdmin
-    .from('jobs') as any).select('*').eq('id', jobId).eq('user_id', userId).single();
-  if (jobErr || !job) return res.status(404).json({ error: 'Job not found' });
+    const { data: job, error: jobErr } = await (supabaseAdmin
+        .from('jobs') as any).select('*').eq('id', jobId).eq('user_id', userId).single();
+    if (jobErr || !job) return res.status(404).json({ error: 'Job not found' });
 
-  const { data: assets } = await (supabaseAdmin.from('job_assets') as any).select('*').eq('job_id', jobId);
-  if (!assets || assets.length === 0) return res.status(400).json({ error: 'No assets found' });
+    const { data: assets } = await (supabaseAdmin.from('job_assets') as any).select('*').eq('job_id', jobId);
+    if (!assets || assets.length === 0) return res.status(400).json({ error: 'No assets found' });
 
-  await (supabaseAdmin.from('jobs') as any).update({ status: 'queued' }).eq('id', jobId);
-  
-  await jobQueue.add('process-job', { jobId }, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 }
-  });
+    await (supabaseAdmin.from('jobs') as any).update({ status: 'queued' }).eq('id', jobId);
 
-  res.json({ message: 'Job queued', jobId });
+    await jobQueue.add('process-job', { jobId }, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 }
+    });
+
+    res.json({ message: 'Job queued', jobId });
 });
 
 // 5. 获取任务进度
@@ -1409,7 +1409,7 @@ router.post('/recharge', authenticate, async (req: AuthRequest, res: Response) =
     const newPoints = Number(purchaseRow?.available_credits ?? amount);
 
     await (supabaseAdmin.from('profiles') as any).update({ points: newPoints }).eq('id', userId);
-    
+
     await (supabaseAdmin.from('transactions') as any).insert({
         user_id: userId, amount: amount, type: 'recharge', description: `Recharged ${amount} points`
     });
@@ -1613,11 +1613,11 @@ router.post('/jobs/:jobId/upload-complete', authenticate, async (req: AuthReques
             upload_status: 'uploaded',
             uploaded_at: new Date().toISOString()
         };
-    }).filter((row: any) => row && row.r2_key);
+    }).filter((row: any): row is Record<string, any> => row && row.r2_key);
 
     if (rows.length === 0) return res.status(400).json({ error: 'No valid file keys provided' });
 
-    const missing = await verifyR2Objects(rows);
+    const missing = await verifyR2Objects(rows as any);
     if (missing.length > 0) {
         return res.status(400).json({ error: 'Upload verification failed', missing });
     }
@@ -2634,22 +2634,22 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
         .single();
     if (error || !job) return null;
 
-  const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
-    .select('status')
-    .eq('job_id', jobId);
+    const { data: groups } = await (supabaseAdmin.from('job_groups') as any)
+        .select('status')
+        .eq('job_id', jobId);
 
-  const summary = (groups || []).reduce((acc: any, group: any) => {
-    const isSkipped = group.status === 'skipped';
-    acc.total_all += 1;
-    if (isSkipped) {
-      acc.skipped += 1;
-      return acc;
-    }
-    acc.total += 1;
-    if (group.status === 'ai_ok') acc.success += 1;
-    if (group.status === 'failed') acc.failed += 1;
-    return acc;
-  }, { total: 0, success: 0, failed: 0, skipped: 0, total_all: 0 });
+    const summary = (groups || []).reduce((acc: any, group: any) => {
+        const isSkipped = group.status === 'skipped';
+        acc.total_all += 1;
+        if (isSkipped) {
+            acc.skipped += 1;
+            return acc;
+        }
+        acc.total += 1;
+        if (group.status === 'ai_ok') acc.success += 1;
+        if (group.status === 'failed') acc.failed += 1;
+        return acc;
+    }, { total: 0, success: 0, failed: 0, skipped: 0, total_all: 0 });
 
     const { data: groupRows } = await (supabaseAdmin.from('job_groups') as any)
         .select('id, group_index, status, hdr_bucket, hdr_key, output_bucket, output_key, output_filename, last_error, representative_file_id, group_type')
@@ -2693,7 +2693,7 @@ const buildPipelineStatusPayload = async (jobId: string, userId: string) => {
     const items = await Promise.all((groupRows || []).map(async (group: any) => {
         const hdrUrl = group.hdr_key
             ? await getPresignedGetUrl(group.hdr_bucket || HDR_BUCKET, group.hdr_key, 900)
-        : null;
+            : null;
         const outputUrl = group.output_key
             ? await getPresignedGetUrl(group.output_bucket || OUTPUT_BUCKET, group.output_key, 900)
             : null;

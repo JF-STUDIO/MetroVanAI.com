@@ -4,6 +4,7 @@ import Layout from './components/Layout';
 import { User, Workflow } from './types';
 import { supabase } from './services/supabaseClient';
 import { jobService } from './services/jobService';
+import { useAuth } from './contexts/AuthContext';
 
 const Home = React.lazy(() => import('./components/Home'));
 const Pricing = React.lazy(() => import('./components/Pricing'));
@@ -11,7 +12,7 @@ const Editor = React.lazy(() => import('./components/Editor'));
 const Admin = React.lazy(() => import('./components/Admin'));
 
 const App: React.FC = () => {
-  const [user, setUser] = useState<User | null>(null);
+  const { user, loading: authLoading, signOut } = useAuth();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
@@ -22,51 +23,16 @@ const App: React.FC = () => {
   const [resetPassword, setResetPassword] = useState('');
   const [resetConfirm, setResetConfirm] = useState('');
   const [resetReady, setResetReady] = useState(false);
-  const [loading, setLoading] = useState(true);
+  // Local loading state for form actions
+  const [loading, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
 
-  useEffect(() => {
-    const fetchUserAndSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        try {
-          const profile = await jobService.getProfile();
-          const displayName = (session.user.user_metadata?.full_name as string | undefined) || session.user.email?.split('@')[0] || '';
-          setUser({
-            id: session.user.id,
-            email: session.user.email || '',
-            name: displayName,
-            points: profile.available_credits ?? profile.points ?? 0,
-            isAdmin: profile.is_admin || false
-          });
-        } catch (e) { console.error('Failed to load profile', e); }
-      }
-      setLoading(false);
-    };
-    fetchUserAndSession();
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        jobService.getProfile().then(profile => {
-          const displayName = (session.user.user_metadata?.full_name as string | undefined) || session.user.email?.split('@')[0] || '';
-          setUser({
-            id: session.user.id,
-            email: session.user.email || '',
-            name: displayName,
-            points: profile.available_credits ?? profile.points ?? 0,
-            isAdmin: profile.is_admin || false
-          });
-        }).catch(e => console.error('Failed to load profile on auth change', e));
-      } else {
-        setUser(null);
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
+  // Redirect logic or other side effects can go here
+  // Note: user loading is handled by authLoading from context, 
+  // but we also have local 'loading' for form submissions.
 
   useEffect(() => {
     if (user) {
@@ -185,8 +151,7 @@ const App: React.FC = () => {
   };
 
   const logout = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
+    await signOut();
     navigate('/', { replace: true });
     setAuthError(null);
     setAuthNotice(null);
@@ -414,7 +379,7 @@ const App: React.FC = () => {
     };
   }, [location.pathname]);
 
-  if (loading) return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
+  if (authLoading) return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
 
   const currentView = (() => {
     const path = location.pathname;
@@ -455,7 +420,7 @@ const App: React.FC = () => {
           <Route path="/login" element={user ? <Navigate to="/studio" replace /> : (isResetting ? resetRequestView : loginView)} />
           <Route path="/auth/callback" element={authCallbackView} />
           <Route path="/auth/reset" element={resetPasswordView} />
-          <Route path="/studio" element={user ? <Editor user={user} workflows={workflows} onUpdateUser={setUser} /> : <Navigate to="/login" replace />} />
+          <Route path="/studio" element={user ? <Editor user={user} workflows={workflows} /> : <Navigate to="/login" replace />} />
           <Route path="/admin" element={user && user.isAdmin ? <Admin user={user} /> : <Navigate to={user ? '/studio' : '/login'} replace />} />
           <Route path="/pricing" element={<Pricing user={user} onStart={() => navigate(user ? '/studio' : '/login')} />} />
           <Route path="*" element={<Navigate to="/" replace />} />

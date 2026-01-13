@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Workflow, User, Job, JobAsset, PipelineGroupItem } from '../types';
+import { useAuth } from '../contexts/AuthContext';
 import { jobService } from '../services/jobService';
 import { supabase } from '../services/supabaseClient';
 import axios from 'axios';
@@ -12,12 +13,11 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
 interface EditorProps {
   user: User;
   workflows: Workflow[];
-  onUpdateUser: (user: User) => void;
 }
 
 // Data structure for an image being processed
 interface ImageItem {
-  id: string; 
+  id: string;
   file: File;
   preview: string;
   status: 'pending' | 'uploading' | 'processing' | 'done' | 'failed';
@@ -103,7 +103,8 @@ const ComparisonSlider: React.FC<{ original: string; processed: string }> = ({ o
 };
 
 // Main Editor Component with multiple views
-const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
+const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
+  const { refreshUser } = useAuth();
   const [activeTool, setActiveTool] = useState<Workflow | null>(null);
   const [showProjectInput, setShowProjectInput] = useState(false);
   const [uploadImages, setUploadImages] = useState<ImageItem[]>([]);
@@ -308,12 +309,64 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
 
     return { run, getLimit: () => limit };
   };
+  // Ultra-fast EXIF reader for grouping (skips thumbnail extraction)
+  const readExifMetadata = async (file: File) => {
+    try {
+      // Only read specific tags needed for grouping
+      const tags = await exifr.parse(file, {
+        pick: ['DateTimeOriginal', 'ExposureTime', 'FNumber', 'ISO', 'ExposureBiasValue'],
+        skip: ['MakerNote', 'UserComment'] // Skip large blocks
+      });
+      return {
+        id: '', // Will be filled
+        name: file.name,
+        size: file.size,
+        exifTime: tags?.DateTimeOriginal ? new Date(tags.DateTimeOriginal).getTime() : file.lastModified,
+        ev: tags?.ExposureBiasValue ?? null
+      };
+    } catch {
+      return {
+        id: '',
+        name: file.name,
+        size: file.size,
+        exifTime: file.lastModified,
+        ev: null
+      };
+    }
+  };
+
   const createRawPreviewUrl = async (file: File) => {
     try {
+      // Ensure we only extract the thumbnail, not the full image if possible
       const thumb = await exifr.thumbnail(file);
       if (!thumb) return null;
-      const blob = thumb instanceof Blob ? thumb : new Blob([thumb], { type: 'image/jpeg' });
-      return URL.createObjectURL(blob);
+
+      // Setup an offscreen canvas (or regular canvas) to resize
+      const img = new Image();
+      const blob = thumb instanceof Blob ? thumb : new Blob([thumb as any], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+
+      return new Promise<string | null>((resolve) => {
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          // Resize to max 1080px to save memory
+          const scale = Math.min(1080 / img.width, 1080 / img.height, 1);
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(url); // Clean up intermediate blob
+          canvas.toBlob((b) => {
+            if (b) resolve(URL.createObjectURL(b));
+            else resolve(null);
+          }, 'image/jpeg', 0.8);
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          resolve(null);
+        };
+        img.src = url;
+      });
     } catch (error) {
       return null;
     }
@@ -581,8 +634,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
             setJobStatus('completed');
           }
           try {
-            const profile = await jobService.getProfile();
-            onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
+            await refreshUser();
           } catch {
             // ignore
           }
@@ -1120,36 +1172,61 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     });
   };
 
-  const runGroupingWorker = async (thresholdMs: number) => {
-    const worker = new Worker(new URL('../workers/groupingWorker.ts', import.meta.url), { type: 'module' });
-    try {
-      const result = await new Promise<{ groups: any[]; files: any[]; total: number }>((resolve, reject) => {
-        worker.onmessage = (event) => {
-          const data = event.data;
-          if (data?.type === 'progress' && data.total) {
-            const progress = Math.round((data.processed / data.total) * 100);
-            setPipelineProgress(Math.min(100, Math.max(0, progress)));
-            return;
-          }
-          if (data?.type === 'done') {
-            resolve(data);
-          }
-        };
-        worker.onerror = (event) => reject(event);
-        const exifParallel = Number(import.meta.env.VITE_GROUPING_PARALLEL);
-        const exifSliceKb = Number(import.meta.env.VITE_EXIF_SLICE_KB);
-        const groupingOptions: Record<string, number> = { timeThresholdMs: thresholdMs };
-        if (Number.isFinite(exifParallel)) groupingOptions.exifParallel = exifParallel;
-        if (Number.isFinite(exifSliceKb)) groupingOptions.exifSliceKb = exifSliceKb;
-        worker.postMessage({
-          items: uploadImages.map(({ id, file }) => ({ id, file })),
-          options: groupingOptions
+  const performGroupingLocally = (files: any[], thresholdMs: number) => {
+    // Sort by capture time
+    const sorted = [...files].sort((a, b) => (a.exifTime || 0) - (b.exifTime || 0));
+    const groups: any[] = [];
+    if (sorted.length === 0) return { groups: [], files: [] };
+
+    let currentGroup: any[] = [sorted[0]];
+
+    // Simple adaptive grouping: if time diff < threshold, same group
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const curr = sorted[i];
+      const diff = Math.abs((curr.exifTime || 0) - (prev.exifTime || 0));
+
+      if (diff < thresholdMs) {
+        currentGroup.push(curr);
+      } else {
+        // Commit current group
+        groups.push({
+          id: `group-${Date.now()}-${groups.length}`,
+          index: groups.length + 1,
+          fileIds: currentGroup.map(f => f.id),
+          fileMetas: currentGroup
         });
-      });
-      return result;
-    } finally {
-      worker.terminate();
+        currentGroup = [curr];
+      }
     }
+    // Commit last group
+    if (currentGroup.length > 0) {
+      groups.push({
+        id: `group-${Date.now()}-${groups.length}`,
+        index: groups.length + 1,
+        fileIds: currentGroup.map(f => f.id),
+        fileMetas: currentGroup
+      });
+    }
+    return { groups, files: sorted };
+  };
+
+  const runGroupingWorker = async (thresholdMs: number) => {
+    // Use local logic instead of worker for now to avoid 404
+    // Map uploadImages to metadata
+    setPipelineProgress(10);
+    const metaPromises = uploadImages.map(async (item) => {
+      const meta = await readExifMetadata(item.file);
+      return { ...meta, id: item.id };
+    });
+
+    const metas = await Promise.all(metaPromises);
+    setPipelineProgress(50);
+
+    const result = performGroupingLocally(metas, thresholdMs);
+    setPipelineProgress(90);
+
+    return { ...result, total: metas.length };
   };
 
   const buildPipelineGroups = (groups: any[], files: any[]) => {
@@ -1817,10 +1894,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       setJobStatus('hdr_processing');
       setJob((prev) => (prev ? { ...prev, status: 'hdr_processing' } : prev));
       const profile = await jobService.getProfile();
-      onUpdateUser({ ...user, points: profile.available_credits ?? profile.points ?? 0 });
+      await refreshUser();
       const balanceRow = Array.isArray(startResponse?.balance) ? startResponse.balance[0] : startResponse?.balance;
       if (balanceRow?.available_credits !== undefined) {
-        onUpdateUser({ ...user, points: balanceRow.available_credits });
+        await refreshUser();
       }
     } catch (err) {
       const message = getApiErrorMessage(err, 'Failed to start processing.');
@@ -1846,7 +1923,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
     localStorage.removeItem('mvai:last_job');
     saveEditorState({ mode: 'projects', workflowId: tool.id, jobId: null, search: '' });
   };
-  
+
   const handleProjectCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!projectName || !activeTool) return;
@@ -2009,10 +2086,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
       : isSkipped
         ? 'input'
         : item.status === 'ai_processing' || item.status === 'ai_ok'
-        ? 'ai'
-        : item.status === 'hdr_processing' || item.status === 'hdr_ok' || item.status === 'preprocess_ok'
-          ? 'hdr'
-          : 'input';
+          ? 'ai'
+          : item.status === 'hdr_processing' || item.status === 'hdr_ok' || item.status === 'preprocess_ok'
+            ? 'hdr'
+            : 'input';
     const status: GalleryItem['status'] =
       item.status === 'failed'
         ? 'failed'
@@ -2246,7 +2323,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         <div className="max-w-6xl mx-auto space-y-8">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
             <div className="flex items-center gap-3">
-          <button onClick={() => { setActiveTool(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); setGroupingComplete(false); resetStreamState(); clearEditorState(); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+              <button onClick={() => { setActiveTool(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); setGroupingComplete(false); resetStreamState(); clearEditorState(); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
                 <i className="fa-solid fa-arrow-left"></i>
               </button>
               <div>
@@ -2339,8 +2416,8 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                         {(item.status === 'completed' || item.status === 'partial') && (
                           <button
                             onClick={async () => {
-                            const { url } = await jobService.getPresignedDownloadUrl(item.id);
-                            if (url) window.location.href = url;
+                              const { url } = await jobService.getPresignedDownloadUrl(item.id);
+                              if (url) window.location.href = url;
                             }}
                             className="px-3 py-2 rounded-xl bg-green-500 text-white text-[10px] font-black uppercase tracking-widest"
                           >
@@ -2496,7 +2573,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
         </div>
         <div className="flex items-center gap-4">
           {canDownload && (
-            <button onClick={() => { if(zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
+            <button onClick={() => { if (zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
               {downloadLabel} <i className="fa-solid fa-file-zipper"></i>
             </button>
           )}
@@ -2788,11 +2865,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows, onUpdateUser }) => {
                       )}
                       {fromPipeline && (
                         <label
-                          className={`flex items-center gap-2 px-2.5 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition ${
-                            isExcluded
-                              ? 'bg-amber-500/30 border-amber-400 text-amber-100'
-                              : 'bg-black/60 border-white/10 text-white/80 hover:border-white/40'
-                          } ${!canToggleSkip ? 'opacity-40 cursor-not-allowed' : ''}`}
+                          className={`flex items-center gap-2 px-2.5 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest transition ${isExcluded
+                            ? 'bg-amber-500/30 border-amber-400 text-amber-100'
+                            : 'bg-black/60 border-white/10 text-white/80 hover:border-white/40'
+                            } ${!canToggleSkip ? 'opacity-40 cursor-not-allowed' : ''}`}
                           onClick={(event) => {
                             event.stopPropagation();
                           }}
