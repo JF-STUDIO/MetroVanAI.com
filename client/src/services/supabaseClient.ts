@@ -1,18 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseAnonKey) {
-  // Enterprise-grade logging for critical config failures
-  console.error(
-    '%cCRITICAL ERROR: Missing Supabase Configuration',
-    'color: white; background-color: red; font-size: 16px; padding: 10px; border-radius: 4px;'
-  );
-  console.error('Please verify VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set in your environment variables.');
-  // In production, we might want to allow the app to crash or show a maintenance page
-  // For now, we throw to stop partial initialization
-  throw new Error('Critical: Missing Supabase environment variables');
-}
+// Hardcoded for production stability - Anon key is safe to expose
+const supabaseUrl = 'https://ulctdvytpigqywmfqygf.supabase.co';
+const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVsY3Rkdnl0cGlncXl3bWZxeWdmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY3OTA0NjgsImV4cCI6MjA4MjM2NjQ2OH0.adhpgdzSFbggMLWPJ0lbJfFsa6l0vzzBB3Iyo2qQQ-I';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)

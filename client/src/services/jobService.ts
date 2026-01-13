@@ -1,12 +1,10 @@
 import axios from 'axios';
 import { supabase } from './supabaseClient';
 
-// Strict environment variable check for API connection
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:4000/api' : '/api');
-
-if (!import.meta.env.DEV && !API_BASE_URL.startsWith('http')) {
-  console.warn('Production API_BASE_URL is falling back to relative path. Ensure correct proxy or CORS configuration.');
-}
+// Hardcoded API URL for production stability
+const API_BASE_URL = import.meta.env.DEV
+  ? 'http://localhost:4000/api'
+  : 'https://metrovanai-com.onrender.com/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
