@@ -18,7 +18,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const refreshUser = async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      
       if (session?.user) {
         // Try to fetch profile, but fallback gracefully if it fails or if user is new
         try {
@@ -32,6 +34,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             isAdmin: profile.is_admin || false
           });
         } catch (error) {
+          // Ignore AbortErrors that happen during rapid navigation
+          if (error instanceof Error && error.name === 'AbortError') return;
           console.error('Error fetching profile:', error);
           // Still set basic user info even if profile fetch fails
           setUser({
@@ -46,6 +50,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(null);
       }
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
       console.error('Error in refreshUser:', error);
       setUser(null);
     } finally {
