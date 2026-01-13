@@ -4,7 +4,8 @@
   "scripts": {
     "dev:client": "pnpm --filter metrovan-ai-client dev",
     "dev:server": "pnpm --filter metrovan-ai-server dev",
-    "build": "pnpm --filter metrovan-ai-client build && rm -rf dist && cp -r client/dist dist"
+    "build": "pnpm --filter metrovan-ai-client build && rm -rf dist && cp -r client/dist dist",
+    "build:server": "pnpm --filter metrovan-ai-server install && pnpm --filter metrovan-ai-server build"
   },
   "devDependencies": {
     "typescript": "^5.3.2"
