@@ -21,6 +21,11 @@ const defaultOrigins = [
   'https://metrovanai.com',
   'https://www.metrovanai.com'
 ];
+
+console.log('--- ENV CHECK ---');
+console.log('SUPABASE_URL:', process.env.SUPABASE_URL ? 'SET' : 'MISSING');
+console.log('SUPABASE_SERVICE_ROLE_KEY:', process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SET' : 'MISSING');
+console.log('-----------------');
 const normalizeOrigin = (value: string) => value.trim().replace(/\/+$/, '');
 const rawOrigins = process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || '';
 const envOrigins = rawOrigins
@@ -35,7 +40,7 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 app.use(cors({
-  origin: function(origin, callback) {
+  origin: function (origin, callback) {
     // allow requests with no origin (like mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
     const normalized = normalizeOrigin(origin);
