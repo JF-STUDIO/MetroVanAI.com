@@ -1,10 +1,10 @@
 FROM node:22-bookworm-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    hugin-tools \
-    enblend \
-    dcraw \
-    imagemagick \
+  hugin-tools \
+  enblend \
+  dcraw \
+  imagemagick \
   && rm -rf /var/lib/apt/lists/*
 
 RUN corepack enable
@@ -24,15 +24,15 @@ COPY server ./server
 WORKDIR /app/server
 # Increase memory limit for TSC
 ENV NODE_OPTIONS="--max-old-space-size=2048"
-RUN pnpm run build && rm -rf node_modules
+RUN pnpm run build
 
 FROM node:22-bookworm-slim AS runner
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    hugin-tools \
-    enblend \
-    dcraw \
-    imagemagick \
+  hugin-tools \
+  enblend \
+  dcraw \
+  imagemagick \
   && rm -rf /var/lib/apt/lists/*
 
 RUN corepack enable
