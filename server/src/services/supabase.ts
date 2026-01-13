@@ -1,17 +1,31 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// 注意：在生产环境中，这些值应该从环境变量中读取
-// dotenv 已经在 index.ts 或 worker.ts 中加载
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+let supabaseInstance: SupabaseClient | null = null;
 
-if (!supabaseUrl || !supabaseServiceKey) {
-  console.warn('Supabase credentials missing in services/supabase.ts');
-}
+export const getSupabaseAdmin = () => {
+  if (supabaseInstance) return supabaseInstance;
 
-export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !supabaseServiceKey) {
+    throw new Error(`CRITICAL: Missing Supabase credentials. URL: ${!!supabaseUrl}, KEY: ${!!supabaseServiceKey}`);
   }
-}) as any;
+
+  supabaseInstance = createClient(supabaseUrl, supabaseServiceKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
+    }
+  });
+
+  return supabaseInstance;
+};
+
+// Main export proxy to keep compatibility with existing code imports
+export const supabaseAdmin = new Proxy({}, {
+  get: (_target, prop) => {
+    const instance = getSupabaseAdmin();
+    return (instance as any)[prop];
+  }
+});
