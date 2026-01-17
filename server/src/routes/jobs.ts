@@ -16,6 +16,7 @@ import { getFreeTrialPoints } from '../services/settings.js';
 import { attachTaskStream, emitTaskEvent } from '../services/taskStream.js';
 import { attachJobStream, emitJobEvent, sendInitialJobEvents } from '../services/jobEvents.js';
 import { GoogleAuth } from 'google-auth-library';
+import { submitHdrJobToRunpod } from '../services/runpod.js';
 
 const router = Router();
 const emitJobEventAsync = (jobId: string, payload: any) => {
@@ -3307,5 +3308,144 @@ router.post('/runpod/callback', async (req: Request, res: Response) => {
         res.status(500).json({ error: err.message || 'internal error' });
     }
 });
+
+// New Endpoint: Submit Grouped Manifest directly (Frontend grouping)
+router.post('/submit-manifest', authenticate, async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { jobId: existingJobId, workflowId, projectName, groups } = req.body;
+
+    if (!Array.isArray(groups) || groups.length === 0) {
+        return res.status(400).json({ error: 'Invalid payload: groups missing' });
+    }
+
+    try {
+        let jobId = existingJobId;
+
+        if (jobId) {
+            // Verify existing job
+            const { data: job, error: jobError } = await (supabaseAdmin.from('jobs') as any)
+                .select('id, status')
+                .eq('id', jobId)
+                .eq('user_id', userId)
+                .single();
+
+            if (jobError || !job) {
+                return res.status(404).json({ error: 'Job not found or unauthorized' });
+            }
+
+            // Update status to processing
+            await (supabaseAdmin.from('jobs') as any)
+                .update({
+                    status: 'hdr_processing',
+                    total_files: groups.reduce((acc: number, g: any) => acc + (g.files?.length || 0), 0),
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', jobId);
+
+        } else {
+            // Create new Job
+            if (!workflowId) return res.status(400).json({ error: 'workflowId required for new job' });
+
+            const { data: job, error: jobError } = await (supabaseAdmin.from('jobs') as any)
+                .insert({
+                    user_id: userId,
+                    workflow_id: workflowId,
+                    project_name: projectName || 'Untitled Project',
+                    status: 'hdr_processing',
+                    total_files: groups.reduce((acc: number, g: any) => acc + (g.files?.length || 0), 0),
+                    progress: 0
+                })
+                .select()
+                .single();
+
+            if (jobError || !job) {
+                throw new Error(jobError?.message || 'Failed to create job');
+            }
+            jobId = job.id;
+        }
+
+        // 2. Insert Groups & Files
+        const groupsToInsert: any[] = [];
+        const filesToInsert: any[] = [];
+        const tasksToDispatch: any[] = [];
+
+        for (let i = 0; i < groups.length; i++) {
+            const g = groups[i];
+            const groupId = g.id || uuidv4();
+            const groupIndex = g.groupIndex ?? (i + 1);
+
+            groupsToInsert.push({
+                id: groupId,
+                job_id: jobId,
+                group_index: groupIndex,
+                status: 'hdr_processing',
+                group_type: 'bracketed',
+                created_at: new Date().toISOString()
+            });
+
+            const groupFiles = Array.isArray(g.files) ? g.files : [];
+            for (let j = 0; j < groupFiles.length; j++) {
+                const f = groupFiles[j];
+                filesToInsert.push({
+                    id: util_generateFileId(f),
+                    job_id: jobId,
+                    group_id: groupId,
+                    filename: f.filename,
+                    r2_key: f.r2_key,
+                    r2_bucket: resolveRawBucket(),
+                    file_size: f.size,
+                    exif_json: f.exif,
+                    group_order: j + 1,
+                    input_kind: detectInputKind(f.filename, f.r2_key)
+                });
+            }
+
+            tasksToDispatch.push({
+                jobId,
+                groupId,
+                files: groupFiles.map((f: any) => ({
+                    r2_bucket: resolveRawBucket(),
+                    r2_key: f.r2_key,
+                    id: util_generateFileId(f)
+                }))
+            });
+        }
+
+        const { error: insertGroupsError } = await (supabaseAdmin.from('job_groups') as any).insert(groupsToInsert);
+        if (insertGroupsError) throw insertGroupsError;
+
+        const { error: insertFilesError } = await (supabaseAdmin.from('job_files') as any).insert(filesToInsert);
+        if (insertFilesError) throw insertFilesError;
+
+        // 3. Dispatch to RunPod asynchronously
+        void (async () => {
+            for (const task of tasksToDispatch) {
+                try {
+                    await submitHdrJobToRunpod(task);
+                    await (supabaseAdmin.from('job_groups') as any)
+                        .update({ status: 'hdr_processing', updated_at: new Date().toISOString() })
+                        .eq('id', task.groupId);
+                } catch (err) {
+                    console.error('Failed to trigger RunPod for group', task.groupId, err);
+                    await (supabaseAdmin.from('job_groups') as any)
+                        .update({ status: 'failed', last_error: 'RunPod trigger failed' })
+                        .eq('id', task.groupId);
+                }
+            }
+        })();
+
+        res.json({ success: true, jobId, message: 'Job submitted' });
+
+    } catch (error) {
+        console.error('Submit manifest failed:', error);
+        res.status(500).json({ error: 'Submission failed', detail: (error as Error).message });
+    }
+});
+
+function util_generateFileId(f: any): string {
+    return f.id || uuidv4();
+}
 
 export default router;

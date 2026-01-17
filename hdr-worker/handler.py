@@ -1,4 +1,4 @@
-# handler.py
+
 import os
 import json
 import subprocess
@@ -7,12 +7,14 @@ import boto3
 import requests
 import runpod
 
+# Environment Variables
 R2_ENDPOINT = os.getenv("R2_ENDPOINT")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
 R2_RAW_BUCKET = os.getenv("R2_RAW_BUCKET", "mvai-raw")
-R2_OUT_BUCKET = os.getenv("R2_OUT_BUCKET", "mvai-hdr-temp")
+R2_OUT_BUCKET = os.getenv("R2_OUT_BUCKET", "mvai-hdr")
 
+# Boto3 Client
 s3 = boto3.client(
     "s3",
     endpoint_url=R2_ENDPOINT,
@@ -20,41 +22,69 @@ s3 = boto3.client(
     aws_secret_access_key=R2_SECRET_ACCESS_KEY,
 )
 
-
-def download_files(files, input_dir, skip_ids=None):
-    skip_ids = set(skip_ids or [])
+def download_files(files, input_dir):
+    """
+    Download files from R2 to input_dir.
+    'files' is a list of dicts: { "r2_key": "...", "r2_bucket": "..." }
+    """
+    print(f"📥 Downloading {len(files)} files...")
     for f in files:
-        file_id = f.get("id")
-        if file_id and file_id in skip_ids:
-            continue
-        key = f.get("r2_key_raw")
+        key = f.get("r2_key") or f.get("r2_key_raw")
+        bucket = f.get("r2_bucket") or R2_RAW_BUCKET
+        
         if not key:
+            print("⚠️ Skipping file with no key:", f)
             continue
-        dst = os.path.join(input_dir, os.path.basename(key))
-        s3.download_file(R2_RAW_BUCKET, key, dst)
+            
+        print(f"   Downloading s3://{bucket}/{key}")
+        # Preserve filename from key
+        filename = os.path.basename(key)
+        dst = os.path.join(input_dir, filename)
+        
+        try:
+            s3.download_file(bucket, key, dst)
+        except Exception as e:
+            print(f"❌ Failed to download {key}: {e}")
+            raise e
 
-
-def upload_folder(folder, prefix):
-    uploaded = []
-    for root, _, files in os.walk(folder):
-        for name in files:
-            local = os.path.join(root, name)
-            rel = os.path.relpath(local, folder)
-            key = f"{prefix}/{rel}"
-            s3.upload_file(local, R2_OUT_BUCKET, key)
-            uploaded.append({"key": key, "name": name})
-    return uploaded
-
+def upload_file(local_path, r2_key):
+    """
+    Upload a single file to R2.
+    """
+    print(f"📤 Uploading {local_path} to s3://{R2_OUT_BUCKET}/{r2_key}")
+    try:
+        s3.upload_file(local_path, R2_OUT_BUCKET, r2_key)
+        return r2_key
+    except Exception as e:
+        print(f"❌ Failed to upload {r2_key}: {e}")
+        raise e
 
 def handler(job):
-    data = job.get("input") or {}
-    job_id = data.get("jobId")
-    files = data.get("files") or []
-    callback_url = data.get("callbackUrl")
-    callback_secret = data.get("callbackSecret")
-    skip_file_ids = set(data.get("skipFileIds") or [])
+    """
+    Main RunPod Handler
+    Expected Input:
+    {
+        "input": {
+            "jobId": "...",
+            "groupId": "...",
+            "files": [ { "r2_key": "..." }, ... ],
+            "callbackUrl": "..."
+        }
+    }
+    """
+    job_input = job.get("input") or {}
+    
+    job_id = job_input.get("jobId")
+    group_id = job_input.get("groupId")
+    files = job_input.get("files") or []
+    callback_url = job_input.get("callbackUrl")
+    # Secret optional for security
+    callback_secret = job_input.get("callbackSecret") 
 
-    print("📦 Job input:", json.dumps(data))
+    if not job_id or not group_id:
+        return {"error": "Missing jobId or groupId"}
+
+    print(f"🚀 Starting Handler for Job {job_id}, Group {group_id}")
 
     with tempfile.TemporaryDirectory() as workdir:
         input_dir = os.path.join(workdir, "input")
@@ -62,61 +92,83 @@ def handler(job):
         os.makedirs(input_dir, exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
-        # 下载 R2 原图
-        download_files(files, input_dir, skip_file_ids)
-
-        # 跑分组+HDR（保持原脚本逻辑）
+        # 1. Download
         try:
-            subprocess.check_call([
-                "/app/one_click_group_align_hdr.sh",
-                input_dir,
-                output_dir,
-            ])
+            download_files(files, input_dir)
+        except Exception as e:
+            return _send_error(callback_url, job_id, group_id, str(e))
+
+        # 2. Process (HDR)
+        # We assume the shell script aligns and merges ALL files in input_dir 
+        # into a single output or multiple outputs in output_dir.
+        # For a single group, we expect ONE main HDR output usually.
+        script_path = "/app/one_click_group_align_hdr.sh"
+        if not os.path.exists(script_path):
+             return _send_error(callback_url, job_id, group_id, "Worker script not found")
+
+        print("⚙️ Executing HDR script...")
+        try:
+            subprocess.check_call([script_path, input_dir, output_dir])
         except subprocess.CalledProcessError as e:
-            # 失败也回调
-            if callback_url:
-                headers = {
-                    "x-runpod-secret": callback_secret or "",
-                    "Content-Type": "application/json",
-                }
-                requests.post(callback_url, headers=headers, data=json.dumps({
-                    "jobId": job_id,
-                    "error": f"hdr failed: {e}"
-                }))
-            return {"ok": False, "error": str(e)}
+            print(f"❌ Processing failed: {e}")
+            return _send_error(callback_url, job_id, group_id, f"HDR script failed: {e}")
 
-        # 上传结果
-        uploads = upload_folder(output_dir, f"jobs/{job_id}")
+        # 3. Upload Results
+        # Find the JPG result. 
+        # We expect the script to produce something like `result.jpg` or `input_name_hdr.jpg`.
+        # We will upload ALL jpgs found in output_dir.
+        
+        uploaded_results = []
+        for root, _, out_files in os.walk(output_dir):
+            for name in out_files:
+                if name.lower().endswith('.jpg') or name.lower().endswith('.jpeg') or name.lower().endswith('.tif'):
+                    local_path = os.path.join(root, name)
+                    # Construct R2 Key: jobs/{jobId}/hdr/{groupId}/{name}
+                    target_key = f"jobs/{job_id}/hdr/{group_id}/{name}"
+                    upload_file(local_path, target_key)
+                    uploaded_results.append(target_key)
 
-        # 简单映射：每个输出文件都返回，供后端匹配
-        result_groups = []
-        for idx, item in enumerate(uploads):
-            result_groups.append({
-                "index": idx + 1,
-                "resultKey": item["key"],
-                "previewKey": item["key"],
-                "representativeId": None,
-            })
+        if not uploaded_results:
+             return _send_error(callback_url, job_id, group_id, "No HDR output produced")
 
-        # 回调
+        # 4. Success Callback
+        # We pick the first one as 'resultKey' if multiple (usually 1)
+        result_key = uploaded_results[0]
+        
+        payload = {
+            "jobId": job_id,
+            "groups": [{
+                "groupId": group_id, # Echo back
+                "resultKey": result_key,
+                "allUploads": uploaded_results
+            }],
+            "status": "success"
+        }
+        
+        print("✅ Finished. Sending callback...", payload)
         if callback_url:
-            headers = {
-                "x-runpod-secret": callback_secret or "",
-                "Content-Type": "application/json",
-            }
-            requests.post(callback_url, headers=headers, data=json.dumps({
+            try:
+                requests.post(callback_url, json=payload, timeout=10)
+            except Exception as e:
+                print(f"⚠️ Callback failed: {e}")
+
+        return payload
+
+def _send_error(url, job_id, group_id, error_msg):
+    print(f"❌ Reporting error: {error_msg}")
+    if url:
+        try:
+            requests.post(url, json={
                 "jobId": job_id,
-                "groups": result_groups,
-                "uploads": uploads,
-            }))
+                "groups": [{
+                    "groupId": group_id,
+                    "error": error_msg
+                }],
+                "error": error_msg
+            }, timeout=10)
+        except:
+            pass
+    return {"error": error_msg}
 
-    return {
-        "ok": True,
-        "message": "worker executed successfully",
-        "uploads": uploads,
-    }
-
-
-runpod.serverless.start({
-    "handler": handler
-})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})

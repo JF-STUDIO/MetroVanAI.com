@@ -247,5 +247,10 @@ export const jobService = {
   recharge: async (amount: number) => {
     const response = await api.post('/recharge', { amount });
     return response.data;
+  },
+
+  submitManifest: async (payload: { workflowId: string; projectName: string; groups: any[] }) => {
+    const response = await api.post('/jobs/submit-manifest', payload);
+    return response.data;
   }
 };

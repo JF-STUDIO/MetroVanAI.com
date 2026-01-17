@@ -9,6 +9,7 @@ import workflowRoutes from './routes/workflows.js';
 import adminRoutes from './routes/admin.js';
 import settingsRoutes from './routes/settings.js';
 import { createRedis } from './services/redis.js';
+import webhookRoutes from './routes/webhooks.js';
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -70,6 +71,7 @@ app.use('/api', jobRoutes);
 app.use('/api', workflowRoutes);
 app.use('/api', adminRoutes);
 app.use('/api', settingsRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 const inlineWorkerEnabled = process.env.ENABLE_INLINE_WORKER === 'true';
 console.log(`Inline worker enabled: ${inlineWorkerEnabled ? 'true' : 'false'}`);

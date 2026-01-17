@@ -5,6 +5,7 @@ import { jobService } from '../services/jobService';
 import { supabase } from '../services/supabaseClient';
 import axios from 'axios';
 import exifr from 'exifr';
+import { processManifestSubmission } from '../utils/manifestSubmission';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
   || (import.meta.env.DEV ? 'http://localhost:4000/api' : '/api');
@@ -1304,7 +1305,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     setPipelineProgress(10);
     const metaPromises = uploadImages.map(async (item) => {
       const meta = await readExifMetadata(item.file);
-      return { ...meta, id: item.id };
+      return { ...meta, id: item.id, file: item.file };
     });
 
     const metas = await Promise.all(metaPromises);
@@ -1368,39 +1369,58 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
       setPipelineProgress(0);
       setPreviewSummary(null);
       resetStreamState();
+
+      // 1. Local Grouping
       const groupingResult = await runGroupingWorker(groupingThresholdMs);
       const { groups, files } = groupingResult;
+
       if (!Array.isArray(groups) || groups.length === 0) {
         throw new Error('No groups detected. Check the file timestamps and try again.');
       }
       if (!Array.isArray(files) || files.length === 0) {
         throw new Error('No files processed. Please re-select your uploads.');
       }
+
       const pipelineGroups = buildPipelineGroups(groups, files);
 
       setPipelineItems(pipelineGroups);
       setImages(() => pipelineGroups.map(() => ({ status: 'pending' })));
-      setPipelineProgress(100);
       setGroupingComplete(true);
-      setJobStatus('input_resolved');
-      setJob(prev => (prev ? { ...prev, status: 'input_resolved', estimated_units: pipelineGroups.length } : prev));
+      setJobStatus('uploading'); // State transition for UI
+      setJob(prev => (prev ? { ...prev, status: 'uploading', estimated_units: pipelineGroups.length } : prev));
       groupingFilesRef.current = files;
       setGroupingDirty(false);
 
-      try {
-        await jobService.registerGroups(job.id, { files, groups });
-      } catch (err) {
-        setPipelineItems([]);
-        setPipelineProgress(null);
-        setGroupingComplete(false);
-        setJobStatus('idle');
-        throw err;
-      }
+      // 2. Upload & Submit
+      // Map to submission format
+      const submissionGroups = groups.map((g: any) => ({
+        id: g.id,
+        groupIndex: g.index,
+        files: (g.fileMetas || []).map((m: any) => ({
+          file: m.file,
+          id: m.id,
+          name: m.name || m.file?.name || 'unknown.raw',
+          size: m.size || m.file?.size || 0,
+          type: m.file?.type || 'application/octet-stream'
+        }))
+      }));
+
+      await processManifestSubmission(job.id, submissionGroups, (pct, status) => {
+        setPipelineProgress(pct);
+        if (status) pushNotice('info', status);
+      });
+
+      setPipelineProgress(100);
+      setJobStatus('hdr_processing'); // Or whatever the next state is
+      setJob(prev => (prev ? { ...prev, status: 'hdr_processing' } : prev));
+      pushNotice('success', 'Upload complete. Processing started.');
+
     } catch (err) {
+      console.error(err);
       if (err instanceof Error) {
-        pushNotice('error', `Grouping failed: ${err.message}`);
+        pushNotice('error', `Processing failed: ${err.message}`);
       } else {
-        pushNotice('error', 'An unknown grouping error occurred.');
+        pushNotice('error', 'An unknown error occurred.');
       }
       setJobStatus('idle');
       setUploadComplete(false);

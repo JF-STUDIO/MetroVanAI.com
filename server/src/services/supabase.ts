@@ -23,7 +23,7 @@ export const getSupabaseAdmin = () => {
 };
 
 // Main export proxy to keep compatibility with existing code imports
-export const supabaseAdmin = new Proxy({}, {
+export const supabaseAdmin = new Proxy({} as SupabaseClient, {
   get: (_target, prop) => {
     const instance = getSupabaseAdmin();
     return (instance as any)[prop];
