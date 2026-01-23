@@ -82,7 +82,7 @@ export const processManifestSubmission = async (
                     headers: {
                         'Content-Type': fileObj.type
                     },
-                    onUploadProgress: (progressEvent) => {
+                    onUploadProgress: (_progressEvent) => {
                         // We could track individual progress here
                     }
                 }).then(() => ({

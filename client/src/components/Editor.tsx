@@ -1,14 +1,35 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Workflow, User, Job, JobAsset, PipelineGroupItem } from '../types';
+import { Workflow, User, Job, PipelineGroupItem } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { jobService } from '../services/jobService';
 import { supabase } from '../services/supabaseClient';
 import axios from 'axios';
-import exifr from 'exifr';
 import { processManifestSubmission } from '../utils/manifestSubmission';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
   || (import.meta.env.DEV ? 'http://localhost:4000/api' : '/api');
+
+const PIPELINE_STAGES = new Set([
+  'reserved',
+  'input_resolved',
+  'preprocessing',
+  'hdr_processing',
+  'workflow_running',
+  'ai_processing',
+  'postprocess',
+  'packaging',
+  'zipping'
+]);
+
+const RAW_EXTENSIONS = new Set(['arw', 'cr2', 'cr3', 'nef', 'dng', 'rw2', 'orf', 'raf', 'raw']);
+const HDR_READY_STATUSES = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
+const loadExifr = (() => {
+  let cached: Promise<typeof import('exifr')> | null = null;
+  return () => {
+    if (!cached) cached = import('exifr');
+    return cached;
+  };
+})();
 
 // Props for the main component
 interface EditorProps {
@@ -49,6 +70,31 @@ type GalleryItem = {
     preview_url?: string | null;
     input_kind?: string | null;
   }[];
+};
+
+const mapUploadItem = (item: ImageItem): GalleryItem => ({
+  id: item.id,
+  label: item.file.name,
+  preview: item.preview,
+  status: item.status,
+  progress: item.progress,
+  stage: 'input'
+});
+
+const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || HDR_READY_STATUSES.has(item.status);
+const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
+
+const pickFramePreview = (
+  frames: PipelineGroupItem['frames'] | undefined,
+  representativeIndex?: number | null
+) => {
+  if (!frames || frames.length === 0) return null;
+  if (representativeIndex) {
+    const rep = frames.find((frame) => frame.order === representativeIndex);
+    if (rep?.preview_url) return rep.preview_url;
+  }
+  const fallback = frames.find((frame) => frame.preview_url)?.preview_url;
+  return fallback || null;
 };
 
 // The auto-playing, aspect-ratio-correct slider component
@@ -155,22 +201,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     cancelLabel?: string;
     onConfirm: () => void;
   } | null>(null);
-  const pipelineStages = new Set([
-    'reserved',
-    'input_resolved',
-    'preprocessing',
-    'hdr_processing',
-    'workflow_running',
-    'ai_processing',
-    'postprocess',
-    'packaging',
-    'zipping'
-  ]);
   const [resumeAttempted, setResumeAttempted] = useState(false);
-  const rawExtensions = new Set(['arw', 'cr2', 'cr3', 'nef', 'dng', 'rw2', 'orf', 'raf', 'raw']);
   const isRawFile = (file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
-    return ext ? rawExtensions.has(ext) : false;
+    return ext ? RAW_EXTENSIONS.has(ext) : false;
   };
   const isJpegFile = (file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
@@ -313,8 +347,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
   // Ultra-fast EXIF reader for grouping (based on the Python script logic)
   const readExifMetadata = async (file: File) => {
     try {
+      const exifrModule = await loadExifr();
+      const exifrLib: any = (exifrModule as any).default ?? exifrModule;
       // Read extended tags for smarter grouping
-      const tags = await exifr.parse(file, {
+      const tags = await exifrLib.parse(file, {
         pick: [
           'DateTimeOriginal', 'CreateDate', 'SubSecDateTimeOriginal',
           'ExposureTime', 'ShutterSpeedValue', 'ISO', 'FNumber', 'ApertureValue',
@@ -401,8 +437,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
 
   const createRawPreviewUrl = async (file: File) => {
     try {
+      const exifrModule = await loadExifr();
+      const exifrLib: any = (exifrModule as any).default ?? exifrModule;
       // Ensure we only extract the thumbnail, not the full image if possible
-      const thumb = await exifr.thumbnail(file);
+      const thumb = await exifrLib.thumbnail(file);
       if (!thumb) return null;
 
       // Setup an offscreen canvas (or regular canvas) to resize
@@ -434,19 +472,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     } catch (error) {
       return null;
     }
-  };
-
-  const pickFramePreview = (
-    frames: PipelineGroupItem['frames'] | undefined,
-    representativeIndex?: number | null
-  ) => {
-    if (!frames || frames.length === 0) return null;
-    if (representativeIndex) {
-      const rep = frames.find((frame) => frame.order === representativeIndex);
-      if (rep?.preview_url) return rep.preview_url;
-    }
-    const fallback = frames.find((frame) => frame.preview_url)?.preview_url;
-    return fallback || null;
   };
 
   const mergeFrames = (
@@ -1000,7 +1025,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
           const download = await jobService.getPresignedDownloadUrl(pipelineJob.id);
           setZipUrl(download?.url || null);
           setDownloadType(download?.type || null);
-        } else if (pipelineStages.has(pipelineJob.status)) {
         }
       } else {
         setPipelineItems([]);
@@ -1015,7 +1039,6 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
           const download = await jobService.getPresignedDownloadUrl(jobData.id);
           setZipUrl(download?.url || null);
           setDownloadType(download?.type || null);
-        } else if (pipelineStages.has(jobData.status)) {
         }
       }
     } catch (err) {
@@ -1080,7 +1103,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
       'completed',
       'canceled'
     ]);
-    const isProcessing = pipelineStages.has(jobStatus) && jobStatus !== 'input_resolved';
+    const isProcessing = PIPELINE_STAGES.has(jobStatus) && jobStatus !== 'input_resolved';
     if (!uploadAllowedStatuses.has(jobStatus) || isProcessing) {
       pushNotice('info', 'Processing is in progress. Create a new project to upload more files.');
       return;
@@ -1317,7 +1340,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     return { ...result, total: metas.length };
   };
 
-  const buildPipelineGroups = (groups: any[], files: any[]) => {
+  const buildPipelineGroups = (groups: any[]) => {
     const previewById = new Map(uploadImages.map((item) => [item.id, item.preview]));
     return groups.map((group: any) => {
       const fileIds = Array.isArray(group.fileIds) ? group.fileIds : [];
@@ -1381,7 +1404,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
         throw new Error('No files processed. Please re-select your uploads.');
       }
 
-      const pipelineGroups = buildPipelineGroups(groups, files);
+      const pipelineGroups = buildPipelineGroups(groups);
 
       setPipelineItems(pipelineGroups);
       setImages(() => pipelineGroups.map(() => ({ status: 'pending' })));
@@ -1574,7 +1597,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
       if (!Array.isArray(files) || files.length === 0) {
         throw new Error('No files processed. Please re-select your uploads.');
       }
-      const pipelineGroups = buildPipelineGroups(groups, files);
+      const pipelineGroups = buildPipelineGroups(groups);
       setPipelineItems(pipelineGroups);
       setImages(() => pipelineGroups.map(() => ({ status: 'pending' })));
       setPipelineProgress(100);
@@ -2000,7 +2023,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
       setUploadComplete(true);
       setJobStatus('hdr_processing');
       setJob((prev) => (prev ? { ...prev, status: 'hdr_processing' } : prev));
-      const profile = await jobService.getProfile();
+      await jobService.getProfile();
       await refreshUser();
       const balanceRow = Array.isArray(startResponse?.balance) ? startResponse.balance[0] : startResponse?.balance;
       if (balanceRow?.available_credits !== undefined) {
@@ -2109,27 +2132,34 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     })));
   };
 
-  const mapUploadItem = (item: ImageItem): GalleryItem => ({
-    id: item.id,
-    label: item.file.name,
-    preview: item.preview,
-    status: item.status,
-    progress: item.progress,
-    stage: 'input'
-  });
+  const uploadStats = useMemo(() => {
+    if (uploadImages.length === 0) {
+      return { uploadProgress: 0, uploadedReadyCount: 0, hasPendingUploads: false };
+    }
+    let totalProgress = 0;
+    let readyCount = 0;
+    let hasPending = false;
+    for (const img of uploadImages) {
+      totalProgress += img.progress;
+      if (img.progress >= 100) readyCount += 1;
+      if (img.status === 'pending' || img.status === 'uploading') {
+        hasPending = true;
+      }
+    }
+    return {
+      uploadProgress: Math.round(totalProgress / uploadImages.length),
+      uploadedReadyCount: readyCount,
+      hasPendingUploads: hasPending
+    };
+  }, [uploadImages]);
 
-  const hasPendingUploads = uploadImages.some((img) => img.status === 'pending' || img.status === 'uploading');
+  const { uploadProgress, uploadedReadyCount, hasPendingUploads } = uploadStats;
   const canEditGroups = groupingComplete && jobStatus === 'input_resolved' && !uploadComplete;
   const canRegroup = canEditGroups && uploadImages.length > 0;
   const showRawPreviews = jobStatus === 'idle' || jobStatus === 'draft';
   const showGroupingOnly = jobStatus === 'grouping' && pipelineItems.length === 0;
   const showUploadOnly = jobStatus === 'uploading' && pipelineItems.length === 0 && !uploadComplete;
   const showUploadNotice = jobStatus === 'uploading' && uploadImages.length > 0 && !uploadComplete;
-
-  const uploadProgress = uploadImages.length
-    ? Math.round(uploadImages.reduce((sum, img) => sum + img.progress, 0) / uploadImages.length)
-    : 0;
-  const uploadedReadyCount = uploadImages.filter((img) => img.progress >= 100).length;
   const isFinalizingUpload = jobStatus === 'uploading' && uploadImages.length > 0 && uploadProgress >= 100 && !uploadComplete;
   const displayUploadProgress = isFinalizingUpload ? 99 : uploadProgress;
 
@@ -2147,13 +2177,16 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     : 0;
 
   const previewInProgress = previewTotal > 0 && previewReady < previewTotal;
-  const processingActive = (pipelineStages.has(jobStatus) || jobStatus === 'analyzing') && jobStatus !== 'input_resolved';
+  const processingActive = (PIPELINE_STAGES.has(jobStatus) || jobStatus === 'analyzing') && jobStatus !== 'input_resolved';
   const hideGalleryUntilPreviewsDone = false;
   const serverSkippedIds = useMemo(() => {
-    const ids = pipelineItems
-      .filter((item) => item.status === 'skipped' || item.is_skipped)
-      .map((item) => item.id);
-    return new Set(ids);
+    const ids = new Set<string>();
+    for (const item of pipelineItems) {
+      if (item.status === 'skipped' || item.is_skipped) {
+        ids.add(item.id);
+      }
+    }
+    return ids;
   }, [pipelineItems]);
   const effectiveSkippedIds = useMemo(() => {
     const combined = new Set<string>(Array.from(serverSkippedIds));
@@ -2169,56 +2202,17 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
   const uploadedCount = previewSummary?.total ?? job?.original_filenames?.length ?? uploadImages.length;
   const uploadTotalCount = uploadImages.length;
   const pipelineIdSet = useMemo(() => new Set(pipelineItems.map((item) => item.id)), [pipelineItems]);
-  const hdrReadyStatuses = new Set(['preprocess_ok', 'hdr_ok', 'ai_ok']);
-  const isHdrReady = (item: PipelineGroupItem) => Boolean(item.hdr_url) || hdrReadyStatuses.has(item.status);
-  const isOutputReady = (item: PipelineGroupItem) => Boolean(item.output_url) || item.status === 'ai_ok';
-  const hdrReadyCount = pipelineItems.filter((item) => (
-    !effectiveSkippedIds.has(item.id) && (isHdrReady(item) || item.status === 'failed')
-  )).length;
+  const hdrReadyCount = useMemo(() => {
+    let count = 0;
+    for (const item of pipelineItems) {
+      if (effectiveSkippedIds.has(item.id)) continue;
+      if (isHdrReady(item) || item.status === 'failed') count += 1;
+    }
+    return count;
+  }, [pipelineItems, effectiveSkippedIds]);
   const hdrProgressValue = activeGroupsCount ? Math.round((hdrReadyCount / activeGroupsCount) * 100) : 0;
   const hdrProcessing = activeGroupsCount > 0 && hdrReadyCount < activeGroupsCount && processingActive;
   const canSelectGroups = jobStatus === 'input_resolved' && pipelineItems.length > 0;
-
-  const mapPipelineItem = (item: PipelineGroupItem): GalleryItem => {
-    const streamIndex = Math.max((item.group_index ?? 1) - 1, 0);
-    const streamImage = images[streamIndex];
-    const outputOverride = streamImage?.status === 'ready' ? streamImage.url : null;
-    const outputReady = Boolean(outputOverride) || isOutputReady(item);
-    const isSkipped = effectiveSkippedIds.has(item.id) || item.status === 'skipped' || item.is_skipped;
-    const groupType = item.group_type ?? null;
-    const framePreview = item.preview_url || pickFramePreview(item.frames, item.representative_index);
-    const preview = outputOverride || item.output_url || item.hdr_url || framePreview || '';
-    const stage: GalleryItem['stage'] = outputReady
-      ? 'output'
-      : isSkipped
-        ? 'input'
-        : item.status === 'ai_processing' || item.status === 'ai_ok'
-          ? 'ai'
-          : item.status === 'hdr_processing' || item.status === 'hdr_ok' || item.status === 'preprocess_ok'
-            ? 'hdr'
-            : 'input';
-    const status: GalleryItem['status'] =
-      item.status === 'failed'
-        ? 'failed'
-        : outputReady || isSkipped
-          ? 'done'
-          : 'processing';
-    const progress = status === 'done' || status === 'failed' ? 100 : 0;
-    return {
-      id: item.id,
-      label: item.output_filename || `Group ${item.group_index}`,
-      preview,
-      status,
-      progress,
-      stage,
-      error: item.last_error || null,
-      groupType,
-      groupSize: item.group_size ?? null,
-      representativeIndex: item.representative_index ?? null,
-      frames: item.frames,
-      isSkipped
-    };
-  };
 
   const refreshPipelineStatus = async (jobId: string) => {
     try {
@@ -2272,13 +2266,65 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
   };
 
   const showUploadPlaceholders = !hideGalleryUntilPreviewsDone && pipelineItems.length === 0 && uploadImages.length > 0;
-  const galleryItems = !hideGalleryUntilPreviewsDone && pipelineItems.length > 0
-    ? pipelineItems.map(mapPipelineItem)
-    : showUploadPlaceholders
-      ? uploadImages.map(mapUploadItem)
-      : showRawPreviews
-        ? uploadImages.filter((img) => !img.isRaw).map(mapUploadItem)
-        : [];
+  const galleryItems = useMemo(() => {
+    if (!hideGalleryUntilPreviewsDone && pipelineItems.length > 0) {
+      return pipelineItems.map((item) => {
+        const streamIndex = Math.max((item.group_index ?? 1) - 1, 0);
+        const streamImage = images[streamIndex];
+        const outputOverride = streamImage?.status === 'ready' ? streamImage.url : null;
+        const outputReady = Boolean(outputOverride) || isOutputReady(item);
+        const isSkipped = effectiveSkippedIds.has(item.id) || item.status === 'skipped' || item.is_skipped;
+        const groupType = item.group_type ?? null;
+        const framePreview = item.preview_url || pickFramePreview(item.frames, item.representative_index);
+        const preview = outputOverride || item.output_url || item.hdr_url || framePreview || '';
+        const stage: GalleryItem['stage'] = outputReady
+          ? 'output'
+          : isSkipped
+            ? 'input'
+            : item.status === 'ai_processing' || item.status === 'ai_ok'
+              ? 'ai'
+              : item.status === 'hdr_processing' || item.status === 'hdr_ok' || item.status === 'preprocess_ok'
+                ? 'hdr'
+                : 'input';
+        const status: GalleryItem['status'] =
+          item.status === 'failed'
+            ? 'failed'
+            : outputReady || isSkipped
+              ? 'done'
+              : 'processing';
+        const progress = status === 'done' || status === 'failed' ? 100 : 0;
+        return {
+          id: item.id,
+          label: item.output_filename || `Group ${item.group_index}`,
+          preview,
+          status,
+          progress,
+          stage,
+          error: item.last_error || null,
+          groupType,
+          groupSize: item.group_size ?? null,
+          representativeIndex: item.representative_index ?? null,
+          frames: item.frames,
+          isSkipped
+        };
+      });
+    }
+    if (showUploadPlaceholders) {
+      return uploadImages.map(mapUploadItem);
+    }
+    if (showRawPreviews) {
+      return uploadImages.filter((img) => !img.isRaw).map(mapUploadItem);
+    }
+    return [];
+  }, [
+    hideGalleryUntilPreviewsDone,
+    pipelineItems,
+    images,
+    effectiveSkippedIds,
+    showUploadPlaceholders,
+    uploadImages,
+    showRawPreviews
+  ]);
   const noticeTone = notice?.type === 'error'
     ? 'border-red-500/30 bg-red-500/10 text-red-200'
     : notice?.type === 'success'
@@ -2574,7 +2620,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
 
   // VIEW 3: Main Uploader & Editor
   const showGeneratingPreviews = !showUploadOnly && previewInProgress && pipelineItems.length === 0 && uploadImages.length === 0;
-  const showWaitingForResults = !showUploadOnly && !showGeneratingPreviews && galleryItems.length === 0 && pipelineStages.has(jobStatus);
+  const showWaitingForResults = !showUploadOnly && !showGeneratingPreviews && galleryItems.length === 0 && PIPELINE_STAGES.has(jobStatus);
   const showEmptyDropzone = !showUploadOnly && !showWaitingForResults && !showGeneratingPreviews && galleryItems.length === 0 && uploadImages.length === 0;
   const hasHiddenUploads = uploadImages.length > 0 && galleryItems.length === 0 && showRawPreviews;
   const showHdrProgress = !showUploadOnly && hdrProcessing;
@@ -2594,10 +2640,10 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
     }
   };
   return (
-    <div className="h-[calc(100vh-80px)] flex flex-col bg-[#050505]">
+    <div className="h-[calc(100vh-80px)] flex flex-col bg-page">
       <div className="glass border-b border-white/5 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button onClick={() => { setActiveTool(null); setUploadImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); setGroupingComplete(false); resetStreamState(); clearEditorState(); localStorage.removeItem('mvai:last_job'); }} className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center text-gray-400">
+          <button onClick={() => { setActiveTool(null); setUploadImages([]); setJob(null); setJobStatus('idle'); setProjectName(''); setPipelineItems([]); setPipelineProgress(null); setLightboxUrl(null); setShowProjectInput(false); setShowNewProjectForm(false); setProjectSearch(''); setUploadComplete(false); setGroupingComplete(false); resetStreamState(); clearEditorState(); localStorage.removeItem('mvai:last_job'); }} className="icon-btn">
             <i className="fa-solid fa-arrow-left"></i>
           </button>
           <div>
@@ -2611,13 +2657,13 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
                 </span>
               )}
               {showGroupingOnly && (
-                <span className="text-[9px] text-amber-300 font-bold">| Grouping… {groupingProgressValue}%</span>
+                <span className="text-[9px] text-amber-300 font-bold">| Grouping... {groupingProgressValue}%</span>
               )}
               {uploadComplete && jobStatus !== 'uploading' && (
                 <span className="text-[9px] text-emerald-400 font-bold">| Upload Complete</span>
               )}
               {showUploadNotice && (
-                <span className="text-[9px] text-amber-300 font-bold">| Uploading… please keep this page open</span>
+                <span className="text-[9px] text-amber-300 font-bold">| Uploading... please keep this page open</span>
               )}
               {previewInProgress && (
                 <span className="text-[9px] text-rose-300 font-bold">| Previews {previewReady}/{previewTotal}</span>
@@ -2678,21 +2724,21 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           {canDownload && (
-            <button onClick={() => { if (zipUrl) window.location.href = zipUrl }} className="px-8 py-2.5 rounded-full bg-green-500 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
+            <button onClick={() => { if (zipUrl) window.location.href = zipUrl }} className="btn-secondary px-5 py-2.5 rounded-full text-xs font-semibold uppercase tracking-[0.2em] flex items-center gap-2">
               {downloadLabel} <i className="fa-solid fa-file-zipper"></i>
             </button>
           )}
           {job?.workflow_id && (jobStatus === 'partial' || jobStatus === 'failed') && (
-            <button onClick={handleRetryMissing} className="px-6 py-2.5 rounded-full bg-white/10 text-white text-xs font-black uppercase tracking-widest flex items-center gap-2">
+            <button onClick={handleRetryMissing} className="btn-ghost px-5 py-2.5 rounded-full text-xs font-semibold uppercase tracking-[0.2em] flex items-center gap-2">
               Retry Missing <i className="fa-solid fa-rotate-right"></i>
             </button>
           )}
           <button
             onClick={canEnhance ? startEnhanceProcess : startBatchProcess}
             disabled={!canEnhance && !canUploadBatch}
-            className="px-8 py-2.5 rounded-full bg-indigo-500 text-white text-xs font-black uppercase tracking-widest disabled:opacity-30 flex items-center gap-2 transition"
+            className="btn-primary px-6 py-2.5 rounded-full text-xs font-semibold uppercase tracking-[0.2em] disabled:opacity-40 flex items-center gap-2 transition"
           >
             {canEnhance ? 'Enhance Listing' : canUploadBatch ? 'Generate Previews' : 'Processing...'}
             <i className="fa-solid fa-bolt-lightning"></i>
@@ -2715,7 +2761,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
                 {showGroupingOnly
                   ? `Grouping ${uploadTotalCount} files...`
                   : isFinalizingUpload
-                    ? 'Finalizing upload…'
+                    ? 'Finalizing upload...'
                     : `Uploading ${uploadedReadyCount}/${uploadTotalCount} files...`}
               </div>
               <div className="text-[10px] text-gray-500 uppercase tracking-widest">
@@ -2774,19 +2820,51 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            className={`flex flex-col items-center justify-center glass rounded-[3rem] border-dashed border-2 transition-colors min-h-[520px] ${isDragging ? 'border-indigo-500 bg-indigo-500/10' : 'border-white/5'}`}
+            className={`flex flex-col items-center justify-center glass rounded-[3rem] border-dashed border-2 transition-colors min-h-[520px] px-6 py-10 ${isDragging ? 'border-indigo-500 bg-white/5' : 'border-white/5'}`}
           >
-            <div className="text-center">
-              <i className="fa-solid fa-cloud-arrow-up text-4xl text-indigo-500 mb-6"></i>
-              <h3 className="text-2xl font-black text-white uppercase tracking-tighter">Drop your photos here</h3>
-              <p className="text-gray-500 text-sm mt-2">or</p>
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="mt-4 px-6 py-2 bg-white/10 text-white font-bold rounded-lg hover:bg-white/20 transition-colors"
-              >
-                Browse Files
-              </button>
-              <p className="text-xs text-gray-600 mt-6 font-mono">SUPPORTED: RAW, JPG, PNG</p>
+            <div className="w-full max-w-4xl text-center space-y-8">
+              <div className="inline-flex items-center justify-center">
+                <span className="pill">Quick start</span>
+              </div>
+              <div>
+                <h3 className="headline-font text-2xl md:text-3xl text-white">Drop your photos</h3>
+                <p className="text-sm text-gray-400 mt-2">Drag RAW or JPG brackets here, or browse to upload.</p>
+              </div>
+              <div className="grid md:grid-cols-3 gap-4 text-left">
+                <div className="step-card">
+                  <div className="flex items-center justify-between text-xs uppercase tracking-widest text-gray-400">
+                    <span>Step 1</span>
+                    <i className="fa-solid fa-cloud-arrow-up"></i>
+                  </div>
+                  <div className="mt-3 text-white font-semibold">Upload</div>
+                  <p className="text-xs text-gray-400 mt-2">We read EXIF and prep previews automatically.</p>
+                </div>
+                <div className="step-card">
+                  <div className="flex items-center justify-between text-xs uppercase tracking-widest text-gray-400">
+                    <span>Step 2</span>
+                    <i className="fa-solid fa-layer-group"></i>
+                  </div>
+                  <div className="mt-3 text-white font-semibold">Group</div>
+                  <p className="text-xs text-gray-400 mt-2">Review grouped brackets and adjust if needed.</p>
+                </div>
+                <div className="step-card">
+                  <div className="flex items-center justify-between text-xs uppercase tracking-widest text-gray-400">
+                    <span>Step 3</span>
+                    <i className="fa-solid fa-wand-magic-sparkles"></i>
+                  </div>
+                  <div className="mt-3 text-white font-semibold">Enhance</div>
+                  <p className="text-xs text-gray-400 mt-2">Run HDR + AI, then download results.</p>
+                </div>
+              </div>
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="btn-primary px-6 py-3 rounded-full text-xs font-semibold uppercase tracking-[0.2em]"
+                >
+                  Select files
+                </button>
+                <span className="text-xs text-gray-500 uppercase tracking-widest">Supported: RAW, JPG, PNG</span>
+              </div>
             </div>
           </div>
         ) : (
@@ -2799,7 +2877,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
             {previewInProgress && galleryItems.length > 0 && (
               <div className="text-xs text-gray-400 uppercase tracking-widest flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse"></span>
-                Generating previews… {previewReady} of {previewTotal} processed
+                Generating previews... {previewReady} of {previewTotal} processed
               </div>
             )}
             {pipelineItems.length > 0 && (
@@ -2881,7 +2959,7 @@ const Editor: React.FC<EditorProps> = ({ user, workflows }) => {
                     role="button"
                     tabIndex={0}
                     onClick={() => handleGallerySelect(img, idx)}
-                    className={`relative overflow-hidden rounded-2xl border transition-all bg-black/40 ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-white/5 hover:border-white/15'} ${isExcluded ? 'opacity-60' : ''}`}
+                    className={`cv-auto relative overflow-hidden rounded-2xl border transition-all bg-black/40 ${activeIndex === idx ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-white/5 hover:border-white/15'} ${isExcluded ? 'opacity-60' : ''}`}
                   >
                     {img.preview ? (
                       <img src={img.preview} className="w-full h-48 object-cover" loading="lazy" decoding="async" />

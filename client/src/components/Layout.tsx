@@ -11,66 +11,83 @@ interface LayoutProps {
 }
 
 const Layout: React.FC<LayoutProps> = ({ user, children, onLogout, onNavigate, currentView }) => {
+  const isPro = currentView === 'editor' || currentView === 'admin';
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className={`app-shell flex flex-col ${isPro ? 'theme-pro' : ''}`}>
       {/* Navigation */}
-      <nav className="sticky top-0 z-50 glass border-b border-white/10 px-6 py-4 flex items-center justify-between">
-        <div 
-          className="flex items-center gap-2 cursor-pointer"
+      <nav className="nav-shell sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+        <button
+          type="button"
+          className="flex items-center gap-3"
           onClick={() => onNavigate('home')}
+          aria-label="Go to home"
         >
-          <div className="w-10 h-10 gradient-btn rounded-xl flex items-center justify-center">
-            <i className="fa-solid fa-camera-retro text-white text-xl"></i>
+          <div
+            className={`w-10 h-10 rounded-2xl flex items-center justify-center border ${
+              isPro ? 'border-white/20 bg-white/10 text-white' : 'border-white/60 bg-white/70 text-ink'
+            }`}
+          >
+            <i className={`fa-solid fa-camera-retro text-base ${isPro ? 'text-white' : 'text-ink'}`}></i>
           </div>
-          <span className="text-xl font-bold tracking-tight">METROVAN<span className="text-indigo-400">AI</span></span>
-        </div>
+          <span className="text-lg font-semibold tracking-tight text-ink">Metrovan AI</span>
+        </button>
 
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-3">
           {user ? (
             <>
-              <div 
-                className={`cursor-pointer hover:text-indigo-400 transition ${currentView === 'editor' ? 'text-indigo-400' : ''}`}
+              <button
+                type="button"
+                className={`nav-link ${currentView === 'editor' ? 'nav-link-active' : ''}`}
                 onClick={() => onNavigate('editor')}
               >
                 Studio
-              </div>
-              <div 
-                className={`cursor-pointer hover:text-indigo-400 transition ${currentView === 'pricing' ? 'text-indigo-400' : ''}`}
+              </button>
+              <button
+                type="button"
+                className={`nav-link ${currentView === 'pricing' ? 'nav-link-active' : ''}`}
                 onClick={() => onNavigate('pricing')}
               >
                 Pricing
-              </div>
+              </button>
               {user.isAdmin && (
-                <div 
-                  className={`cursor-pointer hover:text-indigo-400 transition font-medium ${currentView === 'admin' ? 'text-indigo-400' : ''}`}
+                <button
+                  type="button"
+                  className={`nav-link ${currentView === 'admin' ? 'nav-link-active' : ''}`}
                   onClick={() => onNavigate('admin')}
                 >
                   Admin
-                </div>
+                </button>
               )}
-              <div className="flex items-center gap-3 pl-6 border-l border-white/10">
+              <div className="flex items-center gap-3 pl-4 nav-divider">
                 <div className="flex flex-col items-end">
-                  <span className="text-xs text-gray-400 font-bold uppercase tracking-widest">Balance</span>
-                  <span className="text-sm font-semibold text-white">
-                    <i className="fa-solid fa-bolt-lightning text-yellow-500 mr-1"></i>
-                    {user.points} Points
+                  <span className="text-[10px] text-muted font-semibold uppercase tracking-widest">Balance</span>
+                  <span className="balance-pill">
+                    <i className="fa-solid fa-bolt-lightning text-amber-500 mr-1"></i>
+                    {user.points} credits
                   </span>
                 </div>
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-xs font-bold uppercase">
+                <div
+                  className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold uppercase ${
+                    isPro ? 'bg-white/10 border border-white/20 text-white' : 'bg-white/70 border border-white/60 text-ink'
+                  }`}
+                >
                   {user.name.substring(0, 2)}
                 </div>
-                <button 
+                <button
+                  type="button"
                   onClick={onLogout}
-                  className="p-2 hover:bg-white/5 rounded-lg transition text-gray-400 hover:text-red-400"
+                  className="w-9 h-9 rounded-full btn-ghost flex items-center justify-center"
+                  aria-label="Sign out"
                 >
                   <i className="fa-solid fa-right-from-bracket"></i>
                 </button>
               </div>
             </>
           ) : (
-            <button 
+            <button
+              type="button"
               onClick={() => onNavigate('login')}
-              className="px-6 py-2 rounded-full border border-white/20 hover:bg-white/5 transition"
+              className="px-5 py-2 rounded-full btn-secondary text-sm font-semibold"
             >
               Sign In
             </button>
@@ -82,7 +99,7 @@ const Layout: React.FC<LayoutProps> = ({ user, children, onLogout, onNavigate, c
         {children}
       </main>
 
-      <footer className="py-8 border-t border-white/5 text-center text-gray-500 text-sm">
+      <footer className="footer-shell py-8 text-center text-sm">
         &copy; 2024 Metrovan AI. All rights reserved.
       </footer>
     </div>

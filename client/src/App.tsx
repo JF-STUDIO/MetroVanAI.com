@@ -1,7 +1,7 @@
 import React, { useState, useEffect, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import Layout from './components/Layout';
-import { User, Workflow } from './types';
+import { Workflow } from './types';
 import { supabase } from './services/supabaseClient';
 import { jobService } from './services/jobService';
 import { useAuth } from './contexts/AuthContext';
@@ -23,16 +23,11 @@ const App: React.FC = () => {
   const [resetPassword, setResetPassword] = useState('');
   const [resetConfirm, setResetConfirm] = useState('');
   const [resetReady, setResetReady] = useState(false);
-  // Local loading state for form actions
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
-
-  // Redirect logic or other side effects can go here
-  // Note: user loading is handled by authLoading from context, 
-  // but we also have local 'loading' for form submissions.
 
   useEffect(() => {
     if (user) {
@@ -159,25 +154,27 @@ const App: React.FC = () => {
 
   const loginView = (
     <div className="flex-1 flex items-center justify-center p-6">
-      <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
-        <div className="text-center mb-10">
-          <h2 className="text-3xl font-black mb-2 uppercase tracking-tighter">{isRegister ? 'Join Metrovan AI' : 'Welcome Back'}</h2>
-          <p className="text-gray-500">Professional architectural AI studio.</p>
+      <div className="apple-card w-full max-w-md p-10 rounded-[2rem]">
+        <div className="text-center mb-8">
+          <h2 className="headline-font text-3xl text-slate-900 mb-2">
+            {isRegister ? 'Create your Metrovan AI account' : 'Welcome back'}
+          </h2>
+          <p className="text-slate-500 text-sm">Sign in to launch your studio workflow.</p>
         </div>
         {(authError || authNotice) && (
-          <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs">
-            {authError && <div className="text-red-400">{authError}</div>}
-            {authNotice && <div className="text-emerald-300">{authNotice}</div>}
+          <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
+            {authError && <div className="text-red-500">{authError}</div>}
+            {authNotice && <div className="text-emerald-600">{authNotice}</div>}
           </div>
         )}
         <form onSubmit={handleAuth} className="space-y-6">
           {isRegister && (
             <div>
-              <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Full Name</label>
+              <label className="input-label">Full name</label>
               <input
                 type="text"
                 required
-                className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
+                className="input-field"
                 placeholder="Enter your name"
                 value={fullName}
                 onChange={e => setFullName(e.target.value)}
@@ -185,39 +182,62 @@ const App: React.FC = () => {
             </div>
           )}
           <div>
-            <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Email Address</label>
-            <input type="email" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4" placeholder="Enter your email" value={email} onChange={e => setEmail(e.target.value)} />
+            <label className="input-label">Email address</label>
+            <input
+              type="email"
+              required
+              className="input-field"
+              placeholder="Enter your email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+            />
           </div>
           <div>
-            <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Password</label>
-            <input type="password" required className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4" placeholder="••••••••" value={password} onChange={e => setPassword(e.target.value)} />
+            <label className="input-label">Password</label>
+            <input
+              type="password"
+              required
+              className="input-field"
+              placeholder="********"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+            />
             {isRegister && (
-              <p className="mt-2 text-[11px] text-gray-500">
+              <p className="mt-2 text-[11px] text-slate-500">
                 Must include at least one letter and one symbol.
               </p>
             )}
           </div>
-          <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg">
-            {isRegister ? 'Create Account' : 'Sign In'}
+          <button className="w-full py-4 btn-primary rounded-full text-xs font-semibold uppercase tracking-[0.2em]">
+            {isRegister ? 'Create account' : 'Sign in'}
           </button>
         </form>
-        <div className="mt-8 text-center text-sm text-gray-500">
+        <div className="mt-8 text-center text-sm text-slate-500">
           {!isRegister && (
-            <button onClick={() => { setIsResetting(true); setAuthError(null); setAuthNotice(null); }} className="text-indigo-400 font-bold hover:underline">
+            <button
+              onClick={() => { setIsResetting(true); setAuthError(null); setAuthNotice(null); }}
+              className="text-blue-600 font-semibold hover:underline"
+            >
               Forgot password?
             </button>
           )}
           {isRegister ? (
             <>
               {' '}Already have an account?
-              <button onClick={() => { setIsRegister(false); setAuthError(null); setAuthNotice(null); }} className="ml-1 text-indigo-400 font-bold hover:underline">
-                Sign In
+              <button
+                onClick={() => { setIsRegister(false); setAuthError(null); setAuthNotice(null); }}
+                className="ml-1 text-blue-600 font-semibold hover:underline"
+              >
+                Sign in
               </button>
             </>
           ) : (
             <>
               {" Don't have an account?"}
-              <button onClick={() => { setIsRegister(true); setAuthError(null); setAuthNotice(null); }} className="ml-1 text-indigo-400 font-bold hover:underline">
+              <button
+                onClick={() => { setIsRegister(true); setAuthError(null); setAuthNotice(null); }}
+                className="ml-1 text-blue-600 font-semibold hover:underline"
+              >
                 Create one
               </button>
             </>
@@ -229,34 +249,37 @@ const App: React.FC = () => {
 
   const resetRequestView = (
     <div className="flex-1 flex items-center justify-center p-6">
-      <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl text-center">
-        <h2 className="text-2xl font-black mb-2 uppercase tracking-tight">Reset Password</h2>
-        <p className="text-sm text-gray-500 mb-8">We’ll send you a reset link.</p>
+      <div className="apple-card w-full max-w-md p-10 rounded-[2rem] text-center">
+        <h2 className="headline-font text-2xl text-slate-900 mb-2">Reset password</h2>
+        <p className="text-sm text-slate-500 mb-8">We will send you a reset link.</p>
         {(authError || authNotice) && (
-          <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs text-left">
-            {authError && <div className="text-red-400">{authError}</div>}
-            {authNotice && <div className="text-emerald-300">{authNotice}</div>}
+          <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-left">
+            {authError && <div className="text-red-500">{authError}</div>}
+            {authNotice && <div className="text-emerald-600">{authNotice}</div>}
           </div>
         )}
         <form onSubmit={handleResetRequest} className="space-y-6">
           <div>
-            <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Email Address</label>
+            <label className="input-label">Email address</label>
             <input
               type="email"
               required
-              className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
+              className="input-field"
               placeholder="Enter your email"
               value={resetEmail || email}
               onChange={e => setResetEmail(e.target.value)}
             />
           </div>
-          <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg">
-            Send Reset Link
+          <button className="w-full py-4 btn-primary rounded-full text-xs font-semibold uppercase tracking-[0.2em]">
+            Send reset link
           </button>
         </form>
-        <div className="mt-8 text-sm text-gray-500">
-          <button onClick={() => { setIsResetting(false); setAuthError(null); setAuthNotice(null); }} className="text-indigo-400 font-bold hover:underline">
-            Back to Sign In
+        <div className="mt-8 text-sm text-slate-500">
+          <button
+            onClick={() => { setIsResetting(false); setAuthError(null); setAuthNotice(null); }}
+            className="text-blue-600 font-semibold hover:underline"
+          >
+            Back to sign in
           </button>
         </div>
       </div>
@@ -265,55 +288,55 @@ const App: React.FC = () => {
 
   const authCallbackView = (
     <div className="flex-1 flex items-center justify-center p-6">
-      <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl text-center">
-        <h2 className="text-2xl font-black mb-3 uppercase tracking-tight">Verifying Email</h2>
-        <p className="text-sm text-gray-400">Please wait while we confirm your account...</p>
+      <div className="apple-card w-full max-w-md p-10 rounded-[2rem] text-center">
+        <h2 className="headline-font text-2xl text-slate-900 mb-3">Verifying email</h2>
+        <p className="text-sm text-slate-500">Please wait while we confirm your account.</p>
       </div>
     </div>
   );
 
   const resetPasswordView = (
     <div className="flex-1 flex items-center justify-center p-6">
-      <div className="glass w-full max-w-md p-10 rounded-[2.5rem] border border-white/10 shadow-2xl">
+      <div className="apple-card w-full max-w-md p-10 rounded-[2rem]">
         <div className="text-center mb-8">
-          <h2 className="text-2xl font-black mb-2 uppercase tracking-tight">Set New Password</h2>
-          <p className="text-sm text-gray-500">Choose a strong password to continue.</p>
+          <h2 className="headline-font text-2xl text-slate-900 mb-2">Set a new password</h2>
+          <p className="text-sm text-slate-500">Choose a strong password to continue.</p>
         </div>
         {(authError || authNotice) && (
-          <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs">
-            {authError && <div className="text-red-400">{authError}</div>}
-            {authNotice && <div className="text-emerald-300">{authNotice}</div>}
+          <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
+            {authError && <div className="text-red-500">{authError}</div>}
+            {authNotice && <div className="text-emerald-600">{authNotice}</div>}
           </div>
         )}
         {!resetReady ? (
-          <div className="text-center text-sm text-gray-500">Validating reset link...</div>
+          <div className="text-center text-sm text-slate-500">Validating reset link...</div>
         ) : (
           <form onSubmit={handlePasswordUpdate} className="space-y-6">
             <div>
-              <label className="block text-xs font-bold text-gray-500 uppercase mb-2">New Password</label>
+              <label className="input-label">New password</label>
               <input
                 type="password"
                 required
-                className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
-                placeholder="••••••••"
+                className="input-field"
+                placeholder="********"
                 value={resetPassword}
                 onChange={e => setResetPassword(e.target.value)}
               />
-              <p className="mt-2 text-[11px] text-gray-500">Must include at least one letter and one symbol.</p>
+              <p className="mt-2 text-[11px] text-slate-500">Must include at least one letter and one symbol.</p>
             </div>
             <div>
-              <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Confirm Password</label>
+              <label className="input-label">Confirm password</label>
               <input
                 type="password"
                 required
-                className="w-full bg-white/5 border border-white/10 rounded-2xl px-5 py-4"
-                placeholder="••••••••"
+                className="input-field"
+                placeholder="********"
                 value={resetConfirm}
                 onChange={e => setResetConfirm(e.target.value)}
               />
             </div>
-            <button className="w-full py-4 gradient-btn rounded-2xl font-black uppercase tracking-widest text-white shadow-lg">
-              Update Password
+            <button className="w-full py-4 btn-primary rounded-full text-xs font-semibold uppercase tracking-[0.2em]">
+              Update password
             </button>
           </form>
         )}
@@ -322,7 +345,7 @@ const App: React.FC = () => {
   );
 
   const routeFallback = (
-    <div className="flex-1 flex items-center justify-center py-16 text-gray-500">Loading...</div>
+    <div className="flex-1 flex items-center justify-center py-16 text-slate-500">Loading...</div>
   );
 
   useEffect(() => {
@@ -379,7 +402,7 @@ const App: React.FC = () => {
     };
   }, [location.pathname]);
 
-  if (authLoading) return <div className="h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
+  if (authLoading) return <div className="h-screen flex items-center justify-center text-slate-500">Loading...</div>;
 
   const currentView = (() => {
     const path = location.pathname;
@@ -431,3 +454,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

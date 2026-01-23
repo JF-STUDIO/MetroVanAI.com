@@ -249,7 +249,7 @@ export const jobService = {
     return response.data;
   },
 
-  submitManifest: async (payload: { workflowId: string; projectName: string; groups: any[] }) => {
+  submitManifest: async (payload: { jobId?: string; workflowId: string; projectName: string; groups: any[] }) => {
     const response = await api.post('/jobs/submit-manifest', payload);
     return response.data;
   }

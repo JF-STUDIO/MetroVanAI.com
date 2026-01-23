@@ -23,9 +23,12 @@ export const getSupabaseAdmin = () => {
 };
 
 // Main export proxy to keep compatibility with existing code imports
-export const supabaseAdmin = new Proxy({} as SupabaseClient, {
+// Main export proxy to keep compatibility with existing code imports
+// We use a Proxy to enforce lazy initialization
+export const supabaseAdmin = new Proxy({} as any, {
   get: (_target, prop) => {
     const instance = getSupabaseAdmin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (instance as any)[prop];
   }
-});
+}) as SupabaseClient;
